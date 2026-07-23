@@ -5,11 +5,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { SchwabActivityStream, type ActivityBatch } from "./activity_stream.ts";
 import { SchwabTokenProvider } from "./auth.ts";
 import { PriorityGate, PriorityWriter, type Priority } from "./priority_runtime.ts";
+import { SchwabRestClient } from "./schwab_client.ts";
+import { SchwabApiError } from "../vendor/schwab-api-nodejs/src/utils/errors.ts";
 type Json = Record<string, any>;
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
-const apiBase = "https://api.schwabapi.com";
 const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
 const readOnly = process.argv.includes("--read-only");
 const once = process.argv.includes("--once");
@@ -73,6 +74,7 @@ class RequestBudget {
 
 const tokens = new SchwabTokenProvider(stamp);
 const budget = new RequestBudget();
+const client = new SchwabRestClient();
 
 async function api(
   path: string,
@@ -81,25 +83,16 @@ async function api(
 ): Promise<{ body: any; headers: Headers }> {
   await budget.admit(priority);
   const token = await tokens.get();
-  const response = await fetch(`${apiBase}${path}`, {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${token}`,
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
-      ...(init.headers ?? {}),
-    },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (response.status === 429) budget.rateLimited(response.headers.get("retry-after"));
-  if (response.status === 401) void tokens.get(true);
-  const text = await response.text();
-  let body: any = null;
-  if (text) {
-    try { body = JSON.parse(text); } catch { body = null; }
+  try {
+    return await client.request<any>(path, init, token);
+  } catch (error) {
+    if (error instanceof SchwabApiError) {
+      if (error.status === 429) budget.rateLimited(error.headers["retry-after"] ?? null);
+      if (error.status === 401) void tokens.get(true);
+      throw new Error(`SCHWAB_HTTP_${error.status}`);
+    }
+    throw error;
   }
-  if (!response.ok) throw new Error(`SCHWAB_HTTP_${response.status}`);
-  return { body, headers: response.headers };
 }
 
 const writer = new PriorityWriter(stamp);
@@ -314,6 +307,7 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
 }
 
 async function cancelOrder(key: string, orderIdValue: string): Promise<void> {
+  if (readOnly) return;
   const path = `/trader/v1/accounts/${accountHash}/orders/${orderIdValue}`;
   await evidence(key, "DELETE", path, {});
   try {
@@ -408,34 +402,10 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
 }
 
 function handleAccountActivity(batch: ActivityBatch): void {
-  let directFills = 0;
-  let requiresRest = !batch.complete;
-  for (const hint of batch.hints) {
-    const partial = hint.status === "PARTIALLY_FILLED";
-    const filled = hint.status === "FILLED" || hint.status.endsWith("_FILLED");
-    if (!partial && !filled) continue;
-    const local = orders.find((order) => orderId(order) === hint.orderId);
-    if (!local) {
-      requiresRest = true;
-      continue;
-    }
-    const nextFilled = hint.filledQuantity ?? (filled ? quantity(local) : null);
-    if (nextFilled === null || !Number.isFinite(nextFilled)) {
-      requiresRest = true;
-      continue;
-    }
-    const previousFilled = Number(local.filledQuantity ?? 0);
-    local.status = partial ? "PARTIALLY_FILLED" : "FILLED";
-    local.filledQuantity = Math.max(previousFilled, nextFilled);
-    if (local.filledQuantity > previousFilled) directFills += 1;
-  }
-  if (directFills > 0) {
-    trackInventoryFillDeltas();
-    detectFills();
-    adoptSells();
-    stamp(`ACCT_ACTIVITY信息完整，直接确认成交并处理，无REST请求 fills=${directFills}`);
-  }
-  if (requiresRest) scheduleActivityRestConfirmation();
+  // Stream payloads are hints only. The REST order snapshot remains the sole
+  // authority for fills, terminal state, and any later broker write.
+  stamp(`ACCT_ACTIVITY signal received hints=${batch.hints.length} complete=${batch.complete}; scheduling REST reconciliation`);
+  scheduleActivityRestConfirmation();
 }
 
 function scheduleActivityRestConfirmation(): void {

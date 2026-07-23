@@ -6,13 +6,15 @@
     "start": "node src/main.ts",
     "auth:login": "node src/auth_cli.ts login",
     "auth:status": "node src/auth_cli.ts status",
-    "check": "node --check src/main.ts && node --check src/auth.ts && node --check src/auth_cli.ts"
+    "check": "node --check src/main.ts && node --check src/auth.ts && node --check src/auth_cli.ts && node --check src/schwab_client.ts",
+    "test": "node --test test/schwab_client.test.ts"
   },
   "engines": {
     "node": ">=24"
   },
   "dependencies": {
-    "ws": "^8.21.1"
+    "ws": "^8.21.1",
+    "zod": "^4.1.9"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1"

@@ -1,9 +1,9 @@
 import { performance } from 'node:perf_hooks';
 import { ZodError, type ZodType } from 'zod';
-import { SchwabApiError } from './errors.js';
-import { Logger, createConsoleLogger, withDuration } from './logger.js';
-import { redactHeaders } from './redact.js';
-import { DEFAULT_USER_AGENT } from './version.js';
+import { SchwabApiError } from './errors.ts';
+import { type Logger, createConsoleLogger, withDuration } from './logger.ts';
+import { redactHeaders } from './redact.ts';
+import { DEFAULT_USER_AGENT } from './version.ts';
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS';
 
@@ -76,7 +76,15 @@ export interface HttpClientConfig {
   retryConfig?: RetryConfig;
   /** 全局重试事件回调 */
   onRetry?: (event: RetryEvent) => void;
+  /** Return response metadata for integrations that need the broker Location header. */
+  includeResponseMetadata?: boolean;
 }
+
+export type HttpResponse<T> = {
+  body: T;
+  headers: Headers;
+  status: number;
+};
 
 export interface RequestOptions<T = unknown> {
   /** 覆盖默认 HTTP 方法 */
@@ -389,7 +397,7 @@ export class HttpClient {
             attempt: attemptNumber,
             ...withDuration(startTime),
           });
-          return undefined as T;
+          return this.withMetadata(undefined as T, response, opts);
         }
 
         const contentType = response.headers.get('content-type') ?? '';
@@ -415,7 +423,7 @@ export class HttpClient {
 
         if (opts.schema) {
           try {
-            return opts.schema.parse(result);
+            return this.withMetadata(opts.schema.parse(result), response, opts);
           } catch (error) {
             if (error instanceof ZodError) {
               this.logger.error('HTTP 响应验证失败', {
@@ -431,13 +439,26 @@ export class HttpClient {
           }
         }
 
-        return result as T;
+        return this.withMetadata(result as T, response, opts);
       }
 
       throw new Error('HTTP request exceeded maximum retry attempts');
     } finally {
       abortResources?.cleanup();
     }
+  }
+
+  /** Preserve response headers/status for callers needing the broker order ID. */
+  async requestWithResponse<T>(path: string, options?: RequestOptions<T>): Promise<HttpResponse<T>> {
+    return await this.request<HttpResponse<T>>(path, {
+      ...(options ?? {}),
+      includeResponseMetadata: true,
+    });
+  }
+
+  private withMetadata<T>(body: T, response: Response, options: RequestOptions<unknown>): T {
+    if (!options.includeResponseMetadata) return body;
+    return { body, headers: new Headers(response.headers), status: response.status } as T;
   }
 
   /**
