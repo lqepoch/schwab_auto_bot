@@ -1,0 +1,20 @@
+{
+  "name": "schwab_auto_bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.ts",
+    "auth:login": "node src/auth_cli.ts login",
+    "auth:status": "node src/auth_cli.ts status",
+    "check": "node --check src/main.ts && node --check src/auth.ts && node --check src/auth_cli.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  }
+}
