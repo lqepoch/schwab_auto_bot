@@ -1,7 +1,7 @@
 export const FIXED_PRICE_MAX_ACTIVE_ORDERS = 1;
 export const FIXED_PRICE_STARTUP_FILL_GRACE_MS = 60_000;
 export const STALE_ORDER_RECREATE_AGE_MS = 90_000;
-export const STALE_ORDER_RECREATE_COOLDOWN_MS = 15_000;
+export const STALE_ORDER_RECREATE_RETRY_MS = 10_000;
 
 export function mayReplenishFixedPrice(activeOpeningOrderCount: number): boolean {
   return activeOpeningOrderCount < FIXED_PRICE_MAX_ACTIVE_ORDERS;

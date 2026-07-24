@@ -129,7 +129,7 @@ With `--repeat-buy-at-order-price`, the bot disables only price exploration, gen
 
 每个 0DTE 垂直组合都有独立、持久化的卖出评估 worker，不会被其他组合的卖出动作阻塞。每次 worker 唤醒都会先用新鲜的持仓快照核对该组合可平数量；账户级持仓读取最多在 1 秒内合并一次，不会改变各组的独立触发与写入决策。倒计时只从 Schwab 确认的开仓 `FILLED` 订单的 `closeTime` 开始；发现仓位、工作买单或缺少确认成交时间均不会启动 30 秒倒计时。该组最后一次完整买入成交会重置 30 秒空窗倒计时；连续 30 秒没有新的买入成交且有仓位时，worker 挂一张数量等于全部可平仓仓位的卖单。某组合可平仓仓位达到 5 张时不等待倒计时，立即触发全仓卖出。每组同时最多保留一张活动卖单，且每次刷新都会把数量替换为最新可平仓仓位。
 
-卖单价格固定为 0.99。正常刷新间隔为 8 秒，每个策略由自己的定时器维持；全局 5 秒发现循环只创建新 worker，绝不会重置已有策略的刷新或重试时间。卖出 Replace、无工作卖单的 Submit、以及老卖单取消后重建，在真正 Preview 前都会用统一的账户级持仓快照重算可平数量；同一秒内所有策略和排队写入共用一次持仓 REST 读取，而不是每张卖单额外请求。卖出提交在入队、必要的完整订单对账之后、以及真正 Preview 前都会重新确认该策略没有工作卖单；同一策略的提交任务也只能单飞，因此延迟 REST 快照或旧队列任务不会创建重复卖单。若 Schwab Preview 拒绝同一卖单更新，程序会冷却该精确 Replace 并记入 `exit.preview-retry-deferred`，避免反复无效 Preview 耗尽配额；但已工作至少 90 秒且是全局最老的卖单会立即改走取消→完整订单对账→共享持仓重算→Preview→新提交，避免因原地 Replace 被拒而长期冻结。期间其他策略的卖单和新成交补买仍保持独立运行。程序会保存最近的组合模板至 `.state/exit-templates.json`，因此热切换后仍能为已有仓位恢复独立卖出 worker。
+卖单价格固定为 0.99。正常刷新间隔为 8 秒，每个策略由自己的定时器维持；全局 5 秒发现循环只创建新 worker，绝不会重置已有策略的刷新或重试时间。卖出 Replace、无工作卖单的 Submit、以及老卖单取消后重建，在真正 Preview 前都会用统一的账户级持仓快照重算可平数量；同一秒内所有策略和排队写入共用一次持仓 REST 读取，而不是每张卖单额外请求。卖出提交在入队、必要的完整订单对账之后、以及真正 Preview 前都会重新确认该策略没有工作卖单；同一策略的提交任务也只能单飞，因此延迟 REST 快照或旧队列任务不会创建重复卖单。若 Schwab Preview 拒绝同一卖单更新，程序会冷却该精确 Replace 并记入 `exit.preview-retry-deferred`，避免反复无效 Preview 耗尽配额；但每张已工作至少 90 秒的卖单都有独立的 10 秒重建重试周期：取消→完整订单对账→共享持仓重算→Preview→新提交。不同策略可并发准备，最终 broker 写入仍保持单串行以隔离未知写入结果。期间其他策略的卖单和新成交补买仍保持独立运行。程序会保存最近的组合模板至 `.state/exit-templates.json`，因此热切换后仍能为已有仓位恢复独立卖出 worker。
 
 如果 Schwab 对新的买入 `Preview` 明确返回资金、现金或购买力不足，程序会暂停该组买入/买单刷新并先进入 15 秒流动性卖出倒计时；倒计时结束后以全仓卖单启动，并以 5 秒间隔强制刷新两轮，随后恢复正常 8 秒节奏。卖出写入优先于买入和买单刷新。该触发及每轮结果会写入执行审计日志中的 `exit.liquidity-*`、`exit.worker-*` 与 `exit.gate` 事件。
 
@@ -172,11 +172,12 @@ sending an identical Replace that Schwab rejects.  It still replaces an exit
 when any of those values differs.
 
 Working opening orders continue to use native Schwab Replace and are never
-canceled by maintenance. Only closing orders that remain working for at least 90 seconds may be
-recreated. The oldest eligible closing order is selected one at a time, with a
-15-second global cooldown: cancel, full REST reconciliation, verify no working
-order remains for that strategy, then Preview and submit. Working opening
-orders are never canceled by this maintenance path.
+canceled by maintenance. Each closing order that remains working for at least
+90 seconds has its own 10-second guarded recreate retry: cancel, full REST
+reconciliation, verify no working order remains for that strategy, then Preview
+and submit. Eligible exits prepare concurrently, but the final broker write
+remains serialized for UNKNOWN-result safety. Working opening orders are never
+canceled by this maintenance path.
 
 ```powershell
 npm run check
