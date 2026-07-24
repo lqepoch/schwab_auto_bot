@@ -799,6 +799,12 @@ function reconcileExplorerSnapshot(): void {
     liveByGroup.set(meta.key, ids);
   }
   for (const groupKey of explorer.groupKeys()) explorer.reconcileWorkingBrokerOrders(groupKey, liveByGroup.get(groupKey) ?? new Set());
+  // A full broker response is the authority. Recalculate eligibility from it;
+  // do not infer current work from a previous snapshot delta.
+  if (policy.repeatBuyAtOrderPrice && fixedPriceRefreshRoundActive) {
+    for (const order of orders) queueFixedPriceRefresh(order, "full-order-reconciliation");
+  }
+  reconcileCurrentExitStrategies();
   persistExplorer();
 }
 
@@ -855,6 +861,41 @@ function activeOpeningOrders(groupKey: string): Json[] {
     return working.has(String(order.status)) && meta?.opening && meta.key === groupKey
       && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
   }).sort((left, right) => Number(left.price) - Number(right.price) || eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)));
+}
+
+function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-order-reconciliation"): void {
+  const meta = managedOpening(candidate);
+  const id = orderId(candidate);
+  if (
+    !meta || !working.has(String(candidate.status))
+    || orderId(activeOpeningOrders(meta.key)[0] ?? {}) !== id
+  ) return;
+  executionJournal.record("fixed-price-cycle.refresh-queued", { strategy: meta.key, orderId: id, source });
+  writer.enqueue({
+    key: `fixed-price-cycle-refresh:${id}`,
+    priority: 2,
+    run: async () => {
+      if (stopping || !policy.isExecutionWindowOpen()) return;
+      const current = orders.find((order) => orderId(order) === id);
+      if (!current || !working.has(String(current.status)) || !managedOpening(current)) return;
+      await fixedPriceRefreshPacer.admit(budget.fixedPriceRefreshIntervalMs());
+      const latest = orders.find((order) => orderId(order) === id);
+      if (!latest || !working.has(String(latest.status)) || !managedOpening(latest)) return;
+      const payload = payloadFrom(latest, 1, false, Math.round(Number(latest.price) * 100));
+      const replacement = await writeOrder(
+        `fixed-price-cycle-refresh:${id}:${Date.now()}`,
+        "PUT",
+        `/trader/v1/accounts/${accountHash}/orders/${id}`,
+        payload,
+        2,
+      );
+      applyLocalReplace(id, payload, replacement);
+      stamp(`FIXED_PRICE_CYCLE_REPLACE sourceOrder=${id} price=${Number(latest.price).toFixed(2)} replacement=${replacement}`);
+      executionJournal.record("fixed-price-cycle.order-replaced", {
+        sourceOrder: orderAuditData(latest), replacementOrderId: replacement, order: payloadAuditData(payload),
+      });
+    },
+  });
 }
 
 function hasExitPriority(groupKey: string): boolean {
@@ -1134,32 +1175,7 @@ async function fixedPriceRefreshRound(): Promise<void> {
   }));
   for (const candidate of candidates) {
     if (stopping) break;
-    const id = orderId(candidate);
-    writer.enqueue({
-      key: `fixed-price-cycle-refresh:${id}`,
-      priority: 2,
-      run: async () => {
-        if (stopping || !policy.isExecutionWindowOpen()) return;
-        const current = orders.find((order) => orderId(order) === id);
-        if (!current || !working.has(String(current.status)) || !managedOpening(current)) return;
-        await fixedPriceRefreshPacer.admit(budget.fixedPriceRefreshIntervalMs());
-        const latest = orders.find((order) => orderId(order) === id);
-        if (!latest || !working.has(String(latest.status)) || !managedOpening(latest)) return;
-        const payload = payloadFrom(latest, 1, false, Math.round(Number(latest.price) * 100));
-        const replacement = await writeOrder(
-          `fixed-price-cycle-refresh:${id}:${Date.now()}`,
-          "PUT",
-          `/trader/v1/accounts/${accountHash}/orders/${id}`,
-          payload,
-          2,
-        );
-        applyLocalReplace(id, payload, replacement);
-        stamp(`FIXED_PRICE_CYCLE_REPLACE sourceOrder=${id} price=${Number(latest.price).toFixed(2)} replacement=${replacement}`);
-        executionJournal.record("fixed-price-cycle.order-replaced", {
-          sourceOrder: orderAuditData(latest), replacementOrderId: replacement, order: payloadAuditData(payload),
-        });
-      },
-    });
+    queueFixedPriceRefresh(candidate, "round-start");
   }
   await wait(policy.roundCooldownMs);
   } finally {
@@ -1658,6 +1674,17 @@ function evaluateExits(forceStartup = false): void {
   if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
   for (const [strategy, template] of exitTemplates()) {
     scheduleExitWorker(strategy, template, Date.now(), forceStartup ? "startup-recovery" : "discovery-round");
+  }
+}
+
+function reconcileCurrentExitStrategies(): void {
+  if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
+  for (const [strategy, template] of exitTemplates()) {
+    // Keep a live strategy's own timer intact. A current full-order response
+    // only starts a worker for a strategy that is not already being watched.
+    if (!exitWorkerTimers.has(strategy) && !evaluatingExitStrategies.has(strategy)) {
+      scheduleExitWorker(strategy, template, Date.now(), "full-order-reconciliation");
+    }
   }
 }
 
