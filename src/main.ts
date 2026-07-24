@@ -251,12 +251,14 @@ let exitPositionSnapshotPending: Promise<{ epoch: number; positions: Map<string,
 let exitPositionSnapshotEpoch = 0;
 const previewRejectedUntil = new Map<string, number>();
 const reportedPolicyAlerts = new Set<string>();
+const REFILL_WRITE_PRIORITY_SETTLEMENT_MS = 5_000;
 const explorer = await loadExplorer();
 const fixedPriceCycleConsumedFills = await loadFixedPriceCycle();
 // A strategy has at most one fixed-price opening order.  Reserve its refill
 // slot before Preview so an activity confirmation and a full snapshot cannot
 // race each other into duplicate buy submissions.
 const fixedPriceReplenishmentGuard = new FixedPriceReplenishmentGuard();
+let replenishmentWritePriorityUntil = 0;
 const explorerTemplates = new Map<string, Json>();
 const exitTemplatesByStrategy = await loadExitTemplates();
 const reportedUnpricedFills = new Set<string>();
@@ -536,6 +538,22 @@ function reportWorkingOrderPolicyViolations(): void {
   }
 }
 
+async function waitForReplenishmentWriteWindow(priority: Priority, key: string): Promise<void> {
+  // Low-priority fixed-price refreshes may prepare and Preview in parallel,
+  // but must not take the one final broker write just as activity-driven REST
+  // reconciliation is about to reveal a fill.  Once a new refill is queued,
+  // retain a short window for its Preview to finish and enter the final gate.
+  if (priority < 2) return;
+  const deferredAt = Date.now();
+  while (!stopping && (activityRestRunning || Date.now() < replenishmentWritePriorityUntil)) await wait(25);
+  const delayMs = Date.now() - deferredAt;
+  if (delayMs > 0) {
+    executionJournal.record("broker.write.deferred-for-replenishment", {
+      key, priority, delayMs, activityRestRunning, replenishmentWritePriorityUntil: new Date(replenishmentWritePriorityUntil).toISOString(),
+    });
+  }
+}
+
 async function writeOrder(key: string, method: "POST" | "PUT", path: string, payload: Json, priority: Priority): Promise<string> {
   if (stopping) {
     executionJournal.record("broker.write.skipped", { key, reason: "runtime-stopping", method, path, order: payloadAuditData(payload) });
@@ -583,6 +601,7 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
   previewRejectedUntil.delete(previewFingerprint);
   executionJournal.record("broker.preview.accepted", { key, method, path, order: payloadAuditData(payload) });
   await evidence(key, method, path, payload);
+  await waitForReplenishmentWriteWindow(priority, key);
   try {
     executionJournal.record("broker.write.requested", { key, method, path, priority, order: payloadAuditData(payload) });
     const result = await finalWriteGate.run(
@@ -1177,6 +1196,10 @@ function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, price
     });
     return;
   }
+  replenishmentWritePriorityUntil = Math.max(
+    replenishmentWritePriorityUntil,
+    Date.now() + REFILL_WRITE_PRIORITY_SETTLEMENT_MS,
+  );
   const priority = executionPriority("replenishment");
   const queuedAt = Date.now();
   executionJournal.record("fixed-price-cycle.rebuy-queued", {
