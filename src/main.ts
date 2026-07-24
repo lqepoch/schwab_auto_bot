@@ -15,6 +15,7 @@ import { ExecutionJournal } from "./execution_journal.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility } from "./exit_policy.ts";
 import { acquireRuntimeLock } from "./runtime_lock.ts";
 import { mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
+import { fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -167,6 +168,12 @@ class RequestBudget {
       if (priority === 1) throw new Error("FOLLOWUP_QUOTA_HEADROOM");
       await wait(Math.max(100, 60_000 - (now - this.attempts[0])));
     }
+  }
+
+  fixedPriceRefreshIntervalMs(): number {
+    const now = Date.now();
+    this.attempts = this.attempts.filter((value) => now - value < 60_000);
+    return fixedPriceRefreshIntervalMs(this.attempts.length);
   }
 
   rateLimited(retryAfter: string | null): void {
@@ -1144,7 +1151,7 @@ async function fixedPriceRefreshRound(): Promise<void> {
         });
       },
     });
-    await wait(policy.orderCooldownMs);
+    await wait(budget.fixedPriceRefreshIntervalMs());
   }
   await wait(policy.roundCooldownMs);
 }
