@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_INVENTORY_TRIGGER, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility } from "../src/exit_policy.ts";
+import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_INVENTORY_TRIGGER, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, maySubmitExit } from "../src/exit_policy.ts";
 
 test("resets a vertical's full-exit countdown on its most recent buy fill", () => {
   const lastBuyFillAt = 1_000_000;
@@ -35,4 +35,10 @@ test("inventory threshold starts exits immediately and refresh interval is eight
     reason: "inventory-threshold",
     remainingDelayMs: 0,
   });
+});
+
+test("never submits a second sell while a working sell or stale submit job exists", () => {
+  assert.equal(maySubmitExit(0, false), true);
+  assert.equal(maySubmitExit(1, false), false);
+  assert.equal(maySubmitExit(0, true), false);
 });

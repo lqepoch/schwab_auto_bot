@@ -12,7 +12,7 @@ import { EXIT_ORDER_PRICE, isWithinStrikeRange, orderInfo, orderPolicyViolation,
 import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./price_explorer.ts";
 import { ExecutionJournal } from "./execution_journal.ts";
-import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility } from "./exit_policy.ts";
+import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, maySubmitExit } from "./exit_policy.ts";
 import { acquireRuntimeLock } from "./runtime_lock.ts";
 import { FixedPriceReplenishmentGuard, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
 import { FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
@@ -237,6 +237,7 @@ let inventoryFillBaselineEstablished = false;
 const unknownWrites = new Set<string>();
 const sellDue = new Map<string, number>();
 const sellSubmitDue = new Map<string, number>();
+const sellSubmitInFlight = new Set<string>();
 const cancelingSells = new Set<string>();
 const exitGateStates = new Map<string, string>();
 const liquidityExitRefreshes = new Map<string, { sellAt: number; remainingRefreshes: number; nextAt: number }>();
@@ -1613,11 +1614,12 @@ async function evaluateExitStrategyLegacy(strategy: string, template: Json, forc
 async function evaluateExitStrategy(strategy: string, template: Json, forceStartup: boolean): Promise<void> {
   const now = Date.now();
   const inventory = inventoryByStrategy.get(strategy) ?? 0;
-  const active = orders.filter((order) => {
+  const activeClosingOrders = (): Json[] => orders.filter((order) => {
     const meta = info(order);
     return working.has(String(order.status)) && meta?.closing && meta.key === strategy
       && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
   }).sort((left, right) => eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)));
+  const active = activeClosingOrders();
   if (inventory <= 0) {
     for (const sell of active) queueSellCancel(strategy, sell, "empty-inventory");
     return;
@@ -1677,21 +1679,45 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     return;
   }
   if (now < (sellSubmitDue.get(strategy) ?? 0)) return;
+  if (!maySubmitExit(active.length, sellSubmitInFlight.has(strategy))) {
+    executionJournal.record("exit.submit.skipped", {
+      strategy,
+      reason: active.length > 0 ? "working-sell-already-exists" : "submit-already-in-flight",
+      activeWorkingSells: active.map(orderId),
+    });
+    return;
+  }
   if (Date.now() - lastFullOrderPollAt >= 5_000 && !await ensureFreshOrdersForExit()) return;
+  // A full reconciliation may have completed while its REST request was in
+  // flight.  Do not enqueue a stale sell-submit decision.
+  if (!maySubmitExit(activeClosingOrders().length, sellSubmitInFlight.has(strategy))) {
+    executionJournal.record("exit.submit.skipped", { strategy, reason: "working-sell-found-after-reconciliation" });
+    return;
+  }
   sellSubmitDue.set(strategy, now + (liquidityReady ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS));
   if (liquidityReady && liquidity) liquidity.nextAt = now + LIQUIDITY_EXIT_REFRESH_MS;
   const priority = executionPriority("exit");
+  sellSubmitInFlight.add(strategy);
   writer.enqueue({
     key: `sell-submit:${strategy}`, priority,
     run: async () => {
-      if ((inventoryByStrategy.get(strategy) ?? 0) <= 0) return;
-      const payload = payloadFrom(template, targetQuantity, true);
       try {
+        if ((inventoryByStrategy.get(strategy) ?? 0) <= 0) return;
+        const current = activeClosingOrders();
+        if (current.length > 0) {
+          executionJournal.record("exit.submit.skipped", {
+            strategy, reason: "working-sell-found-before-preview", activeWorkingSells: current.map(orderId),
+          });
+          return;
+        }
+        const payload = payloadFrom(template, targetQuantity, true);
         const newId = await writeOrder(`sell-submit:${strategy}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, priority);
         applyLocalSubmit(payload, newId);
         stamp(`自动卖出 strategy=${strategy} quantity=${targetQuantity} newOrder=${newId}`);
       } catch (error) {
         if (!deferExitAfterPreviewRejection(strategy, null, error)) throw error;
+      } finally {
+        sellSubmitInFlight.delete(strategy);
       }
     },
   });
