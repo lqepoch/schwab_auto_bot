@@ -14,7 +14,7 @@ import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSna
 import { ExecutionJournal } from "./execution_journal.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility } from "./exit_policy.ts";
 import { acquireRuntimeLock } from "./runtime_lock.ts";
-import { mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
+import { mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
 import { FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -27,6 +27,8 @@ const runtimeStatePath = join(root, ".state", "runtime", "active-run.json");
 const runtimeControlPath = join(root, ".state", "runtime", "control-request.json");
 const runtimeLockPath = join(root, ".state", "runtime", "active-run.lock");
 const runId = randomUUID();
+const runtimeStartedAt = Date.now();
+const PREVIEW_REJECTION_COOLDOWN_MS = 30_000;
 const executionJournal = new ExecutionJournal(root, runId, (error) => {
   process.stderr.write(`${new Date().toISOString()} [node-vertical] EXECUTION_JOURNAL_WRITE_FAILED error=${String(error)}\n`);
 });
@@ -248,6 +250,7 @@ const fixedPriceCycleConsumedFills = await loadFixedPriceCycle();
 const explorerTemplates = new Map<string, Json>();
 const exitTemplatesByStrategy = await loadExitTemplates();
 const reportedUnpricedFills = new Set<string>();
+const reportedHistoricalFixedPriceFills = new Set<string>();
 let explorerSavePending = Promise.resolve();
 let fixedPriceCycleSavePending = Promise.resolve();
 let exitTemplateSavePending = Promise.resolve();
@@ -299,7 +302,7 @@ function recordOpeningFillLot(strategy: string, order: Json): void {
   openingFillLots.set(strategy, lots);
   lastOpeningFillAt.set(strategy, Math.max(lastOpeningFillAt.get(strategy) ?? 0, filledAt));
   rememberExitTemplate(strategy, order);
-  if (firstObserved && !readOnly) {
+  if (firstObserved && !readOnly && mayRecoverFixedPriceFill(filledAt, runtimeStartedAt)) {
     scheduleExitWorker(strategy, order, Math.max(Date.now(), filledAt + EXIT_IDLE_BUY_FILL_DELAY_MS), "opening-fill-idle-deadline");
   }
 }
@@ -544,7 +547,7 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
   const previewFingerprint = createHash("sha256")
     .update(`${path}\0${JSON.stringify(payload)}`)
     .digest("hex");
-  if (priority > 1 && Date.now() < (previewRejectedUntil.get(previewFingerprint) ?? 0)) {
+  if (Date.now() < (previewRejectedUntil.get(previewFingerprint) ?? 0)) {
     executionJournal.record("broker.preview.skipped", { key, reason: "cached-rejection", method, path, order: payloadAuditData(payload) });
     throw new Error("CACHED_PREVIEW_REJECTED");
   }
@@ -555,7 +558,7 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     priority,
   );
   if (!previewAccepted(preview.body)) {
-    if (priority > 1) previewRejectedUntil.set(previewFingerprint, Date.now() + 30_000);
+    previewRejectedUntil.set(previewFingerprint, Date.now() + PREVIEW_REJECTION_COOLDOWN_MS);
     const blockers = previewBlockers(preview.body);
     const insufficientFunds = method === "POST" && previewReportsInsufficientFunds(preview.body);
     executionJournal.record("broker.preview.rejected", { key, method, path, blockers, insufficientFunds, order: payloadAuditData(payload) });
@@ -1045,12 +1048,20 @@ function detectExplorerFills(): void {
       executionJournal.record("explorer.fill.ignored", { order: orderAuditData(order), fillPriceSource, priceCents: fill.priceCents, reason: "price-out-of-range" });
       continue;
     }
-    if (now - fill.filledAt > 10_000) {
-      executionJournal.record("explorer.fill.ignored", { order: orderAuditData(order), fillPriceSource, priceCents: fill.priceCents, filledAt: new Date(fill.filledAt).toISOString(), reason: "outside-ten-second-window" });
+    if (policy.repeatBuyAtOrderPrice) {
+      if (!mayRecoverFixedPriceFill(fill.filledAt, runtimeStartedAt)) {
+        const id = orderId(order);
+        if (!reportedHistoricalFixedPriceFills.has(id)) {
+          reportedHistoricalFixedPriceFills.add(id);
+          executionJournal.record("fixed-price-cycle.fill.ignored", { order: orderAuditData(order), priceCents: fill.priceCents, filledAt: new Date(fill.filledAt).toISOString(), reason: "before-startup-grace-window" });
+        }
+        continue;
+      }
+      queueFixedPriceReplenishment(meta.key, order, fill.priceCents);
       continue;
     }
-    if (policy.repeatBuyAtOrderPrice) {
-      queueFixedPriceReplenishment(meta.key, order, fill.priceCents);
+    if (now - fill.filledAt > 10_000) {
+      executionJournal.record("explorer.fill.ignored", { order: orderAuditData(order), fillPriceSource, priceCents: fill.priceCents, filledAt: new Date(fill.filledAt).toISOString(), reason: "outside-ten-second-window" });
       continue;
     }
     const transition = explorer.recordCompleteFill(meta.key, orderId(order), fill.priceCents, fill.filledAt);
@@ -1074,12 +1085,13 @@ function detectExplorerFills(): void {
 function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, priceCents: number): void {
   const filledOrderId = orderId(filledOrder);
   if (fixedPriceCycleConsumedFills.has(filledOrderId)) return;
+  const priority = executionPriority("replenishment");
   writer.enqueue({
     key: `fixed-price-cycle:${filledOrderId}`,
-    priority: 1,
+    priority,
     run: async () => {
-      if (stopping || hasExitPriority(groupKey)) {
-        executionJournal.record("fixed-price-cycle.deferred", { groupKey, filledOrderId, reason: stopping ? "runtime-stopping" : "exit-priority-active" });
+      if (stopping) {
+        executionJournal.record("fixed-price-cycle.deferred", { groupKey, filledOrderId, reason: "runtime-stopping" });
         return;
       }
       if (!mayReplenishFixedPrice(activeOpeningOrders(groupKey).length)) {
@@ -1088,7 +1100,7 @@ function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, price
       }
       const payload = payloadFrom(filledOrder, 1, false, priceCents);
       try {
-        const brokerOrderId = await writeOrder(`fixed-price-cycle:${filledOrderId}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, 1);
+        const brokerOrderId = await writeOrder(`fixed-price-cycle:${filledOrderId}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, priority);
         applyLocalSubmit(payload, brokerOrderId);
         fixedPriceCycleConsumedFills.add(filledOrderId);
         persistFixedPriceCycle();
@@ -1227,8 +1239,8 @@ function adoptSells(): void {
   }
 }
 
-async function positions(): Promise<Map<string, { long: number; short: number }>> {
-  const response = await api(`/trader/v1/accounts/${accountHash}?fields=positions`, {}, 2);
+async function positions(priority: Priority = 2): Promise<Map<string, { long: number; short: number }>> {
+  const response = await api(`/trader/v1/accounts/${accountHash}?fields=positions`, {}, priority);
   const values = response.body?.securitiesAccount?.positions;
   if (!Array.isArray(values)) throw new Error("持仓响应无效");
   return new Map(values.map((item: Json) => [
@@ -1282,7 +1294,7 @@ async function reconcilePositions(announce = true): Promise<void> {
 async function freshExitPositions(): Promise<Map<string, { long: number; short: number }>> {
   if (exitPositionSnapshot && Date.now() - exitPositionSnapshot.at < 1_000) return exitPositionSnapshot.positions;
   if (!exitPositionSnapshotPending) {
-    exitPositionSnapshotPending = positions().then((current) => {
+    exitPositionSnapshotPending = positions(0).then((current) => {
       exitPositionSnapshot = { at: Date.now(), positions: current };
       return current;
     }).finally(() => {
@@ -1395,6 +1407,15 @@ function nextExitWorkerDue(strategy: string): number {
   return Math.min(pendingIdleDeadline, nextSellRefresh ?? Number.POSITIVE_INFINITY, now + policy.roundCooldownMs);
 }
 
+function exitStrategyNeedsWorker(strategy: string): boolean {
+  if (liquidityExitRefreshes.has(strategy) || (inventoryByStrategy.get(strategy) ?? 0) > 0) return true;
+  return orders.some((order) => {
+    const meta = info(order);
+    return working.has(String(order.status)) && meta?.closing && meta.key === strategy
+      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
+  });
+}
+
 function scheduleExitWorker(strategy: string, template: Json, dueAt: number, reason: string): void {
   if (stopping || readOnly) return;
   const safeDueAt = Math.max(Date.now(), dueAt);
@@ -1433,7 +1454,9 @@ async function runExitWorker(strategy: string, template: Json, reason: string): 
     executionJournal.record("exit.worker.failed", { strategy, reason, error: String(error) });
   } finally {
     evaluatingExitStrategies.delete(strategy);
-    if (!stopping) scheduleExitWorker(strategy, template, nextExitWorkerDue(strategy), "worker-next-round");
+    if (!stopping && exitStrategyNeedsWorker(strategy)) {
+      scheduleExitWorker(strategy, template, nextExitWorkerDue(strategy), "worker-next-round");
+    }
   }
 }
 
@@ -1606,15 +1629,20 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     if (!liquidityRefreshDue && !needsQuantityUpdate && now < due && Number(sell.price) === EXIT_ORDER_PRICE) return;
     if (liquidityRefreshDue && liquidity) advanceLiquidityRefresh(strategy, liquidity, id, now);
     sellDue.set(id, now + (liquidityRefreshDue ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS));
+    const priority = executionPriority("exit");
     writer.enqueue({
-      key: `sell-refresh:${id}`, priority: 0,
+      key: `sell-refresh:${id}`, priority,
       run: async () => {
         const liveSell = orders.find((order) => orderId(order) === id);
         if (!liveSell || !working.has(String(liveSell.status))) return;
         const payload = payloadFrom(template, targetQuantity, true);
-        const replacement = await writeOrder(`sell-refresh:${id}:${Date.now()}`, "PUT", `/trader/v1/accounts/${accountHash}/orders/${id}`, payload, 0);
-        applyLocalReplace(id, payload, replacement);
-        stamp(`卖单 Replace strategy=${strategy} quantity=${targetQuantity} replacement=${replacement}`);
+        try {
+          const replacement = await writeOrder(`sell-refresh:${id}:${Date.now()}`, "PUT", `/trader/v1/accounts/${accountHash}/orders/${id}`, payload, priority);
+          applyLocalReplace(id, payload, replacement);
+          stamp(`卖单 Replace strategy=${strategy} quantity=${targetQuantity} replacement=${replacement}`);
+        } catch (error) {
+          if (!deferExitAfterPreviewRejection(strategy, id, error)) throw error;
+        }
       },
     });
     return;
@@ -1623,14 +1651,19 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
   if (Date.now() - lastFullOrderPollAt >= 5_000 && !await ensureFreshOrdersForExit()) return;
   sellSubmitDue.set(strategy, now + (liquidityReady ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS));
   if (liquidityReady && liquidity) liquidity.nextAt = now + LIQUIDITY_EXIT_REFRESH_MS;
+  const priority = executionPriority("exit");
   writer.enqueue({
-    key: `sell-submit:${strategy}`, priority: 0,
+    key: `sell-submit:${strategy}`, priority,
     run: async () => {
       if ((inventoryByStrategy.get(strategy) ?? 0) <= 0) return;
       const payload = payloadFrom(template, targetQuantity, true);
-      const newId = await writeOrder(`sell-submit:${strategy}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, 0);
-      applyLocalSubmit(payload, newId);
-      stamp(`自动卖出 strategy=${strategy} quantity=${targetQuantity} newOrder=${newId}`);
+      try {
+        const newId = await writeOrder(`sell-submit:${strategy}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, priority);
+        applyLocalSubmit(payload, newId);
+        stamp(`自动卖出 strategy=${strategy} quantity=${targetQuantity} newOrder=${newId}`);
+      } catch (error) {
+        if (!deferExitAfterPreviewRejection(strategy, null, error)) throw error;
+      }
     },
   });
 }
@@ -1639,14 +1672,41 @@ function queueSellCancel(strategy: string, sell: Json, reason: string): void {
   const id = orderId(sell);
   if (cancelingSells.has(id)) return;
   cancelingSells.add(id);
+  const priority = executionPriority("exit");
   writer.enqueue({
-    key: `sell-cancel:${reason}:${id}`, priority: 0,
+    key: `sell-cancel:${reason}:${id}`, priority,
     run: async () => {
       await cancelOrder(`sell-cancel:${reason}:${id}`, id);
       sellDue.delete(id);
       stamp(`卖单取消 strategy=${strategy} order=${id} reason=${reason}`);
     },
   });
+}
+
+function liquidityConstrained(): boolean {
+  return liquidityExitRefreshes.size > 0;
+}
+
+function executionPriority(kind: "replenishment" | "exit" | "refresh"): Priority {
+  if (kind === "refresh") return 2;
+  if (liquidityConstrained()) return kind === "exit" ? 0 : 1;
+  return kind === "replenishment" ? 0 : 1;
+}
+
+function deferExitAfterPreviewRejection(strategy: string, orderIdValue: string | null, error: unknown): boolean {
+  const message = String(error);
+  if (!message.includes("SCHWAB_PREVIEW_REJECTED") && !message.includes("CACHED_PREVIEW_REJECTED")) return false;
+  const nextAt = Date.now() + PREVIEW_REJECTION_COOLDOWN_MS;
+  if (orderIdValue) sellDue.set(orderIdValue, nextAt);
+  else sellSubmitDue.set(strategy, nextAt);
+  executionJournal.record("exit.preview-retry-deferred", {
+    strategy,
+    orderId: orderIdValue,
+    nextAt: new Date(nextAt).toISOString(),
+    reason: message.includes("CACHED_PREVIEW_REJECTED") ? "cached-rejection" : "broker-rejection",
+  });
+  stamp(`卖单 Preview 拒绝，延后重试 strategy=${strategy} retryInMs=${PREVIEW_REJECTION_COOLDOWN_MS}`);
+  return true;
 }
 
 function advanceLiquidityRefresh(
@@ -1673,7 +1733,13 @@ function advanceLiquidityRefresh(
 function evaluateExits(forceStartup = false): void {
   if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
   for (const [strategy, template] of exitTemplates()) {
-    scheduleExitWorker(strategy, template, Date.now(), forceStartup ? "startup-recovery" : "discovery-round");
+    // Startup intentionally wakes every known strategy. Subsequent discovery
+    // rounds may only create workers for newly current strategies: resetting
+    // existing timers here defeats their per-strategy refresh and retry due
+    // times, causing repeated Preview traffic every global round.
+    if (exitStrategyNeedsWorker(strategy) && (forceStartup || (!exitWorkerTimers.has(strategy) && !evaluatingExitStrategies.has(strategy)))) {
+      scheduleExitWorker(strategy, template, Date.now(), forceStartup ? "startup-recovery" : "discovery-round");
+    }
   }
 }
 
@@ -1682,7 +1748,7 @@ function reconcileCurrentExitStrategies(): void {
   for (const [strategy, template] of exitTemplates()) {
     // Keep a live strategy's own timer intact. A current full-order response
     // only starts a worker for a strategy that is not already being watched.
-    if (!exitWorkerTimers.has(strategy) && !evaluatingExitStrategies.has(strategy)) {
+    if (exitStrategyNeedsWorker(strategy) && !exitWorkerTimers.has(strategy) && !evaluatingExitStrategies.has(strategy)) {
       scheduleExitWorker(strategy, template, Date.now(), "full-order-reconciliation");
     }
   }

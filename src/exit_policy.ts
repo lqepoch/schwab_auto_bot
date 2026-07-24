@@ -1,7 +1,7 @@
 export const EXIT_IDLE_BUY_FILL_DELAY_MS = 30_000;
 export const EXIT_INVENTORY_TRIGGER = 5;
 export const EXIT_REFRESH_MS = 8_000;
-export const LIQUIDITY_EXIT_DELAY_MS = 15_000;
+export const LIQUIDITY_EXIT_DELAY_MS = 0;
 export const LIQUIDITY_EXIT_REFRESH_MS = 5_000;
 export const LIQUIDITY_EXIT_REFRESH_ROUNDS = 2;
 

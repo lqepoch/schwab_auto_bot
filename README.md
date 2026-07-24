@@ -92,7 +92,7 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 
 `--execution-start` 与 `--execution-end` 默认分别为 `09:15` 和 `15:45`（纽约时间）；只在需要变更执行窗口时传入，例如 `--execution-start 09:30 --execution-end 15:30`。
 
-整体刷新每轮完成后默认间隔 5 秒。fixed-price 模式的每个候选订单入队间隔会按最近 60 秒的已准入 API 调用量在 0.7–0.85 秒之间动态调整：低负载时使用 0.7 秒，调用量从 60 RPM 升至 96 RPM 时线性放慢至 0.85 秒。108 RPM 准入、Preview、最终写入串行化和卖单优先级仍是不可绕过的硬边界。每一轮开始都会读取一次完整订单列表；该快照同时供本轮所有候选筛选与原生 Replace 使用，不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用这份完整快照，避免同轮重复读取。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
+整体刷新每轮完成后默认间隔 5 秒。fixed-price 模式的每个候选订单入队间隔会按最近 60 秒的已准入 API 调用量在 0.7–1.2 秒之间动态调整：低负载时使用 0.7 秒，调用量从 50 RPM 升至 70 RPM 时线性放慢至 1.2 秒。108 RPM 准入、Preview、最终写入串行化和卖单优先级仍是不可绕过的硬边界。每一轮开始都会读取一次完整订单列表；该快照同时供本轮所有候选筛选与原生 Replace 使用，不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用这份完整快照，避免同轮重复读取。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
 
 所有自动写入在 Preview 前都执行固定订单策略校验：买单必须是配置标的的 0DTE 双腿垂直价差，价格仅允许 0.84–0.90，数量必须为 1；卖单也必须是 0DTE、数量为 1，价格固定为 0.99。完整订单快照发现仍在工作的违规买/卖单时，程序只会发出 `POLICY_ALERT`，写入终端日志及 `.state/policy-alerts.jsonl`，不会静默撤销外部订单。任何不符合规则的自动 Preview、Submit 或 Replace 都会在发送 Schwab 请求前被拒绝。
 
@@ -121,7 +121,7 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 node .\src\main.ts --confirm-live I_UNDERSTAND --repeat-buy-at-order-price
 ```
 
-With `--repeat-buy-at-order-price`, the bot disables only price exploration, generation expansion, and price-changing repricing. It maintains at most one working opening order per strategy, repeatedly uses native Replace at that order's existing limit price, and replenishes one new opening order at the submitted limit price after a newly confirmed opening fill. Consumed fill IDs are persisted in `.state/fixed-price-cycle.json`, so a hot switch cannot repeat an already handled fill. The independent exit worker and its sell-first priority remain active.
+With `--repeat-buy-at-order-price`, the bot disables only price exploration, generation expansion, and price-changing repricing. It maintains at most one working opening order per strategy, repeatedly uses native Replace at that order's existing limit price, and replenishes one new opening order at the submitted limit price after a newly confirmed opening fill. The fixed-price fill path is independent of the exploration mode's ten-second pairing window: during a running bot it accepts every newly confirmed in-range fill, while a fresh start recovers only fills from the preceding 60 seconds and ignores older lookback history. Consumed fill IDs are persisted in `.state/fixed-price-cycle.json`, so a hot switch cannot repeat an already handled fill. The independent exit worker and its sell-first priority remain active.
 
 固定价刷新在每轮起始及刷新进行中的完整订单确认后，直接按当下订单状态重算有效策略集合，不依赖上一次结果的增量推断。行权价完整位于 `--strike-min` 至 `--strike-max` 内的新工作买单会加入正在进行的刷新轮；已经取消、替换或不再是该策略当前工作买单的订单，会在写入前跳过。卖出 worker 使用相同范围：当前订单确认时会立即为新发现的可卖策略建立独立 worker，但不会重置已存在策略自己的卖单刷新计时器；没有仓位的已取消策略不会继续被调度。
 
@@ -129,7 +129,7 @@ With `--repeat-buy-at-order-price`, the bot disables only price exploration, gen
 
 每个 0DTE 垂直组合都有独立、持久化的卖出评估 worker，不会被其他组合的卖出动作阻塞。每次 worker 唤醒都会先用新鲜的持仓快照核对该组合可平数量；账户级持仓读取最多在 1 秒内合并一次，不会改变各组的独立触发与写入决策。倒计时只从 Schwab 确认的开仓 `FILLED` 订单的 `closeTime` 开始；发现仓位、工作买单或缺少确认成交时间均不会启动 30 秒倒计时。该组最后一次完整买入成交会重置 30 秒空窗倒计时；连续 30 秒没有新的买入成交且有仓位时，worker 挂一张数量等于全部可平仓仓位的卖单。某组合可平仓仓位达到 5 张时不等待倒计时，立即触发全仓卖出。每组同时最多保留一张活动卖单，且每次刷新都会把数量替换为最新可平仓仓位。
 
-卖单价格固定为 0.99。正常刷新间隔为 8 秒。程序会保存最近的组合模板至 `.state/exit-templates.json`，因此热切换后仍能为已有仓位恢复独立卖出 worker。
+卖单价格固定为 0.99。正常刷新间隔为 8 秒，每个策略由自己的定时器维持；全局 5 秒发现循环只创建新 worker，绝不会重置已有策略的刷新或重试时间。若 Schwab Preview 拒绝同一卖单更新，程序会将该精确请求冷却 30 秒并记入 `exit.preview-retry-deferred`，避免反复无效 Preview 耗尽配额；期间其他策略的卖单和新成交补买仍保持独立运行。程序会保存最近的组合模板至 `.state/exit-templates.json`，因此热切换后仍能为已有仓位恢复独立卖出 worker。
 
 如果 Schwab 对新的买入 `Preview` 明确返回资金、现金或购买力不足，程序会暂停该组买入/买单刷新并先进入 15 秒流动性卖出倒计时；倒计时结束后以全仓卖单启动，并以 5 秒间隔强制刷新两轮，随后恢复正常 8 秒节奏。卖出写入优先于买入和买单刷新。该触发及每轮结果会写入执行审计日志中的 `exit.liquidity-*`、`exit.worker-*` 与 `exit.gate` 事件。
 
