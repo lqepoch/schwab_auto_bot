@@ -12,7 +12,7 @@ test("defaults permit QQQ and SPY only during the New York execution window", ()
   assert.equal(policy.executionStart, "09:15");
   assert.equal(policy.executionEnd, "15:45");
   assert.equal(policy.orderCooldownMs, 1_000);
-  assert.equal(policy.roundCooldownMs, 10_000);
+  assert.equal(policy.roundCooldownMs, 5_000);
   assert.equal(policy.repeatBuyAtOrderPrice, false);
   assert.equal(isWithinExecutionWindow(new Date("2026-07-24T13:15:00Z"), "09:15", "15:45"), true);
   assert.equal(isWithinExecutionWindow(new Date("2026-07-24T19:45:00Z"), "09:15", "15:45"), false);

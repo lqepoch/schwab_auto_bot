@@ -1,0 +1,17 @@
+export const FIXED_PRICE_REFRESH_INTERVAL_MIN_MS = 700;
+export const FIXED_PRICE_REFRESH_INTERVAL_MAX_MS = 850;
+export const FIXED_PRICE_REFRESH_SOFT_START_RPM = 60;
+export const FIXED_PRICE_REFRESH_SOFT_LIMIT_RPM = 96;
+
+export function fixedPriceRefreshIntervalMs(requestsLastMinute: number): number {
+  const requests = Math.max(0, requestsLastMinute);
+  const pressure = Math.min(
+    1,
+    Math.max(0, (requests - FIXED_PRICE_REFRESH_SOFT_START_RPM)
+      / (FIXED_PRICE_REFRESH_SOFT_LIMIT_RPM - FIXED_PRICE_REFRESH_SOFT_START_RPM)),
+  );
+  return Math.round(
+    FIXED_PRICE_REFRESH_INTERVAL_MIN_MS
+      + (FIXED_PRICE_REFRESH_INTERVAL_MAX_MS - FIXED_PRICE_REFRESH_INTERVAL_MIN_MS) * pressure,
+  );
+}
