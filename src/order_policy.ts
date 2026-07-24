@@ -20,7 +20,7 @@ export type OrderPolicy = {
 };
 
 export type OrderPolicyViolation = {
-  code: "ORDER_STRUCTURE_INVALID" | "UNDERLYING_NOT_ALLOWED" | "ORDER_NOT_0DTE" | "BUY_PRICE_OUT_OF_RANGE" | "SELL_PRICE_INVALID";
+  code: "ORDER_STRUCTURE_INVALID" | "ORDER_QUANTITY_INVALID" | "UNDERLYING_NOT_ALLOWED" | "ORDER_NOT_0DTE" | "BUY_PRICE_OUT_OF_RANGE" | "SELL_PRICE_INVALID";
   message: string;
 };
 
@@ -50,6 +50,9 @@ export function orderInfo(order: Json): OptionOrderInfo | null {
 export function orderPolicyViolation(order: Json, policy: OrderPolicy, tradingDate: string): OrderPolicyViolation | null {
   const meta = orderInfo(order);
   if (!meta) return { code: "ORDER_STRUCTURE_INVALID", message: "订单不是可识别的双腿垂直期权策略" };
+  if (Number(order.quantity) !== 1 || meta.legs.some((leg) => Number(leg.quantity) !== 1)) {
+    return { code: "ORDER_QUANTITY_INVALID", message: "每张复合垂直订单数量必须为 1" };
+  }
   if (!policy.underlyings.has(meta.underlying)) {
     return { code: "UNDERLYING_NOT_ALLOWED", message: `标的 ${meta.underlying} 不在允许范围` };
   }

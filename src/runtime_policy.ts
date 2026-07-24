@@ -33,6 +33,7 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
 
   if (strikeMin > strikeMax) throw new Error("STRIKE_RANGE_INVALID");
   if (entryNotionalMin > entryNotionalMax) throw new Error("ENTRY_NOTIONAL_RANGE_INVALID");
+  if (entryNotionalMin !== 84 || entryNotionalMax !== 90) throw new Error("ENTRY_NOTIONAL_POLICY_FIXED");
   if (minutes(executionStart) >= minutes(executionEnd)) throw new Error("EXECUTION_WINDOW_INVALID");
 
   const isExecutionWindowOpen = (now = new Date()): boolean => isWithinExecutionWindow(now, executionStart, executionEnd);
