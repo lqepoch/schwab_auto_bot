@@ -121,6 +121,31 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 node .\src\main.ts --confirm-live I_UNDERSTAND --repeat-buy-at-order-price
 ```
 
+### 执行审计日志与受控热切换
+
+每次启动都会创建独立、追加写入的 JSONL 审计文件：`.state/executions/<UTC日期>/<runId>.jsonl`。每行均包含 UTC 时间、`runId`、事件类型和结构化数据；不会写入 token 或账户 hash。日志覆盖订单首次发现及状态/成交数量变化、Schwab 的成交时间、订单腿与价格、Preview、最终 Submit/Replace/Cancel、未知写入结果、探索器成交分桶、代际触发、已排队的下一步动作、动作执行/跳过原因，以及运行启动、控制停止和退出。
+
+当前运行实例及其日志路径记录在 `.state/runtime/active-run.json`。查看当前实例和实时分析日志：
+
+```powershell
+Get-Content .\.state\runtime\active-run.json -Raw | ConvertFrom-Json
+Get-Content .\.state\executions\<日期>\<runId>.jsonl -Wait
+```
+
+热切换仅用于已完成验证并合并到 `main`、且当前工作目录已快进到该 `main` 的更新。脚本会向旧进程发送受控停止请求；旧进程停止接收新的动作、持久化探索状态并等待已经进入串行写入队列的请求完成后才退出。确认旧 PID 退出后，脚本以原来的 Node 路径和启动参数启动当前 `main` 版本；若旧进程未在超时内退出，脚本失败且绝不启动第二个交易进程。
+
+```powershell
+.\scripts\hot-switch.ps1
+```
+
+如只需暂停且不重启：
+
+```powershell
+.\scripts\hot-switch.ps1 -StopOnly
+```
+
+首次使用热切换前，必须先用本版本启动一次 bot，让它写入 `.state/runtime/active-run.json`。更新操作的安全顺序固定为：在独立 worktree 修改与测试 → 创建并合并 PR 到 `main` → 主工作目录快进到远程 `main` 并再次验证 → 运行热切换脚本。这样新进程始终运行已合并的主线代码。
+
 ## 验证
 
 ```powershell
