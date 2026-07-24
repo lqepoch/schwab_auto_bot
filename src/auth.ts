@@ -21,6 +21,8 @@ type AuthFile = {
   clientSecret: string;
   redirectUri: string;
   token: Token;
+  reauthorizedAt?: string;
+  reauthorizationWeek?: string;
 };
 
 type TokenResponse = {
@@ -75,6 +77,8 @@ async function load(): Promise<AuthFile | null> {
       typeof value.token.accessExpiresAt !== "string" ||
       typeof value.token.refreshExpiresAt !== "string"
     ) throw new Error("AUTH_FILE_INVALID");
+    if (value.reauthorizedAt !== undefined && typeof value.reauthorizedAt !== "string") throw new Error("AUTH_FILE_INVALID");
+    if (value.reauthorizationWeek !== undefined && typeof value.reauthorizationWeek !== "string") throw new Error("AUTH_FILE_INVALID");
     return value as AuthFile;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -114,7 +118,16 @@ function environmentCredentials(): Pick<AuthFile, "clientId" | "clientSecret" | 
   return { clientId, clientSecret, redirectUri };
 }
 
-export type AuthStatus = { configured: boolean; tokenPresent: boolean; accessExpiresAt: string | null; refreshExpiresAt: string | null; storage: "plain-json" };
+export type AuthStatus = {
+  configured: boolean;
+  tokenPresent: boolean;
+  accessExpiresAt: string | null;
+  refreshExpiresAt: string | null;
+  reauthorizedAt: string | null;
+  weeklyReauthRequired: boolean;
+  reauthorizationWeek: string;
+  storage: "plain-json";
+};
 
 export class SchwabTokenProvider {
   private cached: AuthFile | null = null;
@@ -147,13 +160,24 @@ export class SchwabTokenProvider {
 
 export async function status(): Promise<AuthStatus> {
   const auth = await load();
+  const reauthorizationWeek = weeklyReauthorizationWeek();
   return {
     configured: auth !== null,
     tokenPresent: auth !== null,
     accessExpiresAt: auth?.token.accessExpiresAt ?? null,
     refreshExpiresAt: auth?.token.refreshExpiresAt ?? null,
+    reauthorizedAt: auth?.reauthorizedAt ?? null,
+    weeklyReauthRequired: auth?.reauthorizationWeek !== reauthorizationWeek,
+    reauthorizationWeek,
     storage: "plain-json",
   };
+}
+
+export async function requireWeeklyReauthorization(now = new Date()): Promise<void> {
+  const auth = await load();
+  if (!auth || auth.reauthorizationWeek !== weeklyReauthorizationWeek(now)) {
+    throw new Error("AUTH_WEEKLY_REAUTH_REQUIRED");
+  }
 }
 
 export async function login(callbackUrl: string, state: string): Promise<void> {
@@ -166,7 +190,13 @@ export async function login(callbackUrl: string, state: string): Promise<void> {
   const token = fromResponse(await requestToken(credentials, new URLSearchParams({
     grant_type: "authorization_code", code, redirect_uri: credentials.redirectUri,
   })));
-  await save({ version: 1, ...credentials, token });
+  await save({
+    version: 1,
+    ...credentials,
+    token,
+    reauthorizedAt: new Date().toISOString(),
+    reauthorizationWeek: weeklyReauthorizationWeek(),
+  });
 }
 
 export function beginLogin(): { state: string; authorizationUrl: string } {
@@ -178,4 +208,24 @@ export function beginLogin(): { state: string; authorizationUrl: string } {
   url.searchParams.set("response_type", "code");
   url.searchParams.set("state", state);
   return { state, authorizationUrl: url.toString() };
+}
+
+export function weeklyReauthorizationWeek(now = new Date()): string {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now).map((part) => [part.type, part.value]));
+  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(parts.weekday);
+  if (weekday < 0) throw new Error("AUTH_REAUTH_CLOCK_INVALID");
+  const localDate = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)));
+  let daysSinceMonday = (weekday + 6) % 7;
+  if (weekday === 1 && Number(parts.hour) * 60 + Number(parts.minute) < 6 * 60) daysSinceMonday = 7;
+  localDate.setUTCDate(localDate.getUTCDate() - daysSinceMonday);
+  return localDate.toISOString().slice(0, 10);
 }

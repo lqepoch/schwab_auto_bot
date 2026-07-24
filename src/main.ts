@@ -3,10 +3,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { SchwabActivityStream, type ActivityBatch } from "./activity_stream.ts";
-import { SchwabTokenProvider } from "./auth.ts";
+import { requireWeeklyReauthorization, SchwabTokenProvider } from "./auth.ts";
 import { PriorityGate, PriorityWriter, type Priority } from "./priority_runtime.ts";
 import { SchwabRestClient } from "./schwab_client.ts";
 import { SchwabApiError } from "../vendor/schwab-api-nodejs/src/utils/errors.ts";
+import { parseRuntimePolicy } from "./runtime_policy.ts";
 type Json = Record<string, any>;
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -19,6 +20,7 @@ const confirmedLive = confirmIndex >= 0 && process.argv[confirmIndex + 1] === "I
 if (!readOnly && !confirmedLive) {
   throw new Error("真实写入必须显式传入 --confirm-live I_UNDERSTAND");
 }
+const policy = parseRuntimePolicy(process.argv);
 
 function stamp(message: string): void {
   const value = new Intl.DateTimeFormat("sv-SE", {
@@ -272,6 +274,8 @@ async function evidence(key: string, method: string, path: string, payload: Json
 
 async function writeOrder(key: string, method: "POST" | "PUT", path: string, payload: Json, priority: Priority): Promise<string> {
   if (readOnly) return "READ_ONLY";
+  await requireWeeklyReauthorization();
+  policy.requireExecutionWindow();
   const previewFingerprint = createHash("sha256")
     .update(`${path}\0${JSON.stringify(payload)}`)
     .digest("hex");
@@ -292,7 +296,11 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
   try {
     const result = await finalWriteGate.run(
       priority,
-      () => api(path, { method, body: JSON.stringify(payload) }, 0),
+      async () => {
+        await requireWeeklyReauthorization();
+        policy.requireExecutionWindow();
+        return api(path, { method, body: JSON.stringify(payload) }, 0);
+      },
     );
     const brokerOrderId = result.headers.get("location")?.split("/").at(-1);
     if (!brokerOrderId) {
@@ -308,10 +316,16 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
 
 async function cancelOrder(key: string, orderIdValue: string): Promise<void> {
   if (readOnly) return;
+  await requireWeeklyReauthorization();
+  policy.requireExecutionWindow();
   const path = `/trader/v1/accounts/${accountHash}/orders/${orderIdValue}`;
   await evidence(key, "DELETE", path, {});
   try {
-    await finalWriteGate.run(2, () => api(path, { method: "DELETE" }, 2));
+    await finalWriteGate.run(2, async () => {
+      await requireWeeklyReauthorization();
+      policy.requireExecutionWindow();
+      return api(path, { method: "DELETE" }, 2);
+    });
     const source = orders.find((order) => orderId(order) === orderIdValue);
     if (source) source.status = "CANCELED";
   } catch (error) {
@@ -386,8 +400,10 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
     }
     if (!readOnly) {
       trackInventoryFillDeltas();
-      detectFills();
-      adoptSells();
+      if (policy.isExecutionWindowOpen()) {
+        detectFills();
+        adoptSells();
+      }
     }
     lastFillPollAt = Date.now();
     return true;
@@ -445,7 +461,7 @@ function trackInventoryFillDeltas(): void {
   const today = newYorkDate();
   for (const order of orders) {
     const meta = info(order);
-    if (!meta || meta.expiration !== today || !["QQQ", "SPY"].includes(meta.underlying)) continue;
+    if (!meta || meta.expiration !== today || !policy.underlyings.has(meta.underlying)) continue;
     const id = orderId(order);
     const filled = Number(order.filledQuantity ?? 0);
     const previous = observedFillQuantities.get(id);
@@ -471,9 +487,10 @@ function detectFills(): void {
     const id = orderId(order);
     const notional = Number(order.price) * quantity(order) * 100;
     const eligible = Boolean(
-      meta?.opening && ["QQQ", "SPY"].includes(meta.underlying)
+      meta?.opening && policy.underlyings.has(meta.underlying)
       && meta.expiration === today
-      && quantity(order) <= 1 && notional >= 84 && notional <= 92
+      && quantity(order) <= 1
+      && notional >= policy.entryNotionalMin && notional <= policy.entryNotionalMax
     );
     if (!eligible) continue;
     const filled = Number(order.filledQuantity ?? 0);
@@ -645,7 +662,7 @@ async function reconcilePositions(announce = true): Promise<void> {
     const meta = info(order);
     if (
       !meta || meta.expiration !== newYorkDate()
-      || !["QQQ", "SPY"].includes(meta.underlying)
+      || !policy.underlyings.has(meta.underlying)
     ) continue;
     if (!templates.has(meta.key) || meta.opening) templates.set(meta.key, order);
   }
@@ -693,7 +710,7 @@ function exitTemplates(): Map<string, Json> {
     const meta = info(order);
     if (
       order.status !== "FILLED" || !meta?.opening
-      || !["QQQ", "SPY"].includes(meta.underlying)
+      || !policy.underlyings.has(meta.underlying)
       || meta.expiration !== newYorkDate()
     ) continue;
     const previous = latest.get(meta.key);
@@ -711,7 +728,7 @@ function exitTemplates(): Map<string, Json> {
     const meta = info(order);
     if (
       meta?.opening && meta.expiration === newYorkDate()
-      && ["QQQ", "SPY"].includes(meta.underlying)
+      && policy.underlyings.has(meta.underlying)
       && (inventoryByStrategy.get(meta.key) ?? 0) > 0
       && !latest.has(meta.key)
     ) latest.set(meta.key, order);
@@ -825,7 +842,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
 }
 
 function evaluateExits(forceStartup = false): void {
-  if (stopping || readOnly) return;
+  if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
   for (const [strategy, template] of exitTemplates()) {
     if (evaluatingExitStrategies.has(strategy)) continue;
     evaluatingExitStrategies.add(strategy);
@@ -837,6 +854,10 @@ function evaluateExits(forceStartup = false): void {
 
 async function refreshRoundLoop(): Promise<void> {
   while (!stopping && !readOnly) {
+    if (!policy.isExecutionWindowOpen()) {
+      await wait(60_000);
+      continue;
+    }
     while (polling && !stopping) await wait(50);
     if (stopping) return;
     const snapshotReady = Date.now() - lastFullOrderPollAt < 5_000 || await poll(true, 0);
@@ -847,9 +868,9 @@ async function refreshRoundLoop(): Promise<void> {
     }
     const candidates = [...orders].filter((order) => {
       const meta = info(order);
-      return working.has(String(order.status)) && meta?.opening && meta.underlying === "SPY"
+      return working.has(String(order.status)) && meta?.opening && policy.underlyings.has(meta.underlying)
         && meta.expiration === newYorkDate()
-        && meta.lowerStrike >= 755 && meta.higherStrike <= 795
+        && meta.lowerStrike >= policy.strikeMin && meta.higherStrike <= policy.strikeMax
         && remaining(order) <= 1 && Number(order.price) * 100 <= 100;
     });
     stamp(`整体刷新轮次启动 candidates=${candidates.length}；本轮仅此一次完整订单GET，逐单失败直接跳过`);
@@ -889,7 +910,8 @@ function stop(): void { stopping = true; }
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
-stamp(readOnly ? "Node 直连 Schwab 只读启动" : "Node 直连 Schwab 启动：成交补买 > 自动卖出；整体刷新独立持续");
+if (!readOnly) await requireWeeklyReauthorization();
+stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET`);
 await bootstrap();
 await poll(true);
 if (!once) {
