@@ -246,8 +246,9 @@ const cancelingSells = new Set<string>();
 const exitGateStates = new Map<string, string>();
 const liquidityExitRefreshes = new Map<string, { sellAt: number; remainingRefreshes: number; nextAt: number }>();
 const exitWorkerTimers = new Map<string, { dueAt: number; timer: NodeJS.Timeout }>();
-let exitPositionSnapshot: { at: number; positions: Map<string, { long: number; short: number }> } | null = null;
-let exitPositionSnapshotPending: Promise<Map<string, { long: number; short: number }>> | null = null;
+let exitPositionSnapshot: { at: number; epoch: number; positions: Map<string, { long: number; short: number }> } | null = null;
+let exitPositionSnapshotPending: Promise<{ epoch: number; positions: Map<string, { long: number; short: number }> }> | null = null;
+let exitPositionSnapshotEpoch = 0;
 const previewRejectedUntil = new Map<string, number>();
 const reportedPolicyAlerts = new Set<string>();
 const explorer = await loadExplorer();
@@ -352,6 +353,7 @@ function payloadAuditData(payload: Json): Record<string, unknown> {
 }
 
 function recordOrderTransitions(source: "full" | "fills", values: readonly Json[]): void {
+  let inventoryMayHaveChanged = false;
   for (const order of values) {
     const id = orderId(order);
     const current = {
@@ -364,6 +366,7 @@ function recordOrderTransitions(source: "full" | "fills", values: readonly Json[
     if (!previous) {
       executionJournal.record("order.observed", { source, ...orderAuditData(order) });
       if (current.filledQuantity > 0 || current.status === "FILLED") {
+        inventoryMayHaveChanged = true;
         executionJournal.record("order.fill", {
           source,
           ...orderAuditData(order),
@@ -379,6 +382,7 @@ function recordOrderTransitions(source: "full" | "fills", values: readonly Json[
     ) {
       executionJournal.record("order.transition", { source, previous, current, ...orderAuditData(order) });
       if (current.filledQuantity > previous.filledQuantity || current.status === "FILLED") {
+        inventoryMayHaveChanged = true;
         executionJournal.record("order.fill", {
           source,
           ...orderAuditData(order),
@@ -389,6 +393,7 @@ function recordOrderTransitions(source: "full" | "fills", values: readonly Json[
     }
     observedOrderStates.set(id, current);
   }
+  if (inventoryMayHaveChanged) invalidateExitPositionSnapshot();
 }
 function newYorkDate(): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -920,27 +925,23 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
   });
 }
 
-function queueVerifiedStaleRecreate(
-  direction: "opening" | "closing", strategy: string, source: Json, payload: Json, priority: Priority,
-): void {
+function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template: Json): void {
   const id = orderId(source);
-  if (direction === "closing") {
-    const oldest = orders.filter((order) => working.has(String(order.status)) && info(order)?.closing
-      && info(order)?.expiration === newYorkDate() && policy.underlyings.has(info(order)?.underlying ?? ""))
-      .sort((left, right) => eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)))[0];
-    if (!oldest || orderId(oldest) !== id) return;
-  }
+  const oldest = orders.filter((order) => working.has(String(order.status)) && info(order)?.closing
+    && info(order)?.expiration === newYorkDate() && policy.underlyings.has(info(order)?.underlying ?? ""))
+    .sort((left, right) => eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)))[0];
+  if (!oldest || orderId(oldest) !== id) return;
   if (staleRecreateActive || !mayRecreateStaleOrder(eventTime(source), Date.now(), nextStaleRecreateAt)) return;
   staleRecreateActive = true;
   nextStaleRecreateAt = Date.now() + STALE_ORDER_RECREATE_COOLDOWN_MS;
   writer.enqueue({
-    key: `stale-recreate:${direction}:${id}`,
-    priority,
+    key: `stale-recreate:closing:${id}`,
+    priority: 0,
     run: async () => {
       try {
-        executionJournal.record("order.stale-recreate.started", { direction, strategy, sourceOrderId: id });
+        executionJournal.record("order.stale-recreate.started", { direction: "closing", strategy, sourceOrderId: id });
         if (polling) {
-          executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: "full-reconciliation-in-progress-before-cancel" });
+          executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: "full-reconciliation-in-progress-before-cancel" });
           return;
         }
         // This is the only maintenance flow allowed to use critical budget:
@@ -952,21 +953,32 @@ function queueVerifiedStaleRecreate(
         // without its verified replacement.
         for (let attempt = 0; polling && attempt < 100 && !stopping; attempt += 1) await wait(50);
         if (stopping || !await poll(true, 0)) {
-          executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: "full-reconciliation-unavailable" });
+          executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: "full-reconciliation-unavailable" });
           return;
         }
-        const stillWorking = direction === "opening"
-          ? activeOpeningOrders(strategy).length > 0
-          : orders.some((order) => working.has(String(order.status)) && info(order)?.closing && info(order)?.key === strategy);
+        const stillWorking = orders.some((order) => working.has(String(order.status)) && info(order)?.closing && info(order)?.key === strategy);
         if (stillWorking) {
-          executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: "working-order-remains-after-reconciliation" });
+          executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: "working-order-remains-after-reconciliation" });
           return;
         }
+        // The cancel + full order reconciliation above establishes that this
+        // strategy has no working sell.  Positions can still have changed
+        // while this job waited in the serial writer, so never reuse the
+        // quantity captured when the stale order was first observed.
+        const inventory = await refreshExitInventory(strategy, template, "before-stale-recreate-submit");
+        const { targetQuantity } = currentExitTarget(strategy, inventory, Date.now());
+        if (targetQuantity <= 0) {
+          executionJournal.record("order.stale-recreate.deferred", {
+            direction: "closing", strategy, sourceOrderId: id, reason: "no-current-exit-inventory", inventory,
+          });
+          return;
+        }
+        const payload = payloadFrom(template, targetQuantity, true);
         const brokerOrderId = await writeOrder(`stale-recreate-submit:${id}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, 0);
         applyLocalSubmit(payload, brokerOrderId);
-        executionJournal.record("order.stale-recreate.submitted", { direction, strategy, sourceOrderId: id, brokerOrderId, order: payloadAuditData(payload) });
+        executionJournal.record("order.stale-recreate.submitted", { direction: "closing", strategy, sourceOrderId: id, brokerOrderId, order: payloadAuditData(payload) });
       } catch (error) {
-        executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: String(error) });
+        executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: String(error) });
       } finally {
         staleRecreateActive = false;
       }
@@ -1394,31 +1406,64 @@ async function reconcilePositions(announce = true): Promise<void> {
 
 /**
  * Exit workers are independent per vertical, but the account-level positions
- * endpoint is coalesced for one second.  This gives every worker a fresh
- * authoritative inventory without multiplying identical Schwab reads.
+ * endpoint is coalesced for one second.  Workers and queued broker writes use
+ * this same snapshot, so a write-time inventory guard does not multiply
+ * identical Schwab reads across strategies.  A confirmed fill invalidates the
+ * shared epoch; the next caller refreshes it once for every waiting strategy.
  */
 async function freshExitPositions(): Promise<Map<string, { long: number; short: number }>> {
-  if (exitPositionSnapshot && Date.now() - exitPositionSnapshot.at < 1_000) return exitPositionSnapshot.positions;
+  const epoch = exitPositionSnapshotEpoch;
+  if (exitPositionSnapshot && exitPositionSnapshot.epoch === epoch && Date.now() - exitPositionSnapshot.at < 1_000) {
+    return exitPositionSnapshot.positions;
+  }
   if (!exitPositionSnapshotPending) {
-    exitPositionSnapshotPending = positions(0).then((current) => {
-      exitPositionSnapshot = { at: Date.now(), positions: current };
-      return current;
+    const requestEpoch = exitPositionSnapshotEpoch;
+    exitPositionSnapshotPending = positions(0).then((positionsSnapshot) => {
+      const result = { epoch: requestEpoch, positions: positionsSnapshot };
+      if (result.epoch === exitPositionSnapshotEpoch) {
+        exitPositionSnapshot = { at: Date.now(), ...result };
+      }
+      return result;
     }).finally(() => {
       exitPositionSnapshotPending = null;
     });
   }
-  return exitPositionSnapshotPending;
+  const result = await exitPositionSnapshotPending;
+  // If a fill arrived while the shared request was in flight, discard that
+  // old result once and let all waiting callers coalesce on its replacement.
+  return result.epoch === exitPositionSnapshotEpoch ? result.positions : freshExitPositions();
 }
 
-async function refreshExitInventory(strategy: string, template: Json): Promise<number> {
+function invalidateExitPositionSnapshot(): void {
+  exitPositionSnapshotEpoch += 1;
+  exitPositionSnapshot = null;
+}
+
+async function refreshExitInventory(
+  strategy: string, template: Json, source = "independent-worker",
+): Promise<number> {
   const current = await freshExitPositions();
   const inventory = availableFor(template, current);
   const previous = inventoryByStrategy.get(strategy) ?? 0;
   inventoryByStrategy.set(strategy, inventory);
   if (inventory > 0 && previous <= 0) inventoryObservedAt.set(strategy, Date.now());
   if (inventory <= 0) inventoryObservedAt.delete(strategy);
-  executionJournal.record("exit.inventory.reconciled", { strategy, inventory, source: "independent-worker" });
+  executionJournal.record("exit.inventory.reconciled", { strategy, inventory, source });
   return inventory;
+}
+
+function currentExitTarget(
+  strategy: string, inventory: number, now: number,
+): { eligibility: ReturnType<typeof exitEligibility>; liquidity: { sellAt: number; remainingRefreshes: number; nextAt: number } | undefined; liquidityReady: boolean; targetQuantity: number } {
+  const eligibility = exitEligibility(inventory, lastOpeningFillAt.get(strategy) ?? null, now);
+  const liquidity = liquidityExitRefreshes.get(strategy);
+  const liquidityReady = liquidity !== undefined && now >= liquidity.sellAt;
+  return {
+    eligibility,
+    liquidity,
+    liquidityReady,
+    targetQuantity: liquidityReady ? inventory : eligibility.targetQuantity,
+  };
 }
 
 async function ensureFreshPositions(): Promise<void> {
@@ -1701,10 +1746,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     return;
   }
   const confirmedOpeningFillAt = lastOpeningFillAt.get(strategy) ?? null;
-  const eligibility = exitEligibility(inventory, confirmedOpeningFillAt, now);
-  const liquidity = liquidityExitRefreshes.get(strategy);
-  const liquidityReady = liquidity !== undefined && now >= liquidity.sellAt;
-  const targetQuantity = liquidityReady ? inventory : eligibility.targetQuantity;
+  const { eligibility, liquidity, liquidityReady, targetQuantity } = currentExitTarget(strategy, inventory, now);
   const gateState = `${inventory}:${targetQuantity}:${eligibility.reason}:${liquidity?.remainingRefreshes ?? 0}:${liquidityReady}`;
   if (exitGateStates.get(strategy) !== gateState) {
     exitGateStates.set(strategy, gateState);
@@ -1737,7 +1779,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     );
     if (!needsReplace) {
       if (mayRecreateStaleOrder(eventTime(sell), now, nextStaleRecreateAt)) {
-        queueVerifiedStaleRecreate("closing", strategy, sell, payloadFrom(template, targetQuantity, true), executionPriority("exit"));
+        queueVerifiedStaleExitRecreate(strategy, sell, template);
         return;
       }
       if (liquidityRefreshDue && liquidity) advanceLiquidityRefresh(strategy, liquidity, id, now);
@@ -1757,11 +1799,29 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
       run: async () => {
         const liveSell = orders.find((order) => orderId(order) === id);
         if (!liveSell || !working.has(String(liveSell.status))) return;
-        const payload = payloadFrom(template, targetQuantity, true);
+        // Revalidate with the shared account-level snapshot immediately
+        // before Preview.  The queue can wait behind unrelated writes, so the
+        // quantity decided by the worker is not safe to reuse here.
+        const currentInventory = await refreshExitInventory(strategy, template, "before-sell-refresh");
+        const currentTarget = currentExitTarget(strategy, currentInventory, Date.now()).targetQuantity;
+        if (currentTarget <= 0) {
+          executionJournal.record("exit.refresh.skipped", {
+            strategy, orderId: id, reason: "no-current-exit-inventory", inventory: currentInventory,
+          });
+          queueSellCancel(strategy, liveSell, "no-current-exit-inventory");
+          return;
+        }
+        if (!exitRefreshNeeded(Number(liveSell.price), quantity(liveSell), remaining(liveSell), EXIT_ORDER_PRICE, currentTarget)) {
+          executionJournal.record("exit.refresh-noop", {
+            strategy, orderId: id, quantity: currentTarget, reason: "unchanged-after-write-time-inventory-check",
+          });
+          return;
+        }
+        const payload = payloadFrom(template, currentTarget, true);
         try {
           const replacement = await writeOrder(`sell-refresh:${id}:${Date.now()}`, "PUT", `/trader/v1/accounts/${accountHash}/orders/${id}`, payload, priority);
           applyLocalReplace(id, payload, replacement);
-          stamp(`卖单 Replace strategy=${strategy} quantity=${targetQuantity} replacement=${replacement}`);
+          stamp(`卖单 Replace strategy=${strategy} quantity=${currentTarget} replacement=${replacement}`);
         } catch (error) {
           if (!deferExitAfterPreviewRejection(strategy, id, error)) throw error;
         }
@@ -1793,7 +1853,14 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     key: `sell-submit:${strategy}`, priority,
     run: async () => {
       try {
-        if ((inventoryByStrategy.get(strategy) ?? 0) <= 0) return;
+        const currentInventory = await refreshExitInventory(strategy, template, "before-sell-submit");
+        const currentTarget = currentExitTarget(strategy, currentInventory, Date.now()).targetQuantity;
+        if (currentTarget <= 0) {
+          executionJournal.record("exit.submit.skipped", {
+            strategy, reason: "no-current-exit-inventory", inventory: currentInventory,
+          });
+          return;
+        }
         const current = activeClosingOrders();
         if (current.length > 0) {
           executionJournal.record("exit.submit.skipped", {
@@ -1801,10 +1868,10 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
           });
           return;
         }
-        const payload = payloadFrom(template, targetQuantity, true);
+        const payload = payloadFrom(template, currentTarget, true);
         const newId = await writeOrder(`sell-submit:${strategy}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, priority);
         applyLocalSubmit(payload, newId);
-        stamp(`自动卖出 strategy=${strategy} quantity=${targetQuantity} newOrder=${newId}`);
+        stamp(`自动卖出 strategy=${strategy} quantity=${currentTarget} newOrder=${newId}`);
       } catch (error) {
         if (!deferExitAfterPreviewRejection(strategy, null, error)) throw error;
       } finally {
