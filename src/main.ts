@@ -14,7 +14,7 @@ import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSna
 import { ExecutionJournal } from "./execution_journal.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility } from "./exit_policy.ts";
 import { acquireRuntimeLock } from "./runtime_lock.ts";
-import { mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
+import { FixedPriceReplenishmentGuard, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
 import { FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -247,6 +247,10 @@ const previewRejectedUntil = new Map<string, number>();
 const reportedPolicyAlerts = new Set<string>();
 const explorer = await loadExplorer();
 const fixedPriceCycleConsumedFills = await loadFixedPriceCycle();
+// A strategy has at most one fixed-price opening order.  Reserve its refill
+// slot before Preview so an activity confirmation and a full snapshot cannot
+// race each other into duplicate buy submissions.
+const fixedPriceReplenishmentGuard = new FixedPriceReplenishmentGuard();
 const explorerTemplates = new Map<string, Json>();
 const exitTemplatesByStrategy = await loadExitTemplates();
 const reportedUnpricedFills = new Set<string>();
@@ -675,8 +679,12 @@ async function loadActivityStreamContext(): Promise<{
 }
 
 async function poll(full = false, priority: Priority = 0): Promise<boolean> {
-  if (polling || stopping) return false;
-  polling = true;
+  // A complete snapshot replaces the shared working-order view, so only one
+  // may run at a time.  A fill-only snapshot only merges terminal orders and
+  // is safe to run beside it; ACCT_ACTIVITY must not wait behind a slow full
+  // refresh before a confirmed fill can replenish.
+  if ((full && polling) || stopping) return false;
+  if (full) polling = true;
   try {
     const now = new Date();
     const lookbackMs = full ? 60 * 60_000 : 5 * 60_000;
@@ -720,14 +728,14 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
     }
     return false;
   } finally {
-    polling = false;
+    if (full) polling = false;
   }
 }
 
 function handleAccountActivity(batch: ActivityBatch): void {
   // Stream payloads are hints only. The REST order snapshot remains the sole
   // authority for fills, terminal state, and any later broker write.
-  stamp(`ACCT_ACTIVITY signal received hints=${batch.hints.length} complete=${batch.complete}; scheduling REST reconciliation`);
+  stamp(`ACCT_ACTIVITY signal received hints=${batch.hints.length} complete=${batch.complete}; scheduling priority REST reconciliation`);
   scheduleActivityRestConfirmation();
 }
 
@@ -738,7 +746,9 @@ function scheduleActivityRestConfirmation(): void {
 
 function armActivityRestConfirmation(): void {
   if (activityRestTimer || activityRestRunning || stopping) return;
-  const dueAt = Math.max(Date.now() + 2_000, lastActivityRestAt + 2_000);
+  // The stream is only a wake-up signal.  Keep the REST confirmation, but do
+  // not deliberately add two seconds to a newly filled opening order.
+  const dueAt = Math.max(Date.now() + 250, lastActivityRestAt + 250);
   activityRestTimer = setTimeout(() => {
     activityRestTimer = null;
     void runActivityRestConfirmation();
@@ -750,11 +760,10 @@ async function runActivityRestConfirmation(): Promise<void> {
   if (lastFillPollAt >= lastIncompleteActivityAt) return;
   activityRestRunning = true;
   const confirmingThrough = lastIncompleteActivityAt;
-  while (polling && !stopping) await wait(25);
   let confirmed = false;
   const coveredByOtherPoll = lastFillPollAt >= confirmingThrough;
   if (!stopping && !coveredByOtherPoll) {
-    stamp("ACCT_ACTIVITY信息不足；2秒窗口内事件已合并，读取一次最近5分钟成交订单");
+    stamp("ACCT_ACTIVITY信息不足；250ms窗口内事件已合并，优先读取一次最近5分钟成交订单");
     confirmed = await poll(false, 0);
     if (confirmed) lastActivityRestAt = Date.now();
   }
@@ -1085,6 +1094,12 @@ function detectExplorerFills(): void {
 function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, priceCents: number): void {
   const filledOrderId = orderId(filledOrder);
   if (fixedPriceCycleConsumedFills.has(filledOrderId)) return;
+  if (!fixedPriceReplenishmentGuard.reserve(groupKey, filledOrderId)) {
+    executionJournal.record("fixed-price-cycle.deferred", {
+      groupKey, filledOrderId, reason: "strategy-replenishment-unavailable",
+    });
+    return;
+  }
   const priority = executionPriority("replenishment");
   writer.enqueue({
     key: `fixed-price-cycle:${filledOrderId}`,
@@ -1092,10 +1107,12 @@ function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, price
     run: async () => {
       if (stopping) {
         executionJournal.record("fixed-price-cycle.deferred", { groupKey, filledOrderId, reason: "runtime-stopping" });
+        fixedPriceReplenishmentGuard.release(groupKey, filledOrderId);
         return;
       }
       if (!mayReplenishFixedPrice(activeOpeningOrders(groupKey).length)) {
         executionJournal.record("fixed-price-cycle.deferred", { groupKey, filledOrderId, reason: "active-order-cap" });
+        fixedPriceReplenishmentGuard.release(groupKey, filledOrderId);
         return;
       }
       const payload = payloadFrom(filledOrder, 1, false, priceCents);
@@ -1103,12 +1120,24 @@ function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, price
         const brokerOrderId = await writeOrder(`fixed-price-cycle:${filledOrderId}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, priority);
         applyLocalSubmit(payload, brokerOrderId);
         fixedPriceCycleConsumedFills.add(filledOrderId);
+        fixedPriceReplenishmentGuard.clearDeferred(filledOrderId);
         persistFixedPriceCycle();
         stamp(`FIXED_PRICE_CYCLE_REBUY group=${groupKey} sourceOrder=${filledOrderId} price=${(priceCents / 100).toFixed(2)} order=${brokerOrderId}`);
         executionJournal.record("fixed-price-cycle.rebuy-submitted", { groupKey, filledOrderId, priceCents, brokerOrderId, order: payloadAuditData(payload) });
       } catch (error) {
-        if (String(error).startsWith("Error: SCHWAB_PREVIEW_INSUFFICIENT_FUNDS")) return;
+        const message = String(error);
+        if (message.startsWith("Error: SCHWAB_PREVIEW_INSUFFICIENT_FUNDS")) return;
+        if (message.includes("SCHWAB_PREVIEW_REJECTED") || message.includes("CACHED_PREVIEW_REJECTED")) {
+          const retryAt = Date.now() + PREVIEW_REJECTION_COOLDOWN_MS;
+          fixedPriceReplenishmentGuard.defer(filledOrderId, retryAt);
+          executionJournal.record("fixed-price-cycle.deferred", {
+            groupKey, filledOrderId, reason: "preview-rejected", retryAt: new Date(retryAt).toISOString(),
+          });
+          return;
+        }
         throw error;
+      } finally {
+        fixedPriceReplenishmentGuard.release(groupKey, filledOrderId);
       }
     },
   });
@@ -1699,6 +1728,11 @@ function deferExitAfterPreviewRejection(strategy: string, orderIdValue: string |
   const nextAt = Date.now() + PREVIEW_REJECTION_COOLDOWN_MS;
   if (orderIdValue) sellDue.set(orderIdValue, nextAt);
   else sellSubmitDue.set(strategy, nextAt);
+  // A funding-triggered exit normally refreshes every five seconds.  A
+  // rejected Preview must override that cadence or it will continuously
+  // consume Preview quota and delay priority replenishments.
+  const liquidity = liquidityExitRefreshes.get(strategy);
+  if (liquidity) liquidity.nextAt = Math.max(liquidity.nextAt, nextAt);
   executionJournal.record("exit.preview-retry-deferred", {
     strategy,
     orderId: orderIdValue,
