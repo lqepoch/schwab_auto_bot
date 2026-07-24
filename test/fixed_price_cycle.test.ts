@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FixedPriceReplenishmentGuard, FIXED_PRICE_MAX_ACTIVE_ORDERS, FIXED_PRICE_STARTUP_FILL_GRACE_MS, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "../src/fixed_price_cycle.ts";
+import { FixedPriceReplenishmentGuard, FIXED_PRICE_MAX_ACTIVE_ORDERS, FIXED_PRICE_STARTUP_FILL_GRACE_MS, STALE_ORDER_RECREATE_AGE_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "../src/fixed_price_cycle.ts";
 
 test("fixed-price mode keeps exactly one working opening order per strategy", () => {
   assert.equal(FIXED_PRICE_MAX_ACTIVE_ORDERS, 1);
@@ -14,6 +14,12 @@ test("recovers a recent pre-start fill but ignores historical initial-snapshot f
   assert.equal(mayRecoverFixedPriceFill(startedAt - FIXED_PRICE_STARTUP_FILL_GRACE_MS, startedAt), true);
   assert.equal(mayRecoverFixedPriceFill(startedAt - FIXED_PRICE_STARTUP_FILL_GRACE_MS - 1, startedAt), false);
   assert.equal(mayRecoverFixedPriceFill(startedAt + 90_000, startedAt), true);
+});
+
+test("recreates only an old working order and respects the global cooldown", () => {
+  assert.equal(mayRecreateStaleOrder(1_000, 1_000 + STALE_ORDER_RECREATE_AGE_MS - 1, 0), false);
+  assert.equal(mayRecreateStaleOrder(1_000, 1_000 + STALE_ORDER_RECREATE_AGE_MS, 0), true);
+  assert.equal(mayRecreateStaleOrder(1_000, 1_000 + STALE_ORDER_RECREATE_AGE_MS, 2_000_000), false);
 });
 
 test("reserves one immediate replenishment per strategy and cools down a rejected fill", () => {
