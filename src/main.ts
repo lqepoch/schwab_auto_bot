@@ -250,6 +250,7 @@ const fixedPriceCycleConsumedFills = await loadFixedPriceCycle();
 const explorerTemplates = new Map<string, Json>();
 const exitTemplatesByStrategy = await loadExitTemplates();
 const reportedUnpricedFills = new Set<string>();
+const reportedHistoricalFixedPriceFills = new Set<string>();
 let explorerSavePending = Promise.resolve();
 let fixedPriceCycleSavePending = Promise.resolve();
 let exitTemplateSavePending = Promise.resolve();
@@ -1049,7 +1050,11 @@ function detectExplorerFills(): void {
     }
     if (policy.repeatBuyAtOrderPrice) {
       if (!mayRecoverFixedPriceFill(fill.filledAt, runtimeStartedAt)) {
-        executionJournal.record("fixed-price-cycle.fill.ignored", { order: orderAuditData(order), priceCents: fill.priceCents, filledAt: new Date(fill.filledAt).toISOString(), reason: "before-startup-grace-window" });
+        const id = orderId(order);
+        if (!reportedHistoricalFixedPriceFills.has(id)) {
+          reportedHistoricalFixedPriceFills.add(id);
+          executionJournal.record("fixed-price-cycle.fill.ignored", { order: orderAuditData(order), priceCents: fill.priceCents, filledAt: new Date(fill.filledAt).toISOString(), reason: "before-startup-grace-window" });
+        }
         continue;
       }
       queueFixedPriceReplenishment(meta.key, order, fill.priceCents);
