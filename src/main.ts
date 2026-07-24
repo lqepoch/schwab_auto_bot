@@ -185,6 +185,7 @@ let stopping = false;
 let stopReason = "normal";
 let controlCheckRunning = false;
 let activityRestTimer: NodeJS.Timeout | null = null;
+const runtimeIntervals: NodeJS.Timeout[] = [];
 let activityRestRunning = false;
 let lastIncompleteActivityAt = 0;
 let lastActivityRestAt = 0;
@@ -210,6 +211,8 @@ let explorerSavePending = Promise.resolve();
 let exitTemplateSavePending = Promise.resolve();
 const normalExplorerActionPacer = new ExplorerActionPacer();
 const observedOrderStates = new Map<string, { status: string; filledQuantity: number; price: string; closeTime: string | null }>();
+const deferredExplorerRetries = new Map<string, { attempts: number; nextAt: number }>();
+const EXPLORER_FUNDING_RETRY_MS = 15_000;
 
 function flatten(source: any[]): Json[] {
   const output: Json[] = [];
@@ -503,7 +506,10 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     const blockers = previewBlockers(preview.body);
     const insufficientFunds = method === "POST" && previewReportsInsufficientFunds(preview.body);
     executionJournal.record("broker.preview.rejected", { key, method, path, blockers, insufficientFunds, order: payloadAuditData(payload) });
-    if (insufficientFunds) requestLiquidityExit(payload);
+    if (insufficientFunds) {
+      requestLiquidityExit(payload);
+      throw new Error(`SCHWAB_PREVIEW_INSUFFICIENT_FUNDS blockers=${blockers}`);
+    }
     throw new Error(`SCHWAB_PREVIEW_REJECTED blockers=${blockers}`);
   }
   previewRejectedUntil.delete(previewFingerprint);
@@ -741,11 +747,32 @@ function reconcileExplorerSnapshot(): void {
   persistExplorer();
 }
 
+function explorerActionKey(groupKey: string, action: ExplorerAction): string {
+  return `price-explorer:${groupKey}:${action.generation}:${action.dueAt}:${action.logicalId}:${action.kind}`;
+}
+
+function deferExplorerActionForFunding(groupKey: string, action: ExplorerAction): void {
+  const key = explorerActionKey(groupKey, action);
+  const previous = deferredExplorerRetries.get(key);
+  const retry = { attempts: (previous?.attempts ?? 0) + 1, nextAt: Date.now() + EXPLORER_FUNDING_RETRY_MS };
+  deferredExplorerRetries.set(key, retry);
+  persistExplorer();
+  executionJournal.record("explorer.action.deferred-for-funding", {
+    groupKey,
+    action,
+    attempts: retry.attempts,
+    retryAt: new Date(retry.nextAt).toISOString(),
+  });
+}
+
 function queueExplorerActions(groupKey: string, actions: ExplorerAction[]): void {
   for (const action of actions) {
+    const key = explorerActionKey(groupKey, action);
+    const retry = deferredExplorerRetries.get(key);
+    if (retry && Date.now() < retry.nextAt) continue;
     executionJournal.record("explorer.action.queued", { groupKey, action });
     writer.enqueue({
-      key: `price-explorer:${groupKey}:${action.generation}:${action.dueAt}:${action.logicalId}:${action.kind}`,
+      key,
       priority: 0,
       run: () => executeExplorerAction(groupKey, action),
     });
@@ -782,6 +809,7 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
   }
   if (action.binding === false) await normalExplorerActionPacer.admit();
   const complete = (): void => {
+    deferredExplorerRetries.delete(explorerActionKey(groupKey, action));
     explorer.acknowledge(groupKey, action);
     persistExplorer();
     executionJournal.record("explorer.action.completed", { groupKey, action });
@@ -810,9 +838,15 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
       explorer.replaceBrokerOrder(groupKey, logical.id, replacement, desiredPrice);
       stamp(`PRICE_EXPLORER_REPLACE group=${groupKey} logical=${logical.id} price=${(desiredPrice / 100).toFixed(2)} replacement=${replacement}`);
       executionJournal.record("explorer.order.replaced", { groupKey, action, logicalId: logical.id, sourceOrder: orderAuditData(current), replacementOrderId: replacement, priceCents: desiredPrice });
-    } finally {
+    } catch (error) {
+      if (String(error).startsWith("Error: SCHWAB_PREVIEW_INSUFFICIENT_FUNDS")) {
+        deferExplorerActionForFunding(groupKey, action);
+        return;
+      }
       complete();
+      throw error;
     }
+    complete();
     return;
   }
   if (logical.brokerOrderId !== null || action.kind === "refresh") {
@@ -843,9 +877,15 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
     explorer.bindBrokerOrder(groupKey, logical.id, brokerOrderId);
     stamp(`PRICE_EXPLORER_SUBMIT group=${groupKey} logical=${logical.id} price=${(desiredPrice / 100).toFixed(2)} order=${brokerOrderId}`);
     executionJournal.record("explorer.order.submitted", { groupKey, action, logicalId: logical.id, brokerOrderId, priceCents: desiredPrice, order: payloadAuditData(payload) });
-  } finally {
+  } catch (error) {
+    if (String(error).startsWith("Error: SCHWAB_PREVIEW_INSUFFICIENT_FUNDS")) {
+      deferExplorerActionForFunding(groupKey, action);
+      return;
+    }
     complete();
+    throw error;
   }
+  complete();
 }
 
 function detectExplorerFills(): void {
@@ -922,7 +962,11 @@ async function explorerRoundLoop(): Promise<void> {
     }
     for (const groupKey of shuffled(explorer.groupKeys())) {
       if (explorer.hasPendingActions(groupKey)) continue;
-      const actions = explorer.planRoundRecovery(groupKey, Date.now());
+      const now = Date.now();
+      const actions = [
+        ...explorer.planMissingOrderRecovery(groupKey, now),
+        ...explorer.planRoundRecovery(groupKey, now),
+      ];
       queueExplorerActions(groupKey, actions);
       if (actions.length > 0) await wait(policy.orderCooldownMs);
     }
@@ -1289,16 +1333,18 @@ if (!readOnly) {
 if (once) {
   stop();
 } else {
-  setInterval(() => {
+  runtimeIntervals.push(setInterval(() => {
     const fallbackDue = Date.now() - lastFillPollAt >= 30_000;
     if (!activityStream?.ready || fallbackDue) void poll(false);
-  }, 2_000);
-  setInterval(() => void explorerTick(), 200);
-  setInterval(() => void evaluateExits(), 500);
-  setInterval(() => void reconcileAll(), 110_000);
-  setInterval(() => void checkControlRequest(), 250);
+  }, 2_000));
+  runtimeIntervals.push(setInterval(() => void explorerTick(), 200));
+  runtimeIntervals.push(setInterval(() => void evaluateExits(), 500));
+  runtimeIntervals.push(setInterval(() => void reconcileAll(), 110_000));
+  runtimeIntervals.push(setInterval(() => void checkControlRequest(), 250));
 }
 while (!stopping) await wait(250);
+for (const interval of runtimeIntervals) clearInterval(interval);
+if (activityRestTimer) clearTimeout(activityRestTimer);
 executionJournal.record("run.stopping", { reason: stopReason });
 if (!readOnly) persistExplorer();
 await activityStream?.stop();
