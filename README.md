@@ -121,7 +121,7 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 node .\src\main.ts --confirm-live I_UNDERSTAND --repeat-buy-at-order-price
 ```
 
-With `--repeat-buy-at-order-price`, the bot runs a fixed-price cycle: price exploration, generations, repricing, and explorer refresh loops are disabled. Each newly completed opening vertical is replenished once at its submitted limit price. Consumed fill IDs are persisted in `.state/fixed-price-cycle.json`, so a hot switch cannot repeat an already handled fill. The independent exit worker and its sell-first priority remain active.
+With `--repeat-buy-at-order-price`, the bot disables only price exploration, generation expansion, and price-changing repricing. It maintains at most one working opening order per strategy, repeatedly uses native Replace at that order's existing limit price, and replenishes one new opening order at the submitted limit price after a newly confirmed opening fill. Consumed fill IDs are persisted in `.state/fixed-price-cycle.json`, so a hot switch cannot repeat an already handled fill. The independent exit worker and its sell-first priority remain active.
 
 ### 独立卖出触发与流动性处理
 
@@ -141,6 +141,8 @@ With `--repeat-buy-at-order-price`, the bot runs a fixed-price cycle: price expl
 Get-Content .\.state\runtime\active-run.json -Raw | ConvertFrom-Json
 Get-Content .\.state\executions\<日期>\<runId>.jsonl -Wait
 ```
+
+同一个工作目录一次只允许一个 bot 实例（包括只读模式）。启动时会原子创建 `.state/runtime/active-run.lock`；若锁的所属 PID 仍在运行，新实例会以 `RUNTIME_INSTANCE_ACTIVE` 失败并且不会覆盖 `active-run.json`、策略状态或审计上下文。异常退出留下的锁仅在所属 PID 已不存在时才会自动回收；无法验证锁的内容时保持失败关闭。
 
 热切换仅用于已完成验证并合并到 `main`、且当前工作目录已快进到该 `main` 的更新。脚本会向旧进程发送受控停止请求；旧进程停止接收新的动作、持久化探索状态并等待已经进入串行写入队列的请求完成后才退出。确认旧 PID 退出后，脚本以原来的 Node 路径和启动参数启动当前 `main` 版本；若旧进程未在超时内退出，脚本失败且绝不启动第二个交易进程。
 

@@ -13,6 +13,8 @@ import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./price_explorer.ts";
 import { ExecutionJournal } from "./execution_journal.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility } from "./exit_policy.ts";
+import { acquireRuntimeLock } from "./runtime_lock.ts";
+import { mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -22,6 +24,7 @@ const fixedPriceCycleStatePath = join(root, ".state", "fixed-price-cycle.json");
 const exitTemplateStatePath = join(root, ".state", "exit-templates.json");
 const runtimeStatePath = join(root, ".state", "runtime", "active-run.json");
 const runtimeControlPath = join(root, ".state", "runtime", "control-request.json");
+const runtimeLockPath = join(root, ".state", "runtime", "active-run.lock");
 const runId = randomUUID();
 const executionJournal = new ExecutionJournal(root, runId, (error) => {
   process.stderr.write(`${new Date().toISOString()} [node-vertical] EXECUTION_JOURNAL_WRITE_FAILED error=${String(error)}\n`);
@@ -35,6 +38,8 @@ if (!readOnly && !confirmedLive) {
   throw new Error("真实写入必须显式传入 --confirm-live I_UNDERSTAND");
 }
 const policy = parseRuntimePolicy(process.argv);
+const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId);
+process.once("exit", () => runtimeLock.release());
 
 function stamp(message: string): void {
   const value = new Intl.DateTimeFormat("sv-SE", {
@@ -1025,7 +1030,7 @@ function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, price
         executionJournal.record("fixed-price-cycle.deferred", { groupKey, filledOrderId, reason: stopping ? "runtime-stopping" : "exit-priority-active" });
         return;
       }
-      if (activeOpeningOrders(groupKey).length >= MAX_ACTIVE_ORDERS) {
+      if (!mayReplenishFixedPrice(activeOpeningOrders(groupKey).length)) {
         executionJournal.record("fixed-price-cycle.deferred", { groupKey, filledOrderId, reason: "active-order-cap" });
         return;
       }
@@ -1067,7 +1072,7 @@ function shuffled<T>(values: readonly T[]): T[] {
 async function explorerRoundLoop(): Promise<void> {
   while (!stopping && !readOnly) {
     if (policy.repeatBuyAtOrderPrice) {
-      await wait(policy.roundCooldownMs);
+      await fixedPriceRefreshRound();
       continue;
     }
     if (!policy.isExecutionWindowOpen()) {
@@ -1095,6 +1100,53 @@ async function explorerRoundLoop(): Promise<void> {
     }
     await wait(policy.roundCooldownMs);
   }
+}
+
+async function fixedPriceRefreshRound(): Promise<void> {
+  if (!policy.isExecutionWindowOpen()) {
+    await wait(60_000);
+    return;
+  }
+  while (polling && !stopping) await wait(50);
+  if (stopping || !await poll(true, 0)) {
+    await wait(policy.roundCooldownMs);
+    return;
+  }
+  const candidates = shuffled(orders.filter((order) => {
+    const meta = managedOpening(order);
+    if (meta === null || !working.has(String(order.status))) return false;
+    // Existing external duplicates are left untouched, but fixed-price mode
+    // maintains and refreshes only one working opening order per strategy.
+    return orderId(activeOpeningOrders(meta.key)[0]) === orderId(order);
+  }));
+  for (const candidate of candidates) {
+    if (stopping) break;
+    const id = orderId(candidate);
+    writer.enqueue({
+      key: `fixed-price-cycle-refresh:${id}`,
+      priority: 2,
+      run: async () => {
+        if (stopping || !policy.isExecutionWindowOpen()) return;
+        const current = orders.find((order) => orderId(order) === id);
+        if (!current || !working.has(String(current.status)) || !managedOpening(current)) return;
+        const payload = payloadFrom(current, 1, false, Math.round(Number(current.price) * 100));
+        const replacement = await writeOrder(
+          `fixed-price-cycle-refresh:${id}:${Date.now()}`,
+          "PUT",
+          `/trader/v1/accounts/${accountHash}/orders/${id}`,
+          payload,
+          2,
+        );
+        applyLocalReplace(id, payload, replacement);
+        stamp(`FIXED_PRICE_CYCLE_REPLACE sourceOrder=${id} price=${Number(current.price).toFixed(2)} replacement=${replacement}`);
+        executionJournal.record("fixed-price-cycle.order-replaced", {
+          sourceOrder: orderAuditData(current), replacementOrderId: replacement, order: payloadAuditData(payload),
+        });
+      },
+    });
+    await wait(policy.orderCooldownMs);
+  }
+  await wait(policy.roundCooldownMs);
 }
 
 function trackInventoryFillDeltas(): void {
@@ -1633,7 +1685,9 @@ executionJournal.record("run.started", {
   buildId: process.env.SCHWAB_BOT_BUILD_ID ?? null,
 });
 stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
-if (!readOnly) stamp(policy.repeatBuyAtOrderPrice ? "FIXED_PRICE_CYCLE_ENABLED source=orderLimit exploration=disabled" : "PRICE_EXPLORER_FILL_PRICE_SOURCE source=actualNet");
+if (!readOnly) stamp(policy.repeatBuyAtOrderPrice
+  ? "FIXED_PRICE_CYCLE_ENABLED source=orderLimit; price exploration is disabled; one working opening order per strategy is maintained and refreshed at its existing price"
+  : "PRICE_EXPLORER_FILL_PRICE_SOURCE source=actualNet");
 await bootstrap();
 await poll(true);
 if (!once) {
@@ -1643,11 +1697,13 @@ if (!once) {
     onState: stamp,
   });
   activityStream.start();
-  if (!readOnly && !policy.repeatBuyAtOrderPrice) void explorerRoundLoop();
+  if (!readOnly) void explorerRoundLoop();
 }
 if (!readOnly) {
   await reconcilePositions();
-  stamp("启动阶段：先处理全部可卖库存，再启动整体买单刷新");
+  stamp(policy.repeatBuyAtOrderPrice
+    ? "启动阶段：先处理全部可卖库存；固定价格模式保留整体买单同价 Replace 刷新，并且每个策略只维护一张工作买单"
+    : "启动阶段：先处理全部可卖库存，再启动整体买单刷新");
   await evaluateExits(true);
   stamp("启动卖出评估已调度；成交监听、每策略卖单维护与整体刷新并行运行");
 }
@@ -1678,3 +1734,4 @@ await exitTemplateSavePending;
 await writeRuntimeState("stopped", stopReason);
 executionJournal.record("run.stopped", { reason: stopReason });
 await executionJournal.flush();
+runtimeLock.release();
