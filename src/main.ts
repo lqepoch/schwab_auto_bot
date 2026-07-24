@@ -7,7 +7,7 @@ import { requireWeeklyReauthorization, SchwabTokenProvider } from "./auth.ts";
 import { PriorityGate, PriorityWriter, type Priority } from "./priority_runtime.ts";
 import { SchwabRestClient } from "./schwab_client.ts";
 import { SchwabApiError } from "../vendor/schwab-api-nodejs/src/utils/errors.ts";
-import { parseRuntimePolicy } from "./runtime_policy.ts";
+import { isWithinInclusiveRange, parseRuntimePolicy } from "./runtime_policy.ts";
 type Json = Record<string, any>;
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -860,7 +860,9 @@ async function refreshRoundLoop(): Promise<void> {
     }
     while (polling && !stopping) await wait(50);
     if (stopping) return;
-    const snapshotReady = Date.now() - lastFullOrderPollAt < 5_000 || await poll(true, 0);
+    // Each round owns exactly one fresh full order snapshot. Other workers reuse
+    // the shared `orders` state, but a prior round's snapshot is never reused.
+    const snapshotReady = await poll(true, 0);
     if (!snapshotReady) {
       stamp("整体刷新开轮快照未取得；本轮跳过，5s 后重试");
       await wait(5_000);
@@ -871,12 +873,14 @@ async function refreshRoundLoop(): Promise<void> {
       return working.has(String(order.status)) && meta?.opening && policy.underlyings.has(meta.underlying)
         && meta.expiration === newYorkDate()
         && meta.lowerStrike >= policy.strikeMin && meta.higherStrike <= policy.strikeMax
-        && remaining(order) <= 1 && Number(order.price) * 100 <= 100;
+        && remaining(order) <= 1
+        && isWithinInclusiveRange(Number(order.price) * 100, policy.entryNotionalMin, policy.entryNotionalMax);
     });
     stamp(`整体刷新轮次启动 candidates=${candidates.length}；本轮仅此一次完整订单GET，逐单失败直接跳过`);
     const roundJobs: Promise<void>[] = [];
-    for (const candidate of candidates) {
+    for (const [index, candidate] of candidates.entries()) {
       if (stopping) return;
+      if (index > 0) await wait(policy.orderCooldownMs);
       const id = orderId(candidate);
       roundJobs.push(writer.enqueueAndWait({
         key: `overall-refresh:${id}`,
@@ -896,11 +900,10 @@ async function refreshRoundLoop(): Promise<void> {
           stamp(`整体刷新 order=${id} replacement=${replacement}`);
         },
       }));
-      await wait(1_000);
     }
     await Promise.all(roundJobs);
-    stamp("整体刷新轮次完成；等待 10s 后开始下一轮");
-    await wait(10_000);
+    stamp(`整体刷新轮次完成；等待 ${policy.roundCooldownMs / 1_000}s 后开始下一轮`);
+    await wait(policy.roundCooldownMs);
   }
 }
 
@@ -911,7 +914,7 @@ process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
 if (!readOnly) await requireWeeklyReauthorization();
-stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET`);
+stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
 await bootstrap();
 await poll(true);
 if (!once) {
