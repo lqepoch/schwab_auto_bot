@@ -7,11 +7,11 @@ import {
   fixedPriceRefreshIntervalMs,
 } from "../src/refresh_pacer.ts";
 
-test("fixed-price refresh cadence stays within 0.7 to 0.85 seconds and slows under load", () => {
+test("fixed-price refresh cadence stays within 0.7 to 1.2 seconds and slows under load", () => {
   assert.equal(fixedPriceRefreshIntervalMs(0), FIXED_PRICE_REFRESH_INTERVAL_MIN_MS);
-  assert.equal(fixedPriceRefreshIntervalMs(60), FIXED_PRICE_REFRESH_INTERVAL_MIN_MS);
-  assert.equal(fixedPriceRefreshIntervalMs(78), 775);
-  assert.equal(fixedPriceRefreshIntervalMs(96), FIXED_PRICE_REFRESH_INTERVAL_MAX_MS);
+  assert.equal(fixedPriceRefreshIntervalMs(50), FIXED_PRICE_REFRESH_INTERVAL_MIN_MS);
+  assert.equal(fixedPriceRefreshIntervalMs(60), 950);
+  assert.equal(fixedPriceRefreshIntervalMs(70), FIXED_PRICE_REFRESH_INTERVAL_MAX_MS);
   assert.equal(fixedPriceRefreshIntervalMs(200), FIXED_PRICE_REFRESH_INTERVAL_MAX_MS);
 });
 
