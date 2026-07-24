@@ -8,6 +8,8 @@ export type RuntimePolicy = {
   entryNotionalMax: number;
   executionStart: string;
   executionEnd: string;
+  orderCooldownMs: number;
+  roundCooldownMs: number;
   isExecutionWindowOpen: (now?: Date) => boolean;
   requireExecutionWindow: (now?: Date) => void;
 };
@@ -20,6 +22,14 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
   const entryNotionalMax = parseNumber(option(argv, "--entry-notional-max") ?? "90", "ENTRY_NOTIONAL_MAX_INVALID");
   const executionStart = parseTime(option(argv, "--execution-start") ?? "09:15", "EXECUTION_START_INVALID");
   const executionEnd = parseTime(option(argv, "--execution-end") ?? "15:45", "EXECUTION_END_INVALID");
+  const orderCooldownMs = parsePositiveSeconds(
+    option(argv, "--order-cooldown-seconds") ?? "1",
+    "ORDER_COOLDOWN_INVALID",
+  );
+  const roundCooldownMs = parsePositiveSeconds(
+    option(argv, "--round-cooldown-seconds") ?? "5",
+    "ROUND_COOLDOWN_INVALID",
+  );
 
   if (strikeMin > strikeMax) throw new Error("STRIKE_RANGE_INVALID");
   if (entryNotionalMin > entryNotionalMax) throw new Error("ENTRY_NOTIONAL_RANGE_INVALID");
@@ -34,11 +44,17 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
     entryNotionalMax,
     executionStart,
     executionEnd,
+    orderCooldownMs,
+    roundCooldownMs,
     isExecutionWindowOpen,
     requireExecutionWindow(now = new Date()): void {
       if (!isExecutionWindowOpen(now)) throw new Error("EXECUTION_WINDOW_CLOSED");
     },
   };
+}
+
+export function isWithinInclusiveRange(value: number, minimum: number, maximum: number): boolean {
+  return Number.isFinite(value) && value >= minimum && value <= maximum;
 }
 
 export function isWithinExecutionWindow(now: Date, start: string, end: string): boolean {
@@ -82,6 +98,12 @@ function parseTime(raw: string, code: string): string {
   const [hours, minutesValue] = raw.split(":").map(Number);
   if (hours > 23 || minutesValue > 59) throw new Error(code);
   return raw;
+}
+
+function parsePositiveSeconds(raw: string, code: string): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(code);
+  return value * 1_000;
 }
 
 function minutes(value: string): number {
