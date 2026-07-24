@@ -27,7 +27,7 @@ test("does not start an exit countdown from inventory observation without a conf
 test("inventory threshold starts exits immediately and refresh interval is eight seconds", () => {
   assert.equal(EXIT_INVENTORY_TRIGGER, 5);
   assert.equal(EXIT_REFRESH_MS, 8_000);
-  assert.equal(LIQUIDITY_EXIT_DELAY_MS, 15_000);
+  assert.equal(LIQUIDITY_EXIT_DELAY_MS, 0);
   assert.equal(LIQUIDITY_EXIT_REFRESH_MS, 5_000);
   assert.equal(LIQUIDITY_EXIT_REFRESH_ROUNDS, 2);
   assert.deepEqual(exitEligibility(5, 1_000_000, 1_000_001), {

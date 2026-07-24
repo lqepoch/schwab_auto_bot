@@ -1085,12 +1085,13 @@ function detectExplorerFills(): void {
 function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, priceCents: number): void {
   const filledOrderId = orderId(filledOrder);
   if (fixedPriceCycleConsumedFills.has(filledOrderId)) return;
+  const priority = executionPriority("replenishment");
   writer.enqueue({
     key: `fixed-price-cycle:${filledOrderId}`,
-    priority: 1,
+    priority,
     run: async () => {
-      if (stopping || hasExitPriority(groupKey)) {
-        executionJournal.record("fixed-price-cycle.deferred", { groupKey, filledOrderId, reason: stopping ? "runtime-stopping" : "exit-priority-active" });
+      if (stopping) {
+        executionJournal.record("fixed-price-cycle.deferred", { groupKey, filledOrderId, reason: "runtime-stopping" });
         return;
       }
       if (!mayReplenishFixedPrice(activeOpeningOrders(groupKey).length)) {
@@ -1099,7 +1100,7 @@ function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, price
       }
       const payload = payloadFrom(filledOrder, 1, false, priceCents);
       try {
-        const brokerOrderId = await writeOrder(`fixed-price-cycle:${filledOrderId}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, 1);
+        const brokerOrderId = await writeOrder(`fixed-price-cycle:${filledOrderId}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, priority);
         applyLocalSubmit(payload, brokerOrderId);
         fixedPriceCycleConsumedFills.add(filledOrderId);
         persistFixedPriceCycle();
@@ -1617,14 +1618,15 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     if (!liquidityRefreshDue && !needsQuantityUpdate && now < due && Number(sell.price) === EXIT_ORDER_PRICE) return;
     if (liquidityRefreshDue && liquidity) advanceLiquidityRefresh(strategy, liquidity, id, now);
     sellDue.set(id, now + (liquidityRefreshDue ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS));
+    const priority = executionPriority("exit");
     writer.enqueue({
-      key: `sell-refresh:${id}`, priority: 0,
+      key: `sell-refresh:${id}`, priority,
       run: async () => {
         const liveSell = orders.find((order) => orderId(order) === id);
         if (!liveSell || !working.has(String(liveSell.status))) return;
         const payload = payloadFrom(template, targetQuantity, true);
         try {
-          const replacement = await writeOrder(`sell-refresh:${id}:${Date.now()}`, "PUT", `/trader/v1/accounts/${accountHash}/orders/${id}`, payload, 0);
+          const replacement = await writeOrder(`sell-refresh:${id}:${Date.now()}`, "PUT", `/trader/v1/accounts/${accountHash}/orders/${id}`, payload, priority);
           applyLocalReplace(id, payload, replacement);
           stamp(`卖单 Replace strategy=${strategy} quantity=${targetQuantity} replacement=${replacement}`);
         } catch (error) {
@@ -1638,13 +1640,14 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
   if (Date.now() - lastFullOrderPollAt >= 5_000 && !await ensureFreshOrdersForExit()) return;
   sellSubmitDue.set(strategy, now + (liquidityReady ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS));
   if (liquidityReady && liquidity) liquidity.nextAt = now + LIQUIDITY_EXIT_REFRESH_MS;
+  const priority = executionPriority("exit");
   writer.enqueue({
-    key: `sell-submit:${strategy}`, priority: 0,
+    key: `sell-submit:${strategy}`, priority,
     run: async () => {
       if ((inventoryByStrategy.get(strategy) ?? 0) <= 0) return;
       const payload = payloadFrom(template, targetQuantity, true);
       try {
-        const newId = await writeOrder(`sell-submit:${strategy}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, 0);
+        const newId = await writeOrder(`sell-submit:${strategy}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, priority);
         applyLocalSubmit(payload, newId);
         stamp(`自动卖出 strategy=${strategy} quantity=${targetQuantity} newOrder=${newId}`);
       } catch (error) {
@@ -1658,14 +1661,25 @@ function queueSellCancel(strategy: string, sell: Json, reason: string): void {
   const id = orderId(sell);
   if (cancelingSells.has(id)) return;
   cancelingSells.add(id);
+  const priority = executionPriority("exit");
   writer.enqueue({
-    key: `sell-cancel:${reason}:${id}`, priority: 0,
+    key: `sell-cancel:${reason}:${id}`, priority,
     run: async () => {
       await cancelOrder(`sell-cancel:${reason}:${id}`, id);
       sellDue.delete(id);
       stamp(`卖单取消 strategy=${strategy} order=${id} reason=${reason}`);
     },
   });
+}
+
+function liquidityConstrained(): boolean {
+  return liquidityExitRefreshes.size > 0;
+}
+
+function executionPriority(kind: "replenishment" | "exit" | "refresh"): Priority {
+  if (kind === "refresh") return 2;
+  if (liquidityConstrained()) return kind === "exit" ? 0 : 1;
+  return kind === "replenishment" ? 0 : 1;
 }
 
 function deferExitAfterPreviewRejection(strategy: string, orderIdValue: string | null, error: unknown): boolean {
