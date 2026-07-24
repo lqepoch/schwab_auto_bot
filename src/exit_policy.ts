@@ -10,6 +10,19 @@ export function maySubmitExit(activeWorkingSellCount: number, submitInFlight: bo
   return activeWorkingSellCount === 0 && !submitInFlight;
 }
 
+/** Schwab rejects a semantic no-op Replace; keep the existing working sell. */
+export function exitRefreshNeeded(
+  currentPrice: number,
+  currentQuantity: number,
+  currentRemainingQuantity: number,
+  targetPrice: number,
+  targetQuantity: number,
+): boolean {
+  return currentPrice !== targetPrice
+    || currentQuantity !== targetQuantity
+    || currentRemainingQuantity !== targetQuantity;
+}
+
 export type ExitEligibility = {
   targetQuantity: number;
   reason: "inventory-threshold" | "idle-after-buy-fill" | "waiting-for-confirmed-buy-fill" | "waiting-for-idle-window";

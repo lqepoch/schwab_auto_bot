@@ -9,7 +9,7 @@
 - 默认拒绝真实写入；只有精确传入 `--confirm-live I_UNDERSTAND` 才会启动真实自动交易循环。
 - `--read-only` 禁止 Preview、Submit、Replace 和 Cancel；`--once` 在一次账户与订单快照后退出。
 - 所有 SDK 请求的内置重试均关闭。配额、429 退避、写入串行化和未知写入结果由主程序统一控制，避免一次逻辑请求产生未计量的 broker 请求。
-- `ACCT_ACTIVITY` 流消息仅触发 REST 订单对账；成交与终态只以 Schwab REST 订单快照为准。活动事件以 250ms 合并后发起高优先级轻量成交同步，不会等待正在进行的完整订单刷新；没有可解析活动详情时，仍以该 REST 同步作为安全的确认回退。
+- `ACCT_ACTIVITY` 流消息仅触发 REST 订单对账；成交与终态只以 Schwab REST 订单快照为准。首个活动事件在 250ms 合并后发起高优先级轻量成交同步，不会等待正在进行的完整订单刷新；连续、无可解析详情的活动流最多每 1.5 秒确认一次，避免确认风暴耗尽补买和卖单所需的 API 配额。
 - 写入前必须有 Schwab Preview；最终 broker 写入由单一写入闸门串行化。失败或缺少 broker `Location` 订单 ID 的写入会进入未知结果隔离，不会自动重发。
 
 ## 安装
@@ -165,6 +165,11 @@ Get-Content .\.state\executions\<日期>\<runId>.jsonl -Wait
 探索买单在 Schwab `Preview` 明确返回资金、现金或购买力不足时，不会再被当作完成并永久消费。该逻辑订单会保留在探索状态中，15 秒后节流重试；资金恢复后无需等待新的成交事件即可继续提交。启动、热切换或旧版本留下的“未成交且没有 broker order ID”的逻辑买单，也会在下一次独立刷新轮按现有三张上限恢复为 `ensure` 动作。审计日志使用 `explorer.action.deferred-for-funding` 记录延迟原因与下一次重试时间。
 
 ## 验证
+
+For a working 0.99 exit whose price, quantity, and remaining quantity already
+match the strategy target, the bot records `exit.refresh-noop` instead of
+sending an identical Replace that Schwab rejects.  It still replaces an exit
+when any of those values differs.
 
 ```powershell
 npm run check
