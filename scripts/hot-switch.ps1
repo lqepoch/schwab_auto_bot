@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$WorkspaceRoot = (Split-Path -Parent $PSScriptRoot),
+  [string]$WorkspaceRoot,
   [ValidateRange(5, 300)]
   [int]$TimeoutSeconds = 60,
   [switch]$StopOnly
@@ -8,6 +8,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
+  $WorkspaceRoot = Split-Path -Parent $PSScriptRoot
+}
 
 $workspace = (Resolve-Path -LiteralPath $WorkspaceRoot).Path
 $statePath = Join-Path $workspace ".state\runtime\active-run.json"

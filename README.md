@@ -154,6 +154,10 @@ Get-Content .\.state\executions\<日期>\<runId>.jsonl -Wait
 
 首次使用热切换前，必须先用本版本启动一次 bot，让它写入 `.state/runtime/active-run.json`。更新操作的安全顺序固定为：在独立 worktree 修改与测试 → 创建并合并 PR 到 `main` → 主工作目录快进到远程 `main` 并再次验证 → 运行热切换脚本。这样新进程始终运行已合并的主线代码。
 
+### 资金不足后的回补恢复
+
+探索买单在 Schwab `Preview` 明确返回资金、现金或购买力不足时，不会再被当作完成并永久消费。该逻辑订单会保留在探索状态中，15 秒后节流重试；资金恢复后无需等待新的成交事件即可继续提交。启动、热切换或旧版本留下的“未成交且没有 broker order ID”的逻辑买单，也会在下一次独立刷新轮按现有三张上限恢复为 `ensure` 动作。审计日志使用 `explorer.action.deferred-for-funding` 记录延迟原因与下一次重试时间。
+
 ## 验证
 
 ```powershell

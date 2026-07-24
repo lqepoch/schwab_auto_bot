@@ -32,6 +32,20 @@ test("persists unacknowledged actions so an interrupted broker write can resume 
   );
 });
 
+test("recovers an unfilled logical order that a previous runtime acknowledged without a broker order", () => {
+  const explorer = new PriceExplorer();
+  const first = explorer.recordCompleteFill("QQQ:vertical", "1", 90, 1_000);
+  explorer.acknowledge("QQQ:vertical", first.actions[0]);
+  assert.deepEqual(explorer.planMissingOrderRecovery("QQQ:vertical", 2_000), [{
+    generation: 0,
+    dueAt: 2_000,
+    logicalId: "l1",
+    kind: "ensure",
+    priceCents: 90,
+    binding: false,
+  }]);
+});
+
 test("single mode creates the exact two-order exploration schedule", () => {
   const explorer = new PriceExplorer();
   explorer.recordCompleteFill("QQQ:vertical", "1", 90, 0);

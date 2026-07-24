@@ -240,6 +240,24 @@ export class PriceExplorer {
     return actions;
   }
 
+  /** Restores unfilled logical orders that lost their broker order before submission. */
+  planMissingOrderRecovery(groupKey: string, now: number): ExplorerAction[] {
+    const group = this.group(groupKey);
+    const slots = Math.max(0, MAX_ACTIVE_ORDERS - this.activeLogicalOrders(groupKey).length);
+    return Object.values(group.logicalOrders)
+      .filter((order) => !order.filled && order.brokerOrderId === null)
+      .sort((left, right) => left.priceCents - right.priceCents || left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+      .slice(0, slots)
+      .map((order) => ({
+        generation: group.generation,
+        dueAt: now,
+        logicalId: order.id,
+        kind: "ensure" as const,
+        priceCents: order.priceCents,
+        binding: false,
+      }));
+  }
+
   private group(groupKey: string): Group {
     const current = this.groups[groupKey];
     if (current) return current;
