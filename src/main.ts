@@ -14,7 +14,7 @@ import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSna
 import { ExecutionJournal } from "./execution_journal.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "./exit_policy.ts";
 import { acquireRuntimeLock } from "./runtime_lock.ts";
-import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_COOLDOWN_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
+import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
 import { FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
 import { classifyPreviewRejection, previewRejectionCooldownFromError } from "./preview_rejection.ts";
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
@@ -230,8 +230,8 @@ let fixedPriceRefreshRoundActive = false;
 let lastIncompleteActivityAt = 0;
 let lastActivityRestAt = 0;
 let lastFillPollAt = 0;
-let staleRecreateActive = false;
-let nextStaleRecreateAt = 0;
+const staleExitRecreateInFlight = new Set<string>();
+const staleExitRetryAt = new Map<string, number>();
 const openingFillLots = new Map<string, Map<string, number>>();
 const lastOpeningFillAt = new Map<string, number>();
 const inventoryObservedAt = new Map<string, number>();
@@ -927,13 +927,15 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
 
 function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template: Json): void {
   const id = orderId(source);
-  const oldest = orders.filter((order) => working.has(String(order.status)) && info(order)?.closing
-    && info(order)?.expiration === newYorkDate() && policy.underlyings.has(info(order)?.underlying ?? ""))
-    .sort((left, right) => eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)))[0];
-  if (!oldest || orderId(oldest) !== id) return;
-  if (staleRecreateActive || !mayRecreateStaleOrder(eventTime(source), Date.now(), nextStaleRecreateAt)) return;
-  staleRecreateActive = true;
-  nextStaleRecreateAt = Date.now() + STALE_ORDER_RECREATE_COOLDOWN_MS;
+  if (staleExitRecreateInFlight.has(id)) return;
+  if (!mayRecreateStaleOrder(eventTime(source), Date.now(), staleExitRetryAt.get(id) ?? 0)) return;
+  staleExitRecreateInFlight.add(id);
+  const retryAt = Date.now() + STALE_ORDER_RECREATE_RETRY_MS;
+  staleExitRetryAt.set(id, retryAt);
+  // Override the rejected Replace's longer fingerprint cooldown for this
+  // separate, guarded stale-recreate path.  If this attempt cannot complete,
+  // the strategy worker wakes this individual old sell again in ten seconds.
+  sellDue.set(id, retryAt);
   writer.enqueue({
     key: `stale-recreate:closing:${id}`,
     priority: 0,
@@ -944,15 +946,17 @@ function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template
           executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: "full-reconciliation-in-progress-before-cancel" });
           return;
         }
-        // This is the only maintenance flow allowed to use critical budget:
-        // after a confirmed cancel it must obtain an authoritative snapshot
-        // before any new sell is considered.
+        // Every stale exit has its own retry clock.  The final broker write is
+        // still serial, but unrelated 90-second exits never wait on a global
+        // "oldest order" cooldown.
         await cancelOrder(`stale-recreate-cancel:${id}`, id, 0);
-        // A concurrent periodic snapshot can start immediately after the
-        // cancel. Wait for that authority instead of leaving a canceled order
-        // without its verified replacement.
+        const pollStartedAt = lastFullOrderPollAt;
         for (let attempt = 0; polling && attempt < 100 && !stopping; attempt += 1) await wait(50);
-        if (stopping || !await poll(true, 0)) {
+        const reconciled = !stopping && await poll(true, 0);
+        // Several stale exits can be canceled together.  One authoritative
+        // full order snapshot is sufficient for every waiter it includes.
+        for (let attempt = 0; polling && attempt < 100 && !stopping; attempt += 1) await wait(50);
+        if (stopping || (!reconciled && lastFullOrderPollAt <= pollStartedAt)) {
           executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: "full-reconciliation-unavailable" });
           return;
         }
@@ -980,7 +984,7 @@ function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template
       } catch (error) {
         executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: String(error) });
       } finally {
-        staleRecreateActive = false;
+        staleExitRecreateInFlight.delete(id);
       }
     },
   });
@@ -1353,6 +1357,8 @@ function adoptSells(): void {
     if (!active.has(id)) {
       sellDue.delete(id);
       cancelingSells.delete(id);
+      staleExitRecreateInFlight.delete(id);
+      staleExitRetryAt.delete(id);
     }
   }
 }
@@ -1778,7 +1784,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
       Number(sell.price), quantity(sell), remaining(sell), EXIT_ORDER_PRICE, targetQuantity,
     );
     if (!needsReplace) {
-      if (mayRecreateStaleOrder(eventTime(sell), now, nextStaleRecreateAt)) {
+      if (mayRecreateStaleOrder(eventTime(sell), now, staleExitRetryAt.get(id) ?? 0)) {
         queueVerifiedStaleExitRecreate(strategy, sell, template);
         return;
       }
@@ -1825,11 +1831,9 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
         } catch (error) {
           if (!deferExitAfterPreviewRejection(strategy, id, error)) throw error;
           // A broker PRICE_OR_QUANTITY rejection can be an order-age or
-          // exchange-state issue rather than a duplicate sell.  Do not leave
-          // the oldest long-lived sell frozen behind its Replace cooldown:
-          // the guarded stale flow cancels only this oldest eligible closing
-          // order, fully reconciles, then rebuilds from current inventory.
-          if (mayRecreateStaleOrder(eventTime(liveSell), Date.now(), nextStaleRecreateAt)) {
+          // exchange-state issue rather than a duplicate sell.  Each eligible
+          // 90-second exit gets its own guarded retry every ten seconds.
+          if (mayRecreateStaleOrder(eventTime(liveSell), Date.now(), staleExitRetryAt.get(id) ?? 0)) {
             executionJournal.record("exit.preview-rebuild-queued", {
               strategy, orderId: id, inventory: currentInventory, targetQuantity: currentTarget,
             });
