@@ -9,3 +9,33 @@ export function mayReplenishFixedPrice(activeOpeningOrderCount: number): boolean
 export function mayRecoverFixedPriceFill(filledAt: number, runtimeStartedAt: number): boolean {
   return filledAt >= runtimeStartedAt - FIXED_PRICE_STARTUP_FILL_GRACE_MS;
 }
+
+/**
+ * Reserves the single replacement slot for a strategy before Preview begins.
+ * A REST fill can be observed both by activity reconciliation and a full
+ * snapshot; only the first observation may create the buy task.
+ */
+export class FixedPriceReplenishmentGuard {
+  private readonly inFlight = new Map<string, string>();
+  private readonly deferredUntil = new Map<string, number>();
+
+  reserve(strategy: string, fillId: string, now = Date.now()): boolean {
+    if (now < (this.deferredUntil.get(fillId) ?? 0)) return false;
+    const existing = this.inFlight.get(strategy);
+    if (existing && existing !== fillId) return false;
+    this.inFlight.set(strategy, fillId);
+    return true;
+  }
+
+  defer(fillId: string, until: number): void {
+    this.deferredUntil.set(fillId, until);
+  }
+
+  clearDeferred(fillId: string): void {
+    this.deferredUntil.delete(fillId);
+  }
+
+  release(strategy: string, fillId: string): void {
+    if (this.inFlight.get(strategy) === fillId) this.inFlight.delete(strategy);
+  }
+}
