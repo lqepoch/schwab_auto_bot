@@ -5,9 +5,10 @@
   "scripts": {
     "start": "node src/main.ts",
     "auth:login": "node src/auth_cli.ts login",
+    "auth:relogin": "node src/auth_cli.ts relogin --confirm REAUTHORIZE_SCHWAB",
     "auth:status": "node src/auth_cli.ts status",
-    "check": "node --check src/main.ts && node --check src/auth.ts && node --check src/auth_cli.ts && node --check src/schwab_client.ts",
-    "test": "node --test test/schwab_client.test.ts"
+    "check": "node --check src/main.ts && node --check src/auth.ts && node --check src/auth_cli.ts && node --check src/schwab_client.ts && node --check src/runtime_policy.ts",
+    "test": "node --test test/schwab_client.test.ts test/runtime_policy.test.ts test/auth_policy.test.ts"
   },
   "engines": {
     "node": ">=24"

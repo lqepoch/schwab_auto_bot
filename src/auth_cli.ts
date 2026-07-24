@@ -14,11 +14,14 @@ async function readLine(): Promise<string> {
 const command = process.argv[2] || "status";
 if (command === "status") {
   process.stdout.write(`${JSON.stringify(await status())}\n`);
-} else if (command === "login") {
+} else if (command === "login" || command === "relogin") {
+  if (command === "relogin" && (process.argv[3] !== "--confirm" || process.argv[4] !== "REAUTHORIZE_SCHWAB")) {
+    throw new Error("重登录必须传入 --confirm REAUTHORIZE_SCHWAB");
+  }
   const { state, authorizationUrl } = beginLogin();
   openBrowser(authorizationUrl);
   await login(await readLine(), state);
   process.stdout.write("登录完成；Token 已写入本机 state/schwab-auth.json。\n");
 } else {
-  throw new Error("用法: node src/auth_cli.ts [status|login]");
+  throw new Error("用法: node src/auth_cli.ts [status|login|relogin --confirm REAUTHORIZE_SCHWAB]");
 }
