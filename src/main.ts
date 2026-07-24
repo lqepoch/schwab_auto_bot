@@ -18,6 +18,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
 const policyAlertPath = join(root, ".state", "policy-alerts.jsonl");
 const explorerStatePath = join(root, ".state", "net-price-explorer.json");
+const fixedPriceCycleStatePath = join(root, ".state", "fixed-price-cycle.json");
 const exitTemplateStatePath = join(root, ".state", "exit-templates.json");
 const runtimeStatePath = join(root, ".state", "runtime", "active-run.json");
 const runtimeControlPath = join(root, ".state", "runtime", "control-request.json");
@@ -81,6 +82,17 @@ async function loadExplorer(): Promise<PriceExplorer> {
   }
 }
 
+async function loadFixedPriceCycle(): Promise<Set<string>> {
+  try {
+    const value = JSON.parse(await readFile(fixedPriceCycleStatePath, "utf8")) as unknown;
+    if (!Array.isArray(value) || value.some((id) => typeof id !== "string")) throw new Error("FIXED_PRICE_CYCLE_STATE_INVALID");
+    return new Set(value.slice(-1_000));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Set();
+    throw error;
+  }
+}
+
 function persistExplorer(): void {
   if (readOnly) return;
   const snapshot = explorer.snapshot();
@@ -90,6 +102,17 @@ function persistExplorer(): void {
     await writeFile(temporary, JSON.stringify(snapshot), "utf8");
     await rename(temporary, explorerStatePath);
   }).catch((error) => stamp(`PRICE_EXPLORER_STATE_SAVE_FAILED error=${String(error)}`));
+}
+
+function persistFixedPriceCycle(): void {
+  if (readOnly) return;
+  const snapshot = [...fixedPriceCycleConsumedFills].slice(-1_000);
+  fixedPriceCycleSavePending = fixedPriceCycleSavePending.then(async () => {
+    await mkdir(dirname(fixedPriceCycleStatePath), { recursive: true });
+    const temporary = `${fixedPriceCycleStatePath}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, JSON.stringify(snapshot), "utf8");
+    await rename(temporary, fixedPriceCycleStatePath);
+  }).catch((error) => stamp(`FIXED_PRICE_CYCLE_STATE_SAVE_FAILED error=${String(error)}`));
 }
 
 class ExplorerActionPacer {
@@ -208,10 +231,12 @@ let exitPositionSnapshotPending: Promise<Map<string, { long: number; short: numb
 const previewRejectedUntil = new Map<string, number>();
 const reportedPolicyAlerts = new Set<string>();
 const explorer = await loadExplorer();
+const fixedPriceCycleConsumedFills = await loadFixedPriceCycle();
 const explorerTemplates = new Map<string, Json>();
 const exitTemplatesByStrategy = await loadExitTemplates();
 const reportedUnpricedFills = new Set<string>();
 let explorerSavePending = Promise.resolve();
+let fixedPriceCycleSavePending = Promise.resolve();
 let exitTemplateSavePending = Promise.resolve();
 const normalExplorerActionPacer = new ExplorerActionPacer();
 const observedOrderStates = new Map<string, { status: string; filledQuantity: number; price: string; closeTime: string | null }>();
@@ -967,6 +992,10 @@ function detectExplorerFills(): void {
       executionJournal.record("explorer.fill.ignored", { order: orderAuditData(order), fillPriceSource, priceCents: fill.priceCents, filledAt: new Date(fill.filledAt).toISOString(), reason: "outside-ten-second-window" });
       continue;
     }
+    if (policy.repeatBuyAtOrderPrice) {
+      queueFixedPriceReplenishment(meta.key, order, fill.priceCents);
+      continue;
+    }
     const transition = explorer.recordCompleteFill(meta.key, orderId(order), fill.priceCents, fill.filledAt);
     persistExplorer();
     executionJournal.record("explorer.fill.accepted", {
@@ -985,8 +1014,39 @@ function detectExplorerFills(): void {
   }
 }
 
+function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, priceCents: number): void {
+  const filledOrderId = orderId(filledOrder);
+  if (fixedPriceCycleConsumedFills.has(filledOrderId)) return;
+  writer.enqueue({
+    key: `fixed-price-cycle:${filledOrderId}`,
+    priority: 1,
+    run: async () => {
+      if (stopping || hasExitPriority(groupKey)) {
+        executionJournal.record("fixed-price-cycle.deferred", { groupKey, filledOrderId, reason: stopping ? "runtime-stopping" : "exit-priority-active" });
+        return;
+      }
+      if (activeOpeningOrders(groupKey).length >= MAX_ACTIVE_ORDERS) {
+        executionJournal.record("fixed-price-cycle.deferred", { groupKey, filledOrderId, reason: "active-order-cap" });
+        return;
+      }
+      const payload = payloadFrom(filledOrder, 1, false, priceCents);
+      try {
+        const brokerOrderId = await writeOrder(`fixed-price-cycle:${filledOrderId}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, 1);
+        applyLocalSubmit(payload, brokerOrderId);
+        fixedPriceCycleConsumedFills.add(filledOrderId);
+        persistFixedPriceCycle();
+        stamp(`FIXED_PRICE_CYCLE_REBUY group=${groupKey} sourceOrder=${filledOrderId} price=${(priceCents / 100).toFixed(2)} order=${brokerOrderId}`);
+        executionJournal.record("fixed-price-cycle.rebuy-submitted", { groupKey, filledOrderId, priceCents, brokerOrderId, order: payloadAuditData(payload) });
+      } catch (error) {
+        if (String(error).startsWith("Error: SCHWAB_PREVIEW_INSUFFICIENT_FUNDS")) return;
+        throw error;
+      }
+    },
+  });
+}
+
 async function explorerTick(): Promise<void> {
-  if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
+  if (stopping || readOnly || policy.repeatBuyAtOrderPrice || !policy.isExecutionWindowOpen()) return;
   for (const groupKey of explorer.groupKeys()) {
     if (!isConfiguredExplorerGroup(groupKey)) continue;
     const actions = explorer.due(groupKey, Date.now());
@@ -1006,6 +1066,10 @@ function shuffled<T>(values: readonly T[]): T[] {
 
 async function explorerRoundLoop(): Promise<void> {
   while (!stopping && !readOnly) {
+    if (policy.repeatBuyAtOrderPrice) {
+      await wait(policy.roundCooldownMs);
+      continue;
+    }
     if (!policy.isExecutionWindowOpen()) {
       await wait(60_000);
       continue;
@@ -1569,7 +1633,7 @@ executionJournal.record("run.started", {
   buildId: process.env.SCHWAB_BOT_BUILD_ID ?? null,
 });
 stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
-if (!readOnly) stamp(`PRICE_EXPLORER_FILL_PRICE_SOURCE source=${policy.repeatBuyAtOrderPrice ? "orderLimit" : "actualNet"}`);
+if (!readOnly) stamp(policy.repeatBuyAtOrderPrice ? "FIXED_PRICE_CYCLE_ENABLED source=orderLimit exploration=disabled" : "PRICE_EXPLORER_FILL_PRICE_SOURCE source=actualNet");
 await bootstrap();
 await poll(true);
 if (!once) {
@@ -1579,7 +1643,7 @@ if (!once) {
     onState: stamp,
   });
   activityStream.start();
-  if (!readOnly) void explorerRoundLoop();
+  if (!readOnly && !policy.repeatBuyAtOrderPrice) void explorerRoundLoop();
 }
 if (!readOnly) {
   await reconcilePositions();
@@ -1594,7 +1658,7 @@ if (once) {
     const fallbackDue = Date.now() - lastFillPollAt >= 30_000;
     if (!activityStream?.ready || fallbackDue) void poll(false);
   }, 2_000));
-  runtimeIntervals.push(setInterval(() => void explorerTick(), 200));
+  if (!policy.repeatBuyAtOrderPrice) runtimeIntervals.push(setInterval(() => void explorerTick(), 200));
   runtimeIntervals.push(setInterval(() => void evaluateExits(), policy.roundCooldownMs));
   runtimeIntervals.push(setInterval(() => void reconcileAll(), 110_000));
   runtimeIntervals.push(setInterval(() => void checkControlRequest(), 250));
@@ -1609,6 +1673,7 @@ if (!readOnly) persistExplorer();
 await activityStream?.stop();
 await writer.waitIdle();
 await explorerSavePending;
+await fixedPriceCycleSavePending;
 await exitTemplateSavePending;
 await writeRuntimeState("stopped", stopReason);
 executionJournal.record("run.stopped", { reason: stopReason });
