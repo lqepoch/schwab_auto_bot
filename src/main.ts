@@ -925,8 +925,16 @@ function queueVerifiedStaleRecreate(
     run: async () => {
       try {
         executionJournal.record("order.stale-recreate.started", { direction, strategy, sourceOrderId: id });
+        if (polling) {
+          executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: "full-reconciliation-in-progress-before-cancel" });
+          return;
+        }
         await cancelOrder(`stale-recreate-cancel:${id}`, id);
-        if (!await poll(true, priority)) {
+        // A concurrent periodic snapshot can start immediately after the
+        // cancel. Wait for that authority instead of leaving a canceled order
+        // without its verified replacement.
+        for (let attempt = 0; polling && attempt < 100 && !stopping; attempt += 1) await wait(50);
+        if (stopping || !await poll(true, priority)) {
           executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: "full-reconciliation-unavailable" });
           return;
         }
