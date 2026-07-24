@@ -113,6 +113,14 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
   --round-cooldown-seconds 10
 ```
 
+### 重复买单价格来源开关
+
+默认不传该开关：探索分桶、回补与下一代订单一律使用 Schwab `executionLegs` 解出的实际组合净成交价。只有在明确传入 `--repeat-buy-at-order-price` 后，完整成交订单才改为使用其原始买入限价；该模式仍要求父级订单完整成交且数量为 1，但故意不读取执行腿成交价，因此价格改善不会改变重复买单或后续探索订单的价格。
+
+```powershell
+node .\src\main.ts --confirm-live I_UNDERSTAND --repeat-buy-at-order-price
+```
+
 ## 验证
 
 ```powershell
