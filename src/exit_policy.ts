@@ -1,37 +1,34 @@
-export const EXIT_BUY_FILL_DELAY_MS = 30_000;
+export const EXIT_IDLE_BUY_FILL_DELAY_MS = 30_000;
 export const EXIT_INVENTORY_TRIGGER = 5;
 export const EXIT_REFRESH_MS = 8_000;
+export const LIQUIDITY_EXIT_DELAY_MS = 15_000;
 export const LIQUIDITY_EXIT_REFRESH_MS = 5_000;
 export const LIQUIDITY_EXIT_REFRESH_ROUNDS = 2;
 
 export type ExitEligibility = {
-  targetUnitSells: number;
-  reason: "inventory-threshold" | "matured-individual-fills" | "waiting-for-individual-fills";
+  targetQuantity: number;
+  reason: "inventory-threshold" | "idle-after-buy-fill" | "waiting-for-idle-window";
   remainingDelayMs: number;
 };
 
 /**
- * Every opening vertical fill matures independently. A recent fill therefore
- * never postpones an older fill from becoming eligible to exit.
+ * One vertical is liquidated only after it has been idle since its most recent
+ * opening fill.  A new buy resets that group's idle timer; an inventory of
+ * five or more is always an immediate full-exit trigger.
  */
 export function exitEligibility(
   inventory: number,
-  maturedIndividualFills: number,
-  unattributedInventory: number,
-  unattributedObservedAt: number,
+  lastOpeningFillAt: number | null,
   now = Date.now(),
 ): ExitEligibility {
   if (inventory >= EXIT_INVENTORY_TRIGGER) {
-    return { targetUnitSells: inventory, reason: "inventory-threshold", remainingDelayMs: 0 };
+    return { targetQuantity: inventory, reason: "inventory-threshold", remainingDelayMs: 0 };
   }
-  const unknownRemainingDelayMs = unattributedInventory > 0
-    ? Math.max(0, EXIT_BUY_FILL_DELAY_MS - Math.max(0, now - unattributedObservedAt))
-    : 0;
-  const maturedUnknownInventory = unknownRemainingDelayMs === 0 ? unattributedInventory : 0;
-  const targetUnitSells = Math.min(inventory, Math.max(0, maturedIndividualFills) + maturedUnknownInventory);
+  const remainingDelayMs = Math.max(0, (lastOpeningFillAt ?? now) + EXIT_IDLE_BUY_FILL_DELAY_MS - now);
+  const targetQuantity = remainingDelayMs === 0 ? inventory : 0;
   return {
-    targetUnitSells,
-    reason: targetUnitSells > 0 ? "matured-individual-fills" : "waiting-for-individual-fills",
-    remainingDelayMs: targetUnitSells > 0 ? 0 : unknownRemainingDelayMs,
+    targetQuantity,
+    reason: targetQuantity > 0 ? "idle-after-buy-fill" : "waiting-for-idle-window",
+    remainingDelayMs,
   };
 }

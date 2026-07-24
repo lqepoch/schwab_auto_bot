@@ -50,8 +50,13 @@ export function orderInfo(order: Json): OptionOrderInfo | null {
 export function orderPolicyViolation(order: Json, policy: OrderPolicy, tradingDate: string): OrderPolicyViolation | null {
   const meta = orderInfo(order);
   if (!meta) return { code: "ORDER_STRUCTURE_INVALID", message: "订单不是可识别的双腿垂直期权策略" };
-  if (Number(order.quantity) !== 1 || meta.legs.some((leg) => Number(leg.quantity) !== 1)) {
-    return { code: "ORDER_QUANTITY_INVALID", message: "每张复合垂直订单数量必须为 1" };
+  const requestedQuantity = Number(order.quantity);
+  const quantitiesMatch = meta.legs.every((leg) => Number(leg.quantity) === requestedQuantity);
+  if (
+    !Number.isInteger(requestedQuantity) || requestedQuantity < 1 || !quantitiesMatch
+    || (meta.opening && requestedQuantity !== 1)
+  ) {
+    return { code: "ORDER_QUANTITY_INVALID", message: "开仓垂直订单数量必须为 1；平仓订单的两腿数量必须等于组合总数量" };
   }
   if (!policy.underlyings.has(meta.underlying)) {
     return { code: "UNDERLYING_NOT_ALLOWED", message: `标的 ${meta.underlying} 不在允许范围` };

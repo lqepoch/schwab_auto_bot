@@ -30,10 +30,15 @@ test("0DTE sell orders must use the fixed 0.99 credit", () => {
   assert.equal(orderPolicyViolation(vertical(String(EXIT_ORDER_PRICE), true, "260725"), policy, today)?.code, "ORDER_NOT_0DTE");
 });
 
-test("every vertical order is restricted to one contract", () => {
+test("opening vertical orders are restricted to one contract while a closing vertical can cover the full group", () => {
   const order = vertical("0.87");
   order.quantity = 2;
   order.orderLegCollection[0].quantity = 2;
   order.orderLegCollection[1].quantity = 2;
   assert.equal(orderPolicyViolation(order, policy, today)?.code, "ORDER_QUANTITY_INVALID");
+  const exit = vertical(String(EXIT_ORDER_PRICE), true);
+  exit.quantity = 4;
+  exit.orderLegCollection[0].quantity = 4;
+  exit.orderLegCollection[1].quantity = 4;
+  assert.equal(orderPolicyViolation(exit, policy, today), null);
 });
