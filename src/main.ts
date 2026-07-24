@@ -12,10 +12,12 @@ import { EXIT_ORDER_PRICE, isWithinStrikeRange, orderInfo, orderPolicyViolation,
 import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./price_explorer.ts";
 import { ExecutionJournal } from "./execution_journal.ts";
-import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, maySubmitExit } from "./exit_policy.ts";
+import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "./exit_policy.ts";
 import { acquireRuntimeLock } from "./runtime_lock.ts";
 import { FixedPriceReplenishmentGuard, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
 import { FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
+import { classifyPreviewRejection, previewRejectionCooldownFromError } from "./preview_rejection.ts";
+import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -470,11 +472,6 @@ function previewBlockers(body: any): string {
   }).join(",");
 }
 
-function previewReportsInsufficientFunds(value: unknown): boolean {
-  const text = JSON.stringify(value);
-  return /(insufficient\s+(funds|cash|buying power)|buying power.{0,40}insufficient|cash available.{0,40}insufficient|not enough.{0,40}(funds|cash|buying power))/i.test(text);
-}
-
 function requestLiquidityExit(payload: Json): void {
   const meta = info(payload);
   if (!meta?.opening) return;
@@ -563,15 +560,18 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     priority,
   );
   if (!previewAccepted(preview.body)) {
-    previewRejectedUntil.set(previewFingerprint, Date.now() + PREVIEW_REJECTION_COOLDOWN_MS);
+    const rejection = classifyPreviewRejection(preview.body);
+    previewRejectedUntil.set(previewFingerprint, Date.now() + rejection.cooldownMs);
     const blockers = previewBlockers(preview.body);
-    const insufficientFunds = method === "POST" && previewReportsInsufficientFunds(preview.body);
-    executionJournal.record("broker.preview.rejected", { key, method, path, blockers, insufficientFunds, order: payloadAuditData(payload) });
+    const insufficientFunds = method === "POST" && rejection.code === "INSUFFICIENT_FUNDS";
+    executionJournal.record("broker.preview.rejected", {
+      key, method, path, blockers, rejectionCode: rejection.code, cooldownMs: rejection.cooldownMs, insufficientFunds, order: payloadAuditData(payload),
+    });
     if (insufficientFunds) {
       requestLiquidityExit(payload);
-      throw new Error(`SCHWAB_PREVIEW_INSUFFICIENT_FUNDS blockers=${blockers}`);
+      throw new Error(`SCHWAB_PREVIEW_INSUFFICIENT_FUNDS rejectionCode=${rejection.code} cooldownMs=${rejection.cooldownMs} blockers=${blockers}`);
     }
-    throw new Error(`SCHWAB_PREVIEW_REJECTED blockers=${blockers}`);
+    throw new Error(`SCHWAB_PREVIEW_REJECTED rejectionCode=${rejection.code} cooldownMs=${rejection.cooldownMs} blockers=${blockers}`);
   }
   previewRejectedUntil.delete(previewFingerprint);
   executionJournal.record("broker.preview.accepted", { key, method, path, order: payloadAuditData(payload) });
@@ -749,7 +749,7 @@ function armActivityRestConfirmation(): void {
   if (activityRestTimer || activityRestRunning || stopping) return;
   // The stream is only a wake-up signal.  Keep the REST confirmation, but do
   // not deliberately add two seconds to a newly filled opening order.
-  const dueAt = Math.max(Date.now() + 250, lastActivityRestAt + 250);
+  const dueAt = nextActivityRestConfirmationAt(Date.now(), lastActivityRestAt);
   activityRestTimer = setTimeout(() => {
     activityRestTimer = null;
     void runActivityRestConfirmation();
@@ -764,9 +764,16 @@ async function runActivityRestConfirmation(): Promise<void> {
   let confirmed = false;
   const coveredByOtherPoll = lastFillPollAt >= confirmingThrough;
   if (!stopping && !coveredByOtherPoll) {
-    stamp("ACCT_ACTIVITY信息不足；250ms窗口内事件已合并，优先读取一次最近5分钟成交订单");
+    // Record the attempt before I/O.  Otherwise a transient REST failure can
+    // immediately re-arm every stream message and consume the entire quota.
+    lastActivityRestAt = Date.now();
+    stamp(`ACCT_ACTIVITY信息不足；${ACTIVITY_REST_DEBOUNCE_MS}ms合并后优先确认成交，连续无明细事件限速为${ACTIVITY_REST_MIN_INTERVAL_MS}ms`);
+    executionJournal.record("activity.rest-confirmation-started", {
+      confirmingThrough: new Date(confirmingThrough).toISOString(),
+      debounceMs: ACTIVITY_REST_DEBOUNCE_MS,
+      minIntervalMs: ACTIVITY_REST_MIN_INTERVAL_MS,
+    });
     confirmed = await poll(false, 0);
-    if (confirmed) lastActivityRestAt = Date.now();
   }
   activityRestRunning = false;
   if ((!confirmed && !coveredByOtherPoll) || lastIncompleteActivityAt > confirmingThrough) {
@@ -883,7 +890,6 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
     !meta || !working.has(String(candidate.status))
     || orderId(activeOpeningOrders(meta.key)[0] ?? {}) !== id
   ) return;
-  executionJournal.record("fixed-price-cycle.refresh-queued", { strategy: meta.key, orderId: id, source });
   writer.enqueue({
     key: `fixed-price-cycle-refresh:${id}`,
     priority: 2,
@@ -891,6 +897,7 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
       if (stopping || !policy.isExecutionWindowOpen()) return;
       const current = orders.find((order) => orderId(order) === id);
       if (!current || !working.has(String(current.status)) || !managedOpening(current)) return;
+      executionJournal.record("fixed-price-cycle.refresh-started", { strategy: meta.key, orderId: id, source });
       await fixedPriceRefreshPacer.admit(budget.fixedPriceRefreshIntervalMs());
       const latest = orders.find((order) => orderId(order) === id);
       if (!latest || !working.has(String(latest.status)) || !managedOpening(latest)) return;
@@ -1102,6 +1109,10 @@ function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, price
     return;
   }
   const priority = executionPriority("replenishment");
+  const queuedAt = Date.now();
+  executionJournal.record("fixed-price-cycle.rebuy-queued", {
+    groupKey, filledOrderId, priceCents, priority, queuedAt: new Date(queuedAt).toISOString(),
+  });
   writer.enqueue({
     key: `fixed-price-cycle:${filledOrderId}`,
     priority,
@@ -1123,13 +1134,14 @@ function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, price
         fixedPriceCycleConsumedFills.add(filledOrderId);
         fixedPriceReplenishmentGuard.clearDeferred(filledOrderId);
         persistFixedPriceCycle();
-        stamp(`FIXED_PRICE_CYCLE_REBUY group=${groupKey} sourceOrder=${filledOrderId} price=${(priceCents / 100).toFixed(2)} order=${brokerOrderId}`);
-        executionJournal.record("fixed-price-cycle.rebuy-submitted", { groupKey, filledOrderId, priceCents, brokerOrderId, order: payloadAuditData(payload) });
+        const queueDelayMs = Date.now() - queuedAt;
+        stamp(`FIXED_PRICE_CYCLE_REBUY group=${groupKey} sourceOrder=${filledOrderId} price=${(priceCents / 100).toFixed(2)} order=${brokerOrderId} queueDelayMs=${queueDelayMs}`);
+        executionJournal.record("fixed-price-cycle.rebuy-submitted", { groupKey, filledOrderId, priceCents, brokerOrderId, queueDelayMs, order: payloadAuditData(payload) });
       } catch (error) {
         const message = String(error);
         if (message.startsWith("Error: SCHWAB_PREVIEW_INSUFFICIENT_FUNDS")) return;
         if (message.includes("SCHWAB_PREVIEW_REJECTED") || message.includes("CACHED_PREVIEW_REJECTED")) {
-          const retryAt = Date.now() + PREVIEW_REJECTION_COOLDOWN_MS;
+          const retryAt = Date.now() + previewRejectionCooldownFromError(error, PREVIEW_REJECTION_COOLDOWN_MS);
           fixedPriceReplenishmentGuard.defer(filledOrderId, retryAt);
           executionJournal.record("fixed-price-cycle.deferred", {
             groupKey, filledOrderId, reason: "preview-rejected", retryAt: new Date(retryAt).toISOString(),
@@ -1259,7 +1271,15 @@ function adoptSells(): void {
       || meta.expiration !== newYorkDate() || !policy.underlyings.has(meta.underlying)
     ) continue;
     active.add(orderId(order));
-    if (!sellDue.has(orderId(order))) sellDue.set(orderId(order), Date.now() + EXIT_REFRESH_MS);
+    if (!sellDue.has(orderId(order))) {
+      const refreshAt = Date.now() + EXIT_REFRESH_MS;
+      sellDue.set(orderId(order), refreshAt);
+      executionJournal.record("exit.working-sell-adopted", {
+        strategy: meta.key,
+        orderId: orderId(order),
+        refreshAt: new Date(refreshAt).toISOString(),
+      });
+    }
   }
   for (const id of sellDue.keys()) {
     if (!active.has(id)) {
@@ -1656,8 +1676,19 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
   if (sell) {
     const id = orderId(sell);
     const due = sellDue.get(id) ?? 0;
-    const needsQuantityUpdate = quantity(sell) !== targetQuantity || remaining(sell) !== targetQuantity;
-    if (!liquidityRefreshDue && !needsQuantityUpdate && now < due && Number(sell.price) === EXIT_ORDER_PRICE) return;
+    const needsReplace = exitRefreshNeeded(
+      Number(sell.price), quantity(sell), remaining(sell), EXIT_ORDER_PRICE, targetQuantity,
+    );
+    if (!needsReplace) {
+      if (liquidityRefreshDue && liquidity) advanceLiquidityRefresh(strategy, liquidity, id, now);
+      sellDue.set(id, now + (liquidityRefreshDue ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS));
+      executionJournal.record("exit.refresh-noop", {
+        strategy, orderId: id, quantity: targetQuantity,
+        reason: liquidityRefreshDue ? "unchanged-liquidity-refresh" : "unchanged-working-sell",
+      });
+      return;
+    }
+    if (!liquidityRefreshDue && now < due) return;
     if (liquidityRefreshDue && liquidity) advanceLiquidityRefresh(strategy, liquidity, id, now);
     sellDue.set(id, now + (liquidityRefreshDue ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS));
     const priority = executionPriority("exit");
@@ -1751,7 +1782,10 @@ function executionPriority(kind: "replenishment" | "exit" | "refresh"): Priority
 function deferExitAfterPreviewRejection(strategy: string, orderIdValue: string | null, error: unknown): boolean {
   const message = String(error);
   if (!message.includes("SCHWAB_PREVIEW_REJECTED") && !message.includes("CACHED_PREVIEW_REJECTED")) return false;
-  const nextAt = Date.now() + PREVIEW_REJECTION_COOLDOWN_MS;
+  const cooldownMs = message.includes("CACHED_PREVIEW_REJECTED")
+    ? PREVIEW_REJECTION_COOLDOWN_MS
+    : previewRejectionCooldownFromError(error, PREVIEW_REJECTION_COOLDOWN_MS);
+  const nextAt = Date.now() + cooldownMs;
   if (orderIdValue) sellDue.set(orderIdValue, nextAt);
   else sellSubmitDue.set(strategy, nextAt);
   // A funding-triggered exit normally refreshes every five seconds.  A
@@ -1763,9 +1797,10 @@ function deferExitAfterPreviewRejection(strategy: string, orderIdValue: string |
     strategy,
     orderId: orderIdValue,
     nextAt: new Date(nextAt).toISOString(),
+    cooldownMs,
     reason: message.includes("CACHED_PREVIEW_REJECTED") ? "cached-rejection" : "broker-rejection",
   });
-  stamp(`卖单 Preview 拒绝，延后重试 strategy=${strategy} retryInMs=${PREVIEW_REJECTION_COOLDOWN_MS}`);
+  stamp(`卖单 Preview 拒绝，延后重试 strategy=${strategy} retryInMs=${cooldownMs}`);
   return true;
 }
 
