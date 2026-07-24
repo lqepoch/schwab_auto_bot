@@ -76,7 +76,7 @@ node .\src\main.ts --confirm-live I_UNDERSTAND
 
 默认只有纽约时间工作日 09:15（开盘前 15 分钟）至 15:45（收盘前 15 分钟）的区间允许 Preview、Submit、Replace 与 Cancel。窗口外仍会执行只读订单/持仓对账，但不会产生任何 broker 写入。
 
-默认策略标的为 `QQQ,SPY`，行权价范围为 720–790，入场单名义金额范围为 84–90；对于一张期权合约，这对应买入价 0.84–0.90。日常启动无需传入这些默认参数，也无需传入默认执行时间：
+默认策略标的为 `QQQ,SPY`，行权价范围为 720–790。净买入价是策略硬规则：每张订单数量固定为 1，价格只能是 0.84–0.90；`--entry-notional-min` 与 `--entry-notional-max` 仅接受 `84` 与 `90`，不能用于改变此范围。日常启动无需传入这些默认参数，也无需传入默认执行时间：
 
 ```powershell
 node .\src\main.ts --confirm-live I_UNDERSTAND
@@ -87,15 +87,23 @@ node .\src\main.ts --confirm-live I_UNDERSTAND
 ```powershell
 node .\src\main.ts --confirm-live I_UNDERSTAND `
   --underlyings QQQ,SPY `
-  --strike-min 720 --strike-max 790 `
-  --entry-notional-min 84 --entry-notional-max 90
+  --strike-min 720 --strike-max 790
 ```
 
 `--execution-start` 与 `--execution-end` 默认分别为 `09:15` 和 `15:45`（纽约时间）；只在需要变更执行窗口时传入，例如 `--execution-start 09:30 --execution-end 15:30`。
 
 整体刷新默认每个候选订单间隔 1 秒、每轮完成后间隔 5 秒。每一轮开始都会读取一次完整订单列表；该快照同时供本轮所有候选筛选与原生 Replace 使用，不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用这份完整快照，避免同轮重复读取。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
 
-所有自动写入在 Preview 前都执行固定订单策略校验：买单必须是配置标的的 0DTE 双腿垂直价差，价格仅允许 0.84–0.90；卖单也必须是 0DTE，价格固定为 0.99。完整订单快照发现仍在工作的违规买/卖单时，程序只会发出 `POLICY_ALERT`，写入终端日志及 `.state/policy-alerts.jsonl`，不会静默撤销外部订单。任何不符合规则的自动 Preview、Submit 或 Replace 都会在发送 Schwab 请求前被拒绝。
+所有自动写入在 Preview 前都执行固定订单策略校验：买单必须是配置标的的 0DTE 双腿垂直价差，价格仅允许 0.84–0.90，数量必须为 1；卖单也必须是 0DTE、数量为 1，价格固定为 0.99。完整订单快照发现仍在工作的违规买/卖单时，程序只会发出 `POLICY_ALERT`，写入终端日志及 `.state/policy-alerts.jsonl`，不会静默撤销外部订单。任何不符合规则的自动 Preview、Submit 或 Replace 都会在发送 Schwab 请求前被拒绝。
+
+### 净价探索与收敛
+
+买单不再保留固定 `0.90` 锚单。每个 0DTE 垂直组合独立维护逻辑订单、订单版本和代际，并把状态保存到 `.state/net-price-explorer.json`；原生 Replace 产生的新 broker order ID 不会改变逻辑订单年龄。
+
+- 只有 Schwab 父级垂直订单完整成交、数量为 1，且 `orderActivityCollection.executionLegs` 可解出精确的实际组合净借记价时，才会产生成交事件。缺少完整执行回报、非整分价格或范围外实际成交价都会失败关闭，不会猜测或补单。
+- 同组合、同实际净成交价的完整成交在滚动 10 秒内按非重叠的两两配对消费；第二张成交立即使旧代际未执行动作失效。单张成交先回补同价；单订单模式的双成交生成 `[P-0.01, P-0.01]`，之后的双成交生成 `[P-0.01, P, P]`，并始终裁剪到 0.84–0.90。
+- 两订单代际按 `T+0/T+2/T+4/T+6/T+10` 执行下探、同价刷新与恢复；三订单代际按 `T+0/T+2/T+4/T+4.2/T+6/T+8/T+8.2/T+10` 执行。三订单的 `T+6` 依据前两张是否成交决定延迟回补价格。
+- 每组工作中的买单最多 3 张。新增候选先争取较低探索价；已有工作单只占槽位，不会被静默撤销。普通轮次按低价、逻辑年龄、逻辑序号排序，组合之间在每轮开始时随机冻结顺序；绑定微时间表动作优先于普通 5 秒组内间隔。
 
 只在需要覆盖刷新节奏时才传入对应参数，例如：
 
