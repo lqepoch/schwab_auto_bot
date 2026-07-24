@@ -12,7 +12,7 @@ import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./
 import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./price_explorer.ts";
 import { ExecutionJournal } from "./execution_journal.ts";
-import { EXIT_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility } from "./exit_policy.ts";
+import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility } from "./exit_policy.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -191,6 +191,7 @@ let lastIncompleteActivityAt = 0;
 let lastActivityRestAt = 0;
 let lastFillPollAt = 0;
 const openingFillLots = new Map<string, Map<string, number>>();
+const lastOpeningFillAt = new Map<string, number>();
 const inventoryObservedAt = new Map<string, number>();
 const inventoryByStrategy = new Map<string, number>();
 const observedFillQuantities = new Map<string, number>();
@@ -200,7 +201,7 @@ const sellDue = new Map<string, number>();
 const sellSubmitDue = new Map<string, number>();
 const cancelingSells = new Set<string>();
 const exitGateStates = new Map<string, string>();
-const liquidityExitRefreshes = new Map<string, { remainingRounds: number; nextAt: number }>();
+const liquidityExitRefreshes = new Map<string, { sellAt: number; remainingRefreshes: number; nextAt: number }>();
 const exitWorkerTimers = new Map<string, { dueAt: number; timer: NodeJS.Timeout }>();
 let exitPositionSnapshot: { at: number; positions: Map<string, { long: number; short: number }> } | null = null;
 let exitPositionSnapshotPending: Promise<Map<string, { long: number; short: number }>> | null = null;
@@ -215,7 +216,7 @@ let exitTemplateSavePending = Promise.resolve();
 const normalExplorerActionPacer = new ExplorerActionPacer();
 const observedOrderStates = new Map<string, { status: string; filledQuantity: number; price: string; closeTime: string | null }>();
 const deferredExplorerRetries = new Map<string, { attempts: number; nextAt: number }>();
-const EXPLORER_FUNDING_RETRY_MS = 15_000;
+const EXPLORER_FUNDING_RETRY_MS = LIQUIDITY_EXIT_DELAY_MS + LIQUIDITY_EXIT_REFRESH_MS * LIQUIDITY_EXIT_REFRESH_ROUNDS;
 
 function flatten(source: any[]): Json[] {
   const output: Json[] = [];
@@ -256,16 +257,11 @@ function recordOpeningFillLot(strategy: string, order: Json): void {
   const firstObserved = !lots.has(orderId(order));
   lots.set(orderId(order), filledAt);
   openingFillLots.set(strategy, lots);
+  lastOpeningFillAt.set(strategy, Math.max(lastOpeningFillAt.get(strategy) ?? 0, filledAt));
   rememberExitTemplate(strategy, order);
   if (firstObserved && !readOnly) {
-    scheduleExitWorker(strategy, order, Math.max(Date.now(), filledAt + EXIT_BUY_FILL_DELAY_MS), "opening-fill-matures");
+    scheduleExitWorker(strategy, order, Math.max(Date.now(), filledAt + EXIT_IDLE_BUY_FILL_DELAY_MS), "opening-fill-idle-deadline");
   }
-}
-
-function maturedOpeningFillCount(strategy: string, now = Date.now()): number {
-  return [...(openingFillLots.get(strategy)?.values() ?? [])]
-    .filter((filledAt) => now - filledAt >= EXIT_BUY_FILL_DELAY_MS)
-    .length;
 }
 
 function orderAuditData(order: Json): Record<string, unknown> {
@@ -435,14 +431,21 @@ function requestLiquidityExit(payload: Json): void {
   const meta = info(payload);
   if (!meta?.opening) return;
   rememberExitTemplate(meta.key, payload);
-  liquidityExitRefreshes.set(meta.key, { remainingRounds: LIQUIDITY_EXIT_REFRESH_ROUNDS, nextAt: Date.now() });
+  const sellAt = Date.now() + LIQUIDITY_EXIT_DELAY_MS;
+  liquidityExitRefreshes.set(meta.key, {
+    sellAt,
+    remainingRefreshes: LIQUIDITY_EXIT_REFRESH_ROUNDS,
+    nextAt: sellAt,
+  });
   executionJournal.record("exit.liquidity-triggered", {
     strategy: meta.key,
+    sellAt: new Date(sellAt).toISOString(),
+    delayMs: LIQUIDITY_EXIT_DELAY_MS,
     refreshIntervalMs: LIQUIDITY_EXIT_REFRESH_MS,
     refreshRounds: LIQUIDITY_EXIT_REFRESH_ROUNDS,
     order: payloadAuditData(payload),
   });
-  scheduleExitWorker(meta.key, payload, Date.now(), "insufficient-funds");
+  scheduleExitWorker(meta.key, payload, sellAt, "insufficient-funds-countdown");
   void reconcilePositions(false)
     .catch((error) => stamp(`LIQUIDITY_EXIT_POSITION_REFRESH_FAILED strategy=${meta.key} error=${String(error)}`))
     .finally(() => evaluateExits());
@@ -776,6 +779,19 @@ function deferExplorerActionForFunding(groupKey: string, action: ExplorerAction)
   });
 }
 
+function deferExplorerActionForExit(groupKey: string, action: ExplorerAction): void {
+  const key = explorerActionKey(groupKey, action);
+  const previous = deferredExplorerRetries.get(key);
+  const retry = { attempts: (previous?.attempts ?? 0) + 1, nextAt: Date.now() + LIQUIDITY_EXIT_REFRESH_MS };
+  deferredExplorerRetries.set(key, retry);
+  executionJournal.record("explorer.action.deferred-for-exit", {
+    groupKey,
+    action,
+    attempts: retry.attempts,
+    retryAt: new Date(retry.nextAt).toISOString(),
+  });
+}
+
 function queueExplorerActions(groupKey: string, actions: ExplorerAction[]): void {
   for (const action of actions) {
     const key = explorerActionKey(groupKey, action);
@@ -784,7 +800,9 @@ function queueExplorerActions(groupKey: string, actions: ExplorerAction[]): void
     executionJournal.record("explorer.action.queued", { groupKey, action });
     writer.enqueue({
       key,
-      priority: 0,
+      // Exit orders use priority 0.  New buys are admitted before ordinary
+      // opening-order refreshes, but neither may preempt an active exit.
+      priority: action.kind === "ensure" ? 1 : 2,
       run: () => executeExplorerAction(groupKey, action),
     });
   }
@@ -796,6 +814,20 @@ function activeOpeningOrders(groupKey: string): Json[] {
     return working.has(String(order.status)) && meta?.opening && meta.key === groupKey
       && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
   }).sort((left, right) => Number(left.price) - Number(right.price) || eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)));
+}
+
+function hasExitPriority(groupKey: string): boolean {
+  if (liquidityExitRefreshes.has(groupKey)) return true;
+  return orders.some((order) => {
+    const meta = info(order);
+    return working.has(String(order.status)) && meta?.closing && meta.key === groupKey
+      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
+  });
+}
+
+function isConfiguredExplorerGroup(groupKey: string): boolean {
+  const [underlying, expiration] = groupKey.split(":");
+  return policy.underlyings.has(underlying) && expiration === newYorkDate();
 }
 
 async function executeExplorerAction(groupKey: string, action: ExplorerAction): Promise<void> {
@@ -810,12 +842,21 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
     });
     return;
   }
-  executionJournal.record("explorer.action.started", { groupKey, action });
+  const queueDelayMs = Math.max(0, Date.now() - action.dueAt);
+  executionJournal.record("explorer.action.started", { groupKey, action, queueDelayMs });
+  if (queueDelayMs > policy.roundCooldownMs) {
+    stamp(`PRICE_EXPLORER_ACTION_LATE group=${groupKey} logical=${action.logicalId} delayMs=${queueDelayMs}`);
+  }
   if (action.kind === "resolve-three") {
     const followups = explorer.resolveThree(groupKey, action.generation, Date.now());
     persistExplorer();
     executionJournal.record("explorer.three-way.resolved", { groupKey, action, followups });
     queueExplorerActions(groupKey, followups);
+    return;
+  }
+  if (hasExitPriority(groupKey)) {
+    deferExplorerActionForExit(groupKey, action);
+    executionJournal.record("explorer.action.skipped", { groupKey, action, reason: "exit-priority-active" });
     return;
   }
   if (action.binding === false) await normalExplorerActionPacer.admit();
@@ -865,13 +906,15 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
     complete();
     return;
   }
-  const template = explorerTemplates.get(groupKey);
-  if (!template) {
+  const template = explorerTemplates.get(groupKey) ?? exitTemplatesByStrategy.get(groupKey);
+  if (!template || managedOpening(template)?.key !== groupKey) {
     stamp(`PRICE_EXPLORER_TEMPLATE_MISSING group=${groupKey} logical=${logical.id}`);
     executionJournal.record("explorer.action.skipped", { groupKey, action, reason: "template-missing" });
     complete();
     return;
   }
+  explorerTemplates.set(groupKey, template);
+  executionJournal.record("explorer.template.recovered", { groupKey, logicalId: logical.id, source: "persisted-exit-template" });
   if (activeOpeningOrders(groupKey).length >= MAX_ACTIVE_ORDERS) {
     stamp(`PRICE_EXPLORER_SLOT_FULL group=${groupKey} logical=${logical.id} active=${MAX_ACTIVE_ORDERS}`);
     executionJournal.record("explorer.action.skipped", { groupKey, action, reason: "active-order-cap", activeOrderCap: MAX_ACTIVE_ORDERS });
@@ -945,6 +988,7 @@ function detectExplorerFills(): void {
 async function explorerTick(): Promise<void> {
   if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
   for (const groupKey of explorer.groupKeys()) {
+    if (!isConfiguredExplorerGroup(groupKey)) continue;
     const actions = explorer.due(groupKey, Date.now());
     if (actions.length > 0) queueExplorerActions(groupKey, actions);
   }
@@ -972,6 +1016,7 @@ async function explorerRoundLoop(): Promise<void> {
       continue;
     }
     for (const groupKey of shuffled(explorer.groupKeys())) {
+      if (!isConfiguredExplorerGroup(groupKey)) continue;
       // A binding action for one repeated buy must not suspend the other
       // logical orders in this vertical.  Only the three-order state decision
       // remains group-scoped because it changes the generation itself.
@@ -1181,18 +1226,15 @@ function nextExitWorkerDue(strategy: string): number {
   const now = Date.now();
   const liquidity = liquidityExitRefreshes.get(strategy);
   if (liquidity) return Math.max(now, liquidity.nextAt);
-  const nextMaturity = [...(openingFillLots.get(strategy)?.values() ?? [])]
-    .map((filledAt) => filledAt + EXIT_BUY_FILL_DELAY_MS)
-    .filter((dueAt) => dueAt > now)
-    .sort((left, right) => left - right)[0];
+  const nextIdleDeadline = (lastOpeningFillAt.get(strategy) ?? inventoryObservedAt.get(strategy) ?? now) + EXIT_IDLE_BUY_FILL_DELAY_MS;
   const nextSellRefresh = orders
     .filter((order) => info(order)?.closing && info(order)?.key === strategy)
     .map((order) => sellDue.get(orderId(order)) ?? Number.POSITIVE_INFINITY)
     .filter((dueAt) => dueAt > now)
     .sort((left, right) => left - right)[0];
-  // Ten seconds is the worker's discovery cadence.  A known fill maturity or
+  // Ten seconds is the worker's discovery cadence.  An idle deadline or
   // sell refresh is allowed to wake the same vertical sooner.
-  return Math.min(nextMaturity ?? Number.POSITIVE_INFINITY, nextSellRefresh ?? Number.POSITIVE_INFINITY, now + policy.roundCooldownMs);
+  return Math.min(Math.max(now, nextIdleDeadline), nextSellRefresh ?? Number.POSITIVE_INFINITY, now + policy.roundCooldownMs);
 }
 
 function scheduleExitWorker(strategy: string, template: Json, dueAt: number, reason: string): void {
@@ -1237,7 +1279,7 @@ async function runExitWorker(strategy: string, template: Json, reason: string): 
   }
 }
 
-async function evaluateExitStrategy(strategy: string, template: Json, forceStartup: boolean): Promise<void> {
+async function evaluateExitStrategyLegacy(strategy: string, template: Json, forceStartup: boolean): Promise<void> {
   const inventory = inventoryByStrategy.get(strategy) ?? 0;
   const active = orders.filter((order) => {
     const meta = info(order);
@@ -1356,6 +1398,118 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
       },
     });
   }
+}
+
+async function evaluateExitStrategy(strategy: string, template: Json, forceStartup: boolean): Promise<void> {
+  const now = Date.now();
+  const inventory = inventoryByStrategy.get(strategy) ?? 0;
+  const active = orders.filter((order) => {
+    const meta = info(order);
+    return working.has(String(order.status)) && meta?.closing && meta.key === strategy
+      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
+  }).sort((left, right) => eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)));
+  if (inventory <= 0) {
+    for (const sell of active) queueSellCancel(strategy, sell, "empty-inventory");
+    return;
+  }
+  const idleSince = lastOpeningFillAt.get(strategy) ?? inventoryObservedAt.get(strategy) ?? now;
+  const eligibility = exitEligibility(inventory, idleSince, now);
+  const liquidity = liquidityExitRefreshes.get(strategy);
+  const liquidityReady = liquidity !== undefined && now >= liquidity.sellAt;
+  const targetQuantity = liquidityReady ? inventory : eligibility.targetQuantity;
+  const gateState = `${inventory}:${targetQuantity}:${eligibility.reason}:${liquidity?.remainingRefreshes ?? 0}:${liquidityReady}`;
+  if (exitGateStates.get(strategy) !== gateState) {
+    exitGateStates.set(strategy, gateState);
+    executionJournal.record("exit.gate", {
+      strategy,
+      inventory,
+      lastOpeningFillAt: new Date(idleSince).toISOString(),
+      liquidity: liquidity ?? null,
+      ...eligibility,
+      targetQuantity,
+    });
+  }
+  if (forceStartup) stamp(`启动独立卖出 worker strategy=${strategy} inventory=${inventory} activeSells=${active.length}`);
+  if (targetQuantity <= 0) {
+    for (const sell of active) queueSellCancel(strategy, sell, "idle-countdown-reset");
+    return;
+  }
+  if (active.length > 1) {
+    for (const sell of active.slice(1)) queueSellCancel(strategy, sell, "duplicate-working-sell");
+    return;
+  }
+  const sell = active[0];
+  const liquidityRefreshDue = liquidity !== undefined
+    && liquidityReady && liquidity.remainingRefreshes > 0 && now >= liquidity.nextAt;
+  if (sell) {
+    const id = orderId(sell);
+    const due = sellDue.get(id) ?? 0;
+    const needsQuantityUpdate = quantity(sell) !== targetQuantity || remaining(sell) !== targetQuantity;
+    if (!liquidityRefreshDue && !needsQuantityUpdate && now < due && Number(sell.price) === EXIT_ORDER_PRICE) return;
+    if (liquidityRefreshDue && liquidity) advanceLiquidityRefresh(strategy, liquidity, id, now);
+    sellDue.set(id, now + (liquidityRefreshDue ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS));
+    writer.enqueue({
+      key: `sell-refresh:${id}`, priority: 0,
+      run: async () => {
+        const liveSell = orders.find((order) => orderId(order) === id);
+        if (!liveSell || !working.has(String(liveSell.status))) return;
+        const payload = payloadFrom(template, targetQuantity, true);
+        const replacement = await writeOrder(`sell-refresh:${id}:${Date.now()}`, "PUT", `/trader/v1/accounts/${accountHash}/orders/${id}`, payload, 0);
+        applyLocalReplace(id, payload, replacement);
+        stamp(`卖单 Replace strategy=${strategy} quantity=${targetQuantity} replacement=${replacement}`);
+      },
+    });
+    return;
+  }
+  if (now < (sellSubmitDue.get(strategy) ?? 0)) return;
+  if (Date.now() - lastFullOrderPollAt >= 5_000 && !await ensureFreshOrdersForExit()) return;
+  sellSubmitDue.set(strategy, now + (liquidityReady ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS));
+  if (liquidityReady && liquidity) liquidity.nextAt = now + LIQUIDITY_EXIT_REFRESH_MS;
+  writer.enqueue({
+    key: `sell-submit:${strategy}`, priority: 0,
+    run: async () => {
+      if ((inventoryByStrategy.get(strategy) ?? 0) <= 0) return;
+      const payload = payloadFrom(template, targetQuantity, true);
+      const newId = await writeOrder(`sell-submit:${strategy}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, 0);
+      applyLocalSubmit(payload, newId);
+      stamp(`自动卖出 strategy=${strategy} quantity=${targetQuantity} newOrder=${newId}`);
+    },
+  });
+}
+
+function queueSellCancel(strategy: string, sell: Json, reason: string): void {
+  const id = orderId(sell);
+  if (cancelingSells.has(id)) return;
+  cancelingSells.add(id);
+  writer.enqueue({
+    key: `sell-cancel:${reason}:${id}`, priority: 0,
+    run: async () => {
+      await cancelOrder(`sell-cancel:${reason}:${id}`, id);
+      sellDue.delete(id);
+      stamp(`卖单取消 strategy=${strategy} order=${id} reason=${reason}`);
+    },
+  });
+}
+
+function advanceLiquidityRefresh(
+  strategy: string,
+  liquidity: { sellAt: number; remainingRefreshes: number; nextAt: number },
+  orderIdValue: string,
+  now: number,
+): void {
+  liquidity.remainingRefreshes -= 1;
+  if (liquidity.remainingRefreshes <= 0) {
+    liquidityExitRefreshes.delete(strategy);
+    executionJournal.record("exit.liquidity-refresh-complete", { strategy, refreshedOrder: orderIdValue });
+    return;
+  }
+  liquidity.nextAt = now + LIQUIDITY_EXIT_REFRESH_MS;
+  executionJournal.record("exit.liquidity-refresh-round", {
+    strategy,
+    refreshedOrder: orderIdValue,
+    remainingRounds: liquidity.remainingRefreshes,
+    nextAt: new Date(liquidity.nextAt).toISOString(),
+  });
 }
 
 function evaluateExits(forceStartup = false): void {
