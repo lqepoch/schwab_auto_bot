@@ -17,7 +17,7 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
   const strikeMin = parseNumber(option(argv, "--strike-min") ?? "720", "STRIKE_MIN_INVALID");
   const strikeMax = parseNumber(option(argv, "--strike-max") ?? "790", "STRIKE_MAX_INVALID");
   const entryNotionalMin = parseNumber(option(argv, "--entry-notional-min") ?? "84", "ENTRY_NOTIONAL_MIN_INVALID");
-  const entryNotionalMax = parseNumber(option(argv, "--entry-notional-max") ?? "92", "ENTRY_NOTIONAL_MAX_INVALID");
+  const entryNotionalMax = parseNumber(option(argv, "--entry-notional-max") ?? "90", "ENTRY_NOTIONAL_MAX_INVALID");
   const executionStart = parseTime(option(argv, "--execution-start") ?? "09:15", "EXECUTION_START_INVALID");
   const executionEnd = parseTime(option(argv, "--execution-end") ?? "15:45", "EXECUTION_END_INVALID");
 
