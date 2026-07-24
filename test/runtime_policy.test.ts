@@ -13,6 +13,7 @@ test("defaults permit QQQ and SPY only during the New York execution window", ()
   assert.equal(policy.executionEnd, "15:45");
   assert.equal(policy.orderCooldownMs, 1_000);
   assert.equal(policy.roundCooldownMs, 5_000);
+  assert.equal(policy.repeatBuyAtOrderPrice, false);
   assert.equal(isWithinExecutionWindow(new Date("2026-07-24T13:15:00Z"), "09:15", "15:45"), true);
   assert.equal(isWithinExecutionWindow(new Date("2026-07-24T19:45:00Z"), "09:15", "15:45"), false);
   assert.equal(isWithinExecutionWindow(new Date("2026-07-25T13:15:00Z"), "09:15", "15:45"), false);
@@ -29,12 +30,14 @@ test("runtime policy accepts explicit symbols, strike range, and entry notional 
     "--execution-end", "15:45",
     "--order-cooldown-seconds", "2.5",
     "--round-cooldown-seconds", "7",
+    "--repeat-buy-at-order-price",
   ]);
   assert.deepEqual([...policy.underlyings], ["SPY", "QQQ"]);
   assert.equal(policy.entryNotionalMin, 84);
   assert.equal(policy.entryNotionalMax, 90);
   assert.equal(policy.orderCooldownMs, 2_500);
   assert.equal(policy.roundCooldownMs, 7_000);
+  assert.equal(policy.repeatBuyAtOrderPrice, true);
   assert.equal(isWithinInclusiveRange(84, 84, 90), true);
   assert.equal(isWithinInclusiveRange(90, 84, 90), true);
   assert.equal(isWithinInclusiveRange(83.99, 84, 90), false);

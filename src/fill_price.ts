@@ -41,3 +41,24 @@ export function completeNetDebitFill(order: Json): CompleteNetDebitFill | null {
   if (Math.abs(rawCents - priceCents) > 1e-6) return null;
   return priceCents >= 0 ? { priceCents, filledAt } : null;
 }
+
+/**
+ * Returns the submitted limit price after Schwab reports a complete one-contract fill.
+ * This deliberately does not inspect execution legs: repeat-limit mode is based on the
+ * requested order price, not a price-improved or otherwise different execution price.
+ */
+export function completeOrderLimitFill(order: Json): CompleteNetDebitFill | null {
+  const orderQuantity = Number(order.quantity ?? 0);
+  const filledQuantity = Number(order.filledQuantity ?? 0);
+  const rawPrice = Number(order.price);
+  const filledAt = Date.parse(order.closeTime ?? order.enteredTime ?? 0);
+  if (
+    !Number.isFinite(orderQuantity)
+    || orderQuantity !== 1
+    || filledQuantity !== orderQuantity
+    || !Number.isFinite(rawPrice)
+    || !Number.isFinite(filledAt)
+  ) return null;
+  const priceCents = Math.round(rawPrice * 100);
+  return Math.abs(rawPrice * 100 - priceCents) <= 1e-6 ? { priceCents, filledAt } : null;
+}
