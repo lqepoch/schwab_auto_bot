@@ -9,7 +9,7 @@ import { SchwabRestClient } from "./schwab_client.ts";
 import { SchwabApiError } from "../vendor/schwab-api-nodejs/src/utils/errors.ts";
 import { parseRuntimePolicy } from "./runtime_policy.ts";
 import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./order_policy.ts";
-import { completeNetDebitFill } from "./fill_price.ts";
+import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./price_explorer.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -615,20 +615,21 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
 
 function detectExplorerFills(): void {
   const now = Date.now();
+  const fillPriceSource = policy.repeatBuyAtOrderPrice ? "orderLimit" : "actualNet";
   for (const order of orders) {
     const meta = managedOpening(order);
     if (!meta || order.status !== "FILLED") continue;
-    const fill = completeNetDebitFill(order);
+    const fill = policy.repeatBuyAtOrderPrice ? completeOrderLimitFill(order) : completeNetDebitFill(order);
     if (!fill) {
       const id = orderId(order);
       if (!reportedUnpricedFills.has(id)) {
         reportedUnpricedFills.add(id);
-        stamp(`PRICE_EXPLORER_FILL_PRICE_UNAVAILABLE order=${id}; no exploration action sent`);
+        stamp(`PRICE_EXPLORER_FILL_PRICE_UNAVAILABLE order=${id} source=${fillPriceSource}; no exploration action sent`);
       }
       continue;
     }
     if (fill.priceCents < policy.entryNotionalMin || fill.priceCents > policy.entryNotionalMax) {
-      stamp(`PRICE_EXPLORER_FILL_PRICE_OUT_OF_RANGE order=${orderId(order)} actualPrice=${(fill.priceCents / 100).toFixed(2)}; no exploration action sent`);
+      stamp(`PRICE_EXPLORER_FILL_PRICE_OUT_OF_RANGE order=${orderId(order)} source=${fillPriceSource} price=${(fill.priceCents / 100).toFixed(2)}; no exploration action sent`);
       continue;
     }
     if (now - fill.filledAt > 10_000) continue;
@@ -636,7 +637,7 @@ function detectExplorerFills(): void {
     persistExplorer();
     if (transition.actions.length > 0) queueExplorerActions(meta.key, transition.actions);
     if (transition.triggered) {
-      stamp(`PRICE_EXPLORER_PAIR group=${meta.key} actualPrice=${(fill.priceCents / 100).toFixed(2)} generation=${transition.generation}`);
+      stamp(`PRICE_EXPLORER_PAIR group=${meta.key} source=${fillPriceSource} price=${(fill.priceCents / 100).toFixed(2)} generation=${transition.generation}`);
     }
   }
 }
@@ -928,6 +929,7 @@ process.on("SIGTERM", stop);
 
 if (!readOnly) await requireWeeklyReauthorization();
 stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
+if (!readOnly) stamp(`PRICE_EXPLORER_FILL_PRICE_SOURCE source=${policy.repeatBuyAtOrderPrice ? "orderLimit" : "actualNet"}`);
 await bootstrap();
 await poll(true);
 if (!once) {

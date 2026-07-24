@@ -10,6 +10,7 @@ export type RuntimePolicy = {
   executionEnd: string;
   orderCooldownMs: number;
   roundCooldownMs: number;
+  repeatBuyAtOrderPrice: boolean;
   isExecutionWindowOpen: (now?: Date) => boolean;
   requireExecutionWindow: (now?: Date) => void;
 };
@@ -30,6 +31,7 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
     option(argv, "--round-cooldown-seconds") ?? "5",
     "ROUND_COOLDOWN_INVALID",
   );
+  const repeatBuyAtOrderPrice = argv.includes("--repeat-buy-at-order-price");
 
   if (strikeMin > strikeMax) throw new Error("STRIKE_RANGE_INVALID");
   if (entryNotionalMin > entryNotionalMax) throw new Error("ENTRY_NOTIONAL_RANGE_INVALID");
@@ -47,6 +49,7 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
     executionEnd,
     orderCooldownMs,
     roundCooldownMs,
+    repeatBuyAtOrderPrice,
     isExecutionWindowOpen,
     requireExecutionWindow(now = new Date()): void {
       if (!isExecutionWindowOpen(now)) throw new Error("EXECUTION_WINDOW_CLOSED");
