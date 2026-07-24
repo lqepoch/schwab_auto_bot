@@ -93,7 +93,15 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 
 `--execution-start` 与 `--execution-end` 默认分别为 `09:15` 和 `15:45`（纽约时间）；只在需要变更执行窗口时传入，例如 `--execution-start 09:30 --execution-end 15:30`。
 
-整体刷新每轮只读取一次完整订单快照，直接使用其中的 broker order ID 执行原生 Replace；不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
+整体刷新默认每个候选订单间隔 1 秒、每轮完成后间隔 5 秒。每一轮开始都会读取一次完整订单列表；该快照同时供本轮所有候选筛选与原生 Replace 使用，不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用这份完整快照，避免同轮重复读取。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
+
+只在需要覆盖刷新节奏时才传入对应参数，例如：
+
+```powershell
+node .\src\main.ts --confirm-live I_UNDERSTAND `
+  --order-cooldown-seconds 2 `
+  --round-cooldown-seconds 10
+```
 
 ## 验证
 
