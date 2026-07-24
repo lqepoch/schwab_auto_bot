@@ -108,6 +108,20 @@ export class PriceExplorer {
     return group.tasks.some((action) => action.generation === group.generation);
   }
 
+  /**
+   * A three-order resolution changes shared group state.  Other scheduled
+   * actions belong to a single logical order and must not block its peers.
+   */
+  hasPendingGroupControlAction(groupKey: string): boolean {
+    const group = this.group(groupKey);
+    return group.tasks.some((action) => action.generation === group.generation && action.kind === "resolve-three");
+  }
+
+  hasPendingActionForLogicalOrder(groupKey: string, logicalId: string): boolean {
+    const group = this.group(groupKey);
+    return group.tasks.some((action) => action.generation === group.generation && action.logicalId === logicalId);
+  }
+
   reconcileWorkingBrokerOrders(groupKey: string, brokerOrderIds: ReadonlySet<string>): void {
     const group = this.group(groupKey);
     for (const logical of Object.values(group.logicalOrders)) {
@@ -227,6 +241,7 @@ export class PriceExplorer {
     const group = this.group(groupKey);
     const actions: ExplorerAction[] = [];
     for (const order of this.activeLogicalOrders(groupKey)) {
+      if (this.hasPendingActionForLogicalOrder(groupKey, order.id)) continue;
       const action: ExplorerAction = {
         generation: group.generation,
         dueAt: now,
@@ -245,7 +260,7 @@ export class PriceExplorer {
     const group = this.group(groupKey);
     const slots = Math.max(0, MAX_ACTIVE_ORDERS - this.activeLogicalOrders(groupKey).length);
     return Object.values(group.logicalOrders)
-      .filter((order) => !order.filled && order.brokerOrderId === null)
+      .filter((order) => !order.filled && order.brokerOrderId === null && !this.hasPendingActionForLogicalOrder(groupKey, order.id))
       .sort((left, right) => left.priceCents - right.priceCents || left.createdAt - right.createdAt || left.id.localeCompare(right.id))
       .slice(0, slots)
       .map((order) => ({

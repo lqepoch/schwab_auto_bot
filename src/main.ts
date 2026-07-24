@@ -201,6 +201,9 @@ const sellSubmitDue = new Map<string, number>();
 const cancelingSells = new Set<string>();
 const exitGateStates = new Map<string, string>();
 const liquidityExitRefreshes = new Map<string, { remainingRounds: number; nextAt: number }>();
+const exitWorkerTimers = new Map<string, { dueAt: number; timer: NodeJS.Timeout }>();
+let exitPositionSnapshot: { at: number; positions: Map<string, { long: number; short: number }> } | null = null;
+let exitPositionSnapshotPending: Promise<Map<string, { long: number; short: number }>> | null = null;
 const previewRejectedUntil = new Map<string, number>();
 const reportedPolicyAlerts = new Set<string>();
 const explorer = await loadExplorer();
@@ -250,8 +253,13 @@ function recordOpeningFillLot(strategy: string, order: Json): void {
   const filledAt = eventTime(order);
   if (!Number.isFinite(filledAt)) return;
   const lots = openingFillLots.get(strategy) ?? new Map<string, number>();
+  const firstObserved = !lots.has(orderId(order));
   lots.set(orderId(order), filledAt);
   openingFillLots.set(strategy, lots);
+  rememberExitTemplate(strategy, order);
+  if (firstObserved && !readOnly) {
+    scheduleExitWorker(strategy, order, Math.max(Date.now(), filledAt + EXIT_BUY_FILL_DELAY_MS), "opening-fill-matures");
+  }
 }
 
 function maturedOpeningFillCount(strategy: string, now = Date.now()): number {
@@ -426,6 +434,7 @@ function previewReportsInsufficientFunds(value: unknown): boolean {
 function requestLiquidityExit(payload: Json): void {
   const meta = info(payload);
   if (!meta?.opening) return;
+  rememberExitTemplate(meta.key, payload);
   liquidityExitRefreshes.set(meta.key, { remainingRounds: LIQUIDITY_EXIT_REFRESH_ROUNDS, nextAt: Date.now() });
   executionJournal.record("exit.liquidity-triggered", {
     strategy: meta.key,
@@ -433,6 +442,7 @@ function requestLiquidityExit(payload: Json): void {
     refreshRounds: LIQUIDITY_EXIT_REFRESH_ROUNDS,
     order: payloadAuditData(payload),
   });
+  scheduleExitWorker(meta.key, payload, Date.now(), "insufficient-funds");
   void reconcilePositions(false)
     .catch((error) => stamp(`LIQUIDITY_EXIT_POSITION_REFRESH_FAILED strategy=${meta.key} error=${String(error)}`))
     .finally(() => evaluateExits());
@@ -737,6 +747,7 @@ function reconcileExplorerSnapshot(): void {
     if (!meta) continue;
     explorerTemplates.set(meta.key, order);
     rememberExitTemplate(meta.key, order);
+    if (order.status === "FILLED") recordOpeningFillLot(meta.key, order);
     if (!working.has(String(order.status))) continue;
     explorer.registerWorkingOrder(meta.key, orderId(order), Math.round(Number(order.price) * 100), eventTime(order));
     const ids = liveByGroup.get(meta.key) ?? new Set<string>();
@@ -961,7 +972,10 @@ async function explorerRoundLoop(): Promise<void> {
       continue;
     }
     for (const groupKey of shuffled(explorer.groupKeys())) {
-      if (explorer.hasPendingActions(groupKey)) continue;
+      // A binding action for one repeated buy must not suspend the other
+      // logical orders in this vertical.  Only the three-order state decision
+      // remains group-scoped because it changes the generation itself.
+      if (explorer.hasPendingGroupControlAction(groupKey)) continue;
       const now = Date.now();
       const actions = [
         ...explorer.planMissingOrderRecovery(groupKey, now),
@@ -1040,14 +1054,17 @@ function availableFor(template: Json, current: Map<string, { long: number; short
 
 async function reconcilePositions(announce = true): Promise<void> {
   const current = await positions();
-  const templates = new Map<string, Json>();
+  const templates = new Map<string, Json>(exitTemplatesByStrategy);
   for (const order of orders) {
     const meta = info(order);
     if (
       !meta || meta.expiration !== newYorkDate()
       || !policy.underlyings.has(meta.underlying)
     ) continue;
-    if (!templates.has(meta.key) || meta.opening) templates.set(meta.key, order);
+    if (!templates.has(meta.key) || meta.opening) {
+      templates.set(meta.key, order);
+      rememberExitTemplate(meta.key, order);
+    }
   }
   for (const [strategy, template] of templates) {
     const inventory = availableFor(template, current);
@@ -1060,6 +1077,35 @@ async function reconcilePositions(announce = true): Promise<void> {
   }
   lastPositionReconciledAt = Date.now();
   if (announce) stamp(`订单与持仓完整对账完成 strategies=${templates.size}；后台仍保留 110s 兜底对账`);
+}
+
+/**
+ * Exit workers are independent per vertical, but the account-level positions
+ * endpoint is coalesced for one second.  This gives every worker a fresh
+ * authoritative inventory without multiplying identical Schwab reads.
+ */
+async function freshExitPositions(): Promise<Map<string, { long: number; short: number }>> {
+  if (exitPositionSnapshot && Date.now() - exitPositionSnapshot.at < 1_000) return exitPositionSnapshot.positions;
+  if (!exitPositionSnapshotPending) {
+    exitPositionSnapshotPending = positions().then((current) => {
+      exitPositionSnapshot = { at: Date.now(), positions: current };
+      return current;
+    }).finally(() => {
+      exitPositionSnapshotPending = null;
+    });
+  }
+  return exitPositionSnapshotPending;
+}
+
+async function refreshExitInventory(strategy: string, template: Json): Promise<number> {
+  const current = await freshExitPositions();
+  const inventory = availableFor(template, current);
+  const previous = inventoryByStrategy.get(strategy) ?? 0;
+  inventoryByStrategy.set(strategy, inventory);
+  if (inventory > 0 && previous <= 0) inventoryObservedAt.set(strategy, Date.now());
+  if (inventory <= 0) inventoryObservedAt.delete(strategy);
+  executionJournal.record("exit.inventory.reconciled", { strategy, inventory, source: "independent-worker" });
+  return inventory;
 }
 
 async function ensureFreshPositions(): Promise<void> {
@@ -1129,6 +1175,66 @@ function exitTemplates(): Map<string, Json> {
     if ((inventoryByStrategy.get(strategy) ?? 0) > 0 && !latest.has(strategy)) latest.set(strategy, template);
   }
   return latest;
+}
+
+function nextExitWorkerDue(strategy: string): number {
+  const now = Date.now();
+  const liquidity = liquidityExitRefreshes.get(strategy);
+  if (liquidity) return Math.max(now, liquidity.nextAt);
+  const nextMaturity = [...(openingFillLots.get(strategy)?.values() ?? [])]
+    .map((filledAt) => filledAt + EXIT_BUY_FILL_DELAY_MS)
+    .filter((dueAt) => dueAt > now)
+    .sort((left, right) => left - right)[0];
+  const nextSellRefresh = orders
+    .filter((order) => info(order)?.closing && info(order)?.key === strategy)
+    .map((order) => sellDue.get(orderId(order)) ?? Number.POSITIVE_INFINITY)
+    .filter((dueAt) => dueAt > now)
+    .sort((left, right) => left - right)[0];
+  // Ten seconds is the worker's discovery cadence.  A known fill maturity or
+  // sell refresh is allowed to wake the same vertical sooner.
+  return Math.min(nextMaturity ?? Number.POSITIVE_INFINITY, nextSellRefresh ?? Number.POSITIVE_INFINITY, now + policy.roundCooldownMs);
+}
+
+function scheduleExitWorker(strategy: string, template: Json, dueAt: number, reason: string): void {
+  if (stopping || readOnly) return;
+  const safeDueAt = Math.max(Date.now(), dueAt);
+  const existing = exitWorkerTimers.get(strategy);
+  if (existing && existing.dueAt <= safeDueAt) return;
+  if (existing) clearTimeout(existing.timer);
+  const timer = setTimeout(() => {
+    exitWorkerTimers.delete(strategy);
+    void runExitWorker(strategy, template, reason);
+  }, Math.max(0, safeDueAt - Date.now()));
+  exitWorkerTimers.set(strategy, { dueAt: safeDueAt, timer });
+  executionJournal.record("exit.worker.scheduled", {
+    strategy,
+    reason,
+    dueAt: new Date(safeDueAt).toISOString(),
+  });
+}
+
+async function runExitWorker(strategy: string, template: Json, reason: string): Promise<void> {
+  if (stopping || readOnly) return;
+  if (!policy.isExecutionWindowOpen()) {
+    scheduleExitWorker(strategy, template, Date.now() + policy.roundCooldownMs, "outside-execution-window");
+    return;
+  }
+  if (evaluatingExitStrategies.has(strategy)) {
+    scheduleExitWorker(strategy, template, Date.now() + 250, "worker-already-running");
+    return;
+  }
+  evaluatingExitStrategies.add(strategy);
+  executionJournal.record("exit.worker.started", { strategy, reason });
+  try {
+    await refreshExitInventory(strategy, template);
+    await evaluateExitStrategy(strategy, template, false);
+  } catch (error) {
+    stamp(`独立卖出 worker 失败 strategy=${strategy} error=${String(error)}`);
+    executionJournal.record("exit.worker.failed", { strategy, reason, error: String(error) });
+  } finally {
+    evaluatingExitStrategies.delete(strategy);
+    if (!stopping) scheduleExitWorker(strategy, template, nextExitWorkerDue(strategy), "worker-next-round");
+  }
 }
 
 async function evaluateExitStrategy(strategy: string, template: Json, forceStartup: boolean): Promise<void> {
@@ -1255,11 +1361,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
 function evaluateExits(forceStartup = false): void {
   if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
   for (const [strategy, template] of exitTemplates()) {
-    if (evaluatingExitStrategies.has(strategy)) continue;
-    evaluatingExitStrategies.add(strategy);
-    void evaluateExitStrategy(strategy, template, forceStartup)
-      .catch((error) => stamp(`独立卖出 worker 失败 strategy=${strategy} error=${String(error)}`))
-      .finally(() => evaluatingExitStrategies.delete(strategy));
+    scheduleExitWorker(strategy, template, Date.now(), forceStartup ? "startup-recovery" : "discovery-round");
   }
 }
 
@@ -1338,12 +1440,14 @@ if (once) {
     if (!activityStream?.ready || fallbackDue) void poll(false);
   }, 2_000));
   runtimeIntervals.push(setInterval(() => void explorerTick(), 200));
-  runtimeIntervals.push(setInterval(() => void evaluateExits(), 500));
+  runtimeIntervals.push(setInterval(() => void evaluateExits(), policy.roundCooldownMs));
   runtimeIntervals.push(setInterval(() => void reconcileAll(), 110_000));
   runtimeIntervals.push(setInterval(() => void checkControlRequest(), 250));
 }
 while (!stopping) await wait(250);
 for (const interval of runtimeIntervals) clearInterval(interval);
+for (const { timer } of exitWorkerTimers.values()) clearTimeout(timer);
+exitWorkerTimers.clear();
 if (activityRestTimer) clearTimeout(activityRestTimer);
 executionJournal.record("run.stopping", { reason: stopReason });
 if (!readOnly) persistExplorer();
