@@ -15,3 +15,18 @@ export function fixedPriceRefreshIntervalMs(requestsLastMinute: number): number 
       + (FIXED_PRICE_REFRESH_INTERVAL_MAX_MS - FIXED_PRICE_REFRESH_INTERVAL_MIN_MS) * pressure,
   );
 }
+
+export class FixedPriceRefreshPacer {
+  private tail = Promise.resolve();
+  private lastStartedAt = 0;
+
+  admit(intervalMs: number): Promise<void> {
+    const next = this.tail.then(async () => {
+      const delay = Math.max(0, intervalMs - (Date.now() - this.lastStartedAt));
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      this.lastStartedAt = Date.now();
+    });
+    this.tail = next.catch(() => undefined);
+    return next;
+  }
+}
