@@ -121,6 +121,8 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 node .\src\main.ts --confirm-live I_UNDERSTAND --repeat-buy-at-order-price
 ```
 
+With `--repeat-buy-at-order-price`, the bot runs a fixed-price cycle: price exploration, generations, repricing, and explorer refresh loops are disabled. Each newly completed opening vertical is replenished once at its submitted limit price. Consumed fill IDs are persisted in `.state/fixed-price-cycle.json`, so a hot switch cannot repeat an already handled fill. The independent exit worker and its sell-first priority remain active.
+
 ### 独立卖出触发与流动性处理
 
 每个 0DTE 垂直组合都有独立、持久化的卖出评估 worker，不会被其他组合的卖出动作阻塞。每次 worker 唤醒都会先用新鲜的持仓快照核对该组合可平数量；账户级持仓读取最多在 1 秒内合并一次，不会改变各组的独立触发与写入决策。该组最后一次完整买入成交会重置 30 秒空窗倒计时；连续 30 秒没有新的买入成交且有仓位时，worker 挂一张数量等于全部可平仓仓位的卖单。某组合可平仓仓位达到 5 张时不等待倒计时，立即触发全仓卖出。每组同时最多保留一张活动卖单，且每次刷新都会把数量替换为最新可平仓仓位。
