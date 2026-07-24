@@ -1824,6 +1824,17 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
           stamp(`卖单 Replace strategy=${strategy} quantity=${currentTarget} replacement=${replacement}`);
         } catch (error) {
           if (!deferExitAfterPreviewRejection(strategy, id, error)) throw error;
+          // A broker PRICE_OR_QUANTITY rejection can be an order-age or
+          // exchange-state issue rather than a duplicate sell.  Do not leave
+          // the oldest long-lived sell frozen behind its Replace cooldown:
+          // the guarded stale flow cancels only this oldest eligible closing
+          // order, fully reconciles, then rebuilds from current inventory.
+          if (mayRecreateStaleOrder(eventTime(liveSell), Date.now(), nextStaleRecreateAt)) {
+            executionJournal.record("exit.preview-rebuild-queued", {
+              strategy, orderId: id, inventory: currentInventory, targetQuantity: currentTarget,
+            });
+            queueVerifiedStaleExitRecreate(strategy, liveSell, template);
+          }
         }
       },
     });
