@@ -942,13 +942,10 @@ function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template
     run: async () => {
       try {
         executionJournal.record("order.stale-recreate.started", { direction: "closing", strategy, sourceOrderId: id });
-        if (polling) {
-          executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: "full-reconciliation-in-progress-before-cancel" });
-          return;
-        }
         // Every stale exit has its own retry clock.  The final broker write is
         // still serial, but unrelated 90-second exits never wait on a global
-        // "oldest order" cooldown.
+        // "oldest order" cooldown.  A periodic full order snapshot must not
+        // block the Cancel itself; reconciliation happens immediately after.
         await cancelOrder(`stale-recreate-cancel:${id}`, id, 0);
         const pollStartedAt = lastFullOrderPollAt;
         for (let attempt = 0; polling && attempt < 100 && !stopping; attempt += 1) await wait(50);

@@ -173,7 +173,8 @@ when any of those values differs.
 
 Working opening orders continue to use native Schwab Replace and are never
 canceled by maintenance. Each closing order that remains working for at least
-90 seconds has its own 10-second guarded recreate retry: cancel, full REST
+90 seconds has its own 10-second guarded recreate retry: cancel (even while a
+periodic order refresh is running), full REST
 reconciliation, verify no working order remains for that strategy, then Preview
 and submit. Eligible exits prepare concurrently, but the final broker write
 remains serialized for UNKNOWN-result safety. Working opening orders are never
