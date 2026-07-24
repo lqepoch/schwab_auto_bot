@@ -46,6 +46,8 @@ npm run auth:relogin
 
 `auth:status` 中的 `weeklyReauthRequired: true` 表示真实写入会被拒绝；只读命令不受影响。
 
+完成回调 URL 粘贴并出现“登录完成”后，`auth:login` 和 `auth:relogin` 会自动退出并返回 PowerShell 提示符；不需要手动按 `Ctrl+C`。
+
 认证文件默认写入 `state/schwab-auth.json`（已被 Git 忽略）。它包含 client secret 与 token，必须按敏感凭据保护；可通过 `SCHWAB_BOT_AUTH_FILE` 指向受保护的绝对路径。
 
 ## 运行
