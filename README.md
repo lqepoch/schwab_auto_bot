@@ -74,15 +74,22 @@ node .\src\main.ts --confirm-live I_UNDERSTAND
 
 默认只有纽约时间工作日 09:15（开盘前 15 分钟）至 15:45（收盘前 15 分钟）的区间允许 Preview、Submit、Replace 与 Cancel。窗口外仍会执行只读订单/持仓对账，但不会产生任何 broker 写入。
 
-默认策略标的为 `QQQ,SPY`，行权价范围为 720–790，入场单名义金额范围为 84–92。它们都可在启动时覆盖：
+默认策略标的为 `QQQ,SPY`，行权价范围为 720–790，入场单名义金额范围为 84–90；对于一张期权合约，这对应买入价 0.84–0.90。日常启动无需传入这些默认参数，也无需传入默认执行时间：
+
+```powershell
+node .\src\main.ts --confirm-live I_UNDERSTAND
+```
+
+仅在需要覆盖默认值时才传入对应参数。例如：
 
 ```powershell
 node .\src\main.ts --confirm-live I_UNDERSTAND `
   --underlyings QQQ,SPY `
   --strike-min 720 --strike-max 790 `
-  --entry-notional-min 84 --entry-notional-max 92 `
-  --execution-start 09:15 --execution-end 15:45
+  --entry-notional-min 84 --entry-notional-max 90
 ```
+
+`--execution-start` 与 `--execution-end` 默认分别为 `09:15` 和 `15:45`（纽约时间）；只在需要变更执行窗口时传入，例如 `--execution-start 09:30 --execution-end 15:30`。
 
 整体刷新每轮只读取一次完整订单快照，直接使用其中的 broker order ID 执行原生 Replace；不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
 
