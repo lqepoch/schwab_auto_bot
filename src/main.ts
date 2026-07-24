@@ -1234,7 +1234,8 @@ function nextExitWorkerDue(strategy: string): number {
     .sort((left, right) => left - right)[0];
   // Ten seconds is the worker's discovery cadence.  An idle deadline or
   // sell refresh is allowed to wake the same vertical sooner.
-  return Math.min(Math.max(now, nextIdleDeadline), nextSellRefresh ?? Number.POSITIVE_INFINITY, now + policy.roundCooldownMs);
+  const pendingIdleDeadline = nextIdleDeadline > now ? nextIdleDeadline : Number.POSITIVE_INFINITY;
+  return Math.min(pendingIdleDeadline, nextSellRefresh ?? Number.POSITIVE_INFINITY, now + policy.roundCooldownMs);
 }
 
 function scheduleExitWorker(strategy: string, template: Json, dueAt: number, reason: string): void {
