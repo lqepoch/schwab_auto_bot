@@ -1708,7 +1708,13 @@ function advanceLiquidityRefresh(
 function evaluateExits(forceStartup = false): void {
   if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
   for (const [strategy, template] of exitTemplates()) {
-    scheduleExitWorker(strategy, template, Date.now(), forceStartup ? "startup-recovery" : "discovery-round");
+    // Startup intentionally wakes every known strategy. Subsequent discovery
+    // rounds may only create workers for newly current strategies: resetting
+    // existing timers here defeats their per-strategy refresh and retry due
+    // times, causing repeated Preview traffic every global round.
+    if (forceStartup || (!exitWorkerTimers.has(strategy) && !evaluatingExitStrategies.has(strategy))) {
+      scheduleExitWorker(strategy, template, Date.now(), forceStartup ? "startup-recovery" : "discovery-round");
+    }
   }
 }
 
