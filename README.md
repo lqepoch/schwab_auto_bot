@@ -38,6 +38,14 @@ npm run auth:login
 npm run auth:status
 ```
 
+真实策略采用北京时间每周一 06:00 为一周边界。首次升级到该策略版本后，以及每个新周期的第一次真实运行前，都必须重新完成一次 OAuth 授权；同一周内其余运行复用这次授权。命令如下：
+
+```powershell
+npm run auth:relogin
+```
+
+`auth:status` 中的 `weeklyReauthRequired: true` 表示真实写入会被拒绝；只读命令不受影响。
+
 认证文件默认写入 `state/schwab-auth.json`（已被 Git 忽略）。它包含 client secret 与 token，必须按敏感凭据保护；可通过 `SCHWAB_BOT_AUTH_FILE` 指向受保护的绝对路径。
 
 ## 运行
@@ -60,7 +68,23 @@ node .\src\main.ts --read-only
 node .\src\main.ts --confirm-live I_UNDERSTAND
 ```
 
-当前策略只处理 QQQ/SPY 的当日到期两腿垂直价差；启动时要求且只允许一个 Schwab linked account。
+当前策略处理配置标的的当日到期两腿垂直价差；启动时要求且只允许一个 Schwab linked account。
+
+## 策略参数与执行时间
+
+默认只有纽约时间工作日 09:15（开盘前 15 分钟）至 15:45（收盘前 15 分钟）的区间允许 Preview、Submit、Replace 与 Cancel。窗口外仍会执行只读订单/持仓对账，但不会产生任何 broker 写入。
+
+默认策略标的为 `QQQ,SPY`，行权价范围为 720–790，入场单名义金额范围为 84–92。它们都可在启动时覆盖：
+
+```powershell
+node .\src\main.ts --confirm-live I_UNDERSTAND `
+  --underlyings QQQ,SPY `
+  --strike-min 720 --strike-max 790 `
+  --entry-notional-min 84 --entry-notional-max 92 `
+  --execution-start 09:15 --execution-end 15:45
+```
+
+整体刷新每轮只读取一次完整订单快照，直接使用其中的 broker order ID 执行原生 Replace；不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
 
 ## 验证
 
@@ -69,4 +93,4 @@ npm run check
 npm test
 ```
 
-测试覆盖 SDK 传输整合的关键边界：保留 Schwab 写入响应的 `Location` 订单 ID，以及失败请求绝不由 SDK 隐式重试。
+测试覆盖 SDK 传输整合的关键边界：保留 Schwab 写入响应的 `Location` 订单 ID、失败请求绝不由 SDK 隐式重试、执行窗口与周重登录边界。
