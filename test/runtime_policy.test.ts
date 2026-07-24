@@ -7,6 +7,10 @@ test("defaults permit QQQ and SPY only during the New York execution window", ()
   assert.deepEqual([...policy.underlyings], ["QQQ", "SPY"]);
   assert.equal(policy.strikeMin, 720);
   assert.equal(policy.strikeMax, 790);
+  assert.equal(policy.entryNotionalMin, 84);
+  assert.equal(policy.entryNotionalMax, 90);
+  assert.equal(policy.executionStart, "09:15");
+  assert.equal(policy.executionEnd, "15:45");
   assert.equal(isWithinExecutionWindow(new Date("2026-07-24T13:15:00Z"), "09:15", "15:45"), true);
   assert.equal(isWithinExecutionWindow(new Date("2026-07-24T19:45:00Z"), "09:15", "15:45"), false);
   assert.equal(isWithinExecutionWindow(new Date("2026-07-25T13:15:00Z"), "09:15", "15:45"), false);
