@@ -608,7 +608,7 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
   }
 }
 
-async function cancelOrder(key: string, orderIdValue: string): Promise<void> {
+async function cancelOrder(key: string, orderIdValue: string, priority: Priority = 2): Promise<void> {
   if (stopping) {
     executionJournal.record("broker.cancel.skipped", { key, orderId: orderIdValue, reason: "runtime-stopping" });
     throw new Error("RUNTIME_STOPPING");
@@ -623,11 +623,11 @@ async function cancelOrder(key: string, orderIdValue: string): Promise<void> {
   await evidence(key, "DELETE", path, {});
   try {
     executionJournal.record("broker.cancel.requested", { key, orderId: orderIdValue, path });
-    await finalWriteGate.run(2, async () => {
+    await finalWriteGate.run(priority, async () => {
       if (stopping) throw new Error("RUNTIME_STOPPING");
       await requireWeeklyReauthorization();
       policy.requireExecutionWindow();
-      return api(path, { method: "DELETE" }, 2);
+      return api(path, { method: "DELETE" }, priority);
     });
     const source = orders.find((order) => orderId(order) === orderIdValue);
     if (source) source.status = "CANCELED";
@@ -943,12 +943,15 @@ function queueVerifiedStaleRecreate(
           executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: "full-reconciliation-in-progress-before-cancel" });
           return;
         }
-        await cancelOrder(`stale-recreate-cancel:${id}`, id);
+        // This is the only maintenance flow allowed to use critical budget:
+        // after a confirmed cancel it must obtain an authoritative snapshot
+        // before any new sell is considered.
+        await cancelOrder(`stale-recreate-cancel:${id}`, id, 0);
         // A concurrent periodic snapshot can start immediately after the
         // cancel. Wait for that authority instead of leaving a canceled order
         // without its verified replacement.
         for (let attempt = 0; polling && attempt < 100 && !stopping; attempt += 1) await wait(50);
-        if (stopping || !await poll(true, priority)) {
+        if (stopping || !await poll(true, 0)) {
           executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: "full-reconciliation-unavailable" });
           return;
         }
@@ -959,7 +962,7 @@ function queueVerifiedStaleRecreate(
           executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: "working-order-remains-after-reconciliation" });
           return;
         }
-        const brokerOrderId = await writeOrder(`stale-recreate-submit:${id}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, priority);
+        const brokerOrderId = await writeOrder(`stale-recreate-submit:${id}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, 0);
         applyLocalSubmit(payload, brokerOrderId);
         executionJournal.record("order.stale-recreate.submitted", { direction, strategy, sourceOrderId: id, brokerOrderId, order: payloadAuditData(payload) });
       } catch (error) {
