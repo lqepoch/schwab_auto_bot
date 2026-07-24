@@ -28,7 +28,7 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
     "ORDER_COOLDOWN_INVALID",
   );
   const roundCooldownMs = parsePositiveSeconds(
-    option(argv, "--round-cooldown-seconds") ?? "5",
+    option(argv, "--round-cooldown-seconds") ?? "10",
     "ROUND_COOLDOWN_INVALID",
   );
   const repeatBuyAtOrderPrice = argv.includes("--repeat-buy-at-order-price");

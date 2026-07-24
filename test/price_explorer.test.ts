@@ -46,6 +46,18 @@ test("recovers an unfilled logical order that a previous runtime acknowledged wi
   }]);
 });
 
+test("one logical order's scheduled action does not block a peer's round recovery", () => {
+  const explorer = new PriceExplorer();
+  explorer.registerWorkingOrder("QQQ:vertical", "one", 88, 1);
+  explorer.registerWorkingOrder("QQQ:vertical", "two", 89, 2);
+  const first = explorer.recordCompleteFill("QQQ:vertical", "fill", 89, 3);
+  assert.equal(first.actions.length, 1);
+  assert.deepEqual(
+    explorer.planRoundRecovery("QQQ:vertical", 10).map((action) => action.logicalId),
+    ["l1", "l2"],
+  );
+});
+
 test("single mode creates the exact two-order exploration schedule", () => {
   const explorer = new PriceExplorer();
   explorer.recordCompleteFill("QQQ:vertical", "1", 90, 0);
