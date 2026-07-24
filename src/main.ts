@@ -8,10 +8,11 @@ import { PriorityGate, PriorityWriter, type Priority } from "./priority_runtime.
 import { SchwabRestClient } from "./schwab_client.ts";
 import { SchwabApiError } from "../vendor/schwab-api-nodejs/src/utils/errors.ts";
 import { isWithinInclusiveRange, parseRuntimePolicy } from "./runtime_policy.ts";
-type Json = Record<string, any>;
+import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./order_policy.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
+const policyAlertPath = join(root, ".state", "policy-alerts.jsonl");
 const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
 const readOnly = process.argv.includes("--read-only");
 const once = process.argv.includes("--once");
@@ -127,6 +128,7 @@ const sellSubmitDue = new Map<string, number>();
 const sellRefreshFailures = new Map<string, number>();
 const cancelingSells = new Set<string>();
 const previewRejectedUntil = new Map<string, number>();
+const reportedPolicyAlerts = new Set<string>();
 
 function flatten(source: any[]): Json[] {
   const output: Json[] = [];
@@ -138,40 +140,7 @@ function flatten(source: any[]): Json[] {
   return output;
 }
 
-function parseOcc(symbol: string): Json | null {
-  const match = symbol.trim().match(/^([A-Z.\-]{1,6})\s*(\d{6})([CP])(\d{8})$/);
-  if (!match) return null;
-  const [, underlying, ymd, right, rawStrike] = match;
-  return {
-    underlying,
-    expiration: `20${ymd.slice(0, 2)}-${ymd.slice(2, 4)}-${ymd.slice(4, 6)}`,
-    right,
-    strike: Number(rawStrike) / 1_000,
-  };
-}
-
-function info(order: Json): Json | null {
-  const legs = order.orderLegCollection;
-  if (!Array.isArray(legs) || legs.length !== 2) return null;
-  const parsed = legs.map((leg: Json) => parseOcc(String(leg.instrument?.symbol ?? "")));
-  if (parsed.some((value: Json | null) => value === null)) return null;
-  if (parsed[0].underlying !== parsed[1].underlying || parsed[0].expiration !== parsed[1].expiration) return null;
-  const instructions = legs.map((leg: Json) => String(leg.instruction ?? ""));
-  const opening = instructions.every((value: string) => value.endsWith("_TO_OPEN"));
-  const closing = instructions.every((value: string) => value.endsWith("_TO_CLOSE"));
-  if (!opening && !closing) return null;
-  const strikes = parsed.map((value: Json) => value.strike).sort((a: number, b: number) => a - b);
-  return {
-    key: `${parsed[0].underlying}:${parsed[0].expiration}:${parsed[0].right}:${strikes[0]}:${strikes[1]}`,
-    underlying: parsed[0].underlying,
-    expiration: parsed[0].expiration,
-    lowerStrike: strikes[0],
-    higherStrike: strikes[1],
-    opening,
-    closing,
-    legs,
-  };
-}
+function info(order: Json) { return orderInfo(order); }
 
 function orderId(order: Json): string { return String(order.orderId); }
 function quantity(order: Json): number { return Number(order.quantity ?? 0); }
@@ -208,7 +177,7 @@ function payloadFrom(order: Json, requestedQuantity = quantity(order), closing =
     session: "NORMAL",
     duration: "DAY",
     orderType: closing ? "NET_CREDIT" : "NET_DEBIT",
-    price: closing ? "0.99" : String(order.price),
+    price: closing ? String(EXIT_ORDER_PRICE) : String(order.price),
     quantity: requestedQuantity,
     orderStrategyType: "SINGLE",
     complexOrderStrategyType: "VERTICAL",
@@ -272,8 +241,38 @@ async function evidence(key: string, method: string, path: string, payload: Json
   })}\n`);
 }
 
+function reportPolicyAlert(source: string, order: Json, code: string, message: string): void {
+  const id = String(order.orderId ?? "PENDING");
+  const key = `${source}:${id}:${code}:${String(order.price)}`;
+  if (reportedPolicyAlerts.has(key)) return;
+  reportedPolicyAlerts.add(key);
+  const record = {
+    at: new Date().toISOString(), source, orderId: id, code, price: order.price ?? null, message,
+  };
+  stamp(`POLICY_ALERT code=${code} source=${source} order=${id} price=${String(order.price ?? "unknown")} detail=${message}`);
+  void mkdir(dirname(policyAlertPath), { recursive: true })
+    .then(() => appendFile(policyAlertPath, `${JSON.stringify(record)}\n`))
+    .catch((error) => stamp(`POLICY_ALERT_AUDIT_FAILED error=${String(error)}`));
+}
+
+function reportWorkingOrderPolicyViolations(): void {
+  const today = newYorkDate();
+  for (const order of orders) {
+    if (!working.has(String(order.status))) continue;
+    const meta = info(order);
+    if (!meta || !policy.underlyings.has(meta.underlying)) continue;
+    const violation = orderPolicyViolation(order, policy, today);
+    if (violation) reportPolicyAlert("order-snapshot", order, violation.code, violation.message);
+  }
+}
+
 async function writeOrder(key: string, method: "POST" | "PUT", path: string, payload: Json, priority: Priority): Promise<string> {
   if (readOnly) return "READ_ONLY";
+  const violation = orderPolicyViolation(payload, policy, newYorkDate());
+  if (violation) {
+    reportPolicyAlert("write-blocked", payload, violation.code, violation.message);
+    throw new Error(`ORDER_POLICY_BLOCKED_${violation.code}`);
+  }
   await requireWeeklyReauthorization();
   policy.requireExecutionWindow();
   const previewFingerprint = createHash("sha256")
@@ -391,6 +390,7 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
     if (full) {
       orders = incoming;
       lastFullOrderPollAt = Date.now();
+      reportWorkingOrderPolicyViolations();
       stamp(`完整当前订单同步 orders=${orders.length}`);
     } else {
       const merged = new Map(orders.map((order) => [orderId(order), order]));
@@ -623,7 +623,10 @@ function adoptSells(): void {
   const active = new Set<string>();
   for (const order of orders) {
     const meta = info(order);
-    if (!meta?.closing || !working.has(String(order.status))) continue;
+    if (
+      !meta?.closing || !working.has(String(order.status))
+      || meta.expiration !== newYorkDate() || !policy.underlyings.has(meta.underlying)
+    ) continue;
     active.add(orderId(order));
     if (!sellDue.has(orderId(order))) sellDue.set(orderId(order), Date.now());
   }
@@ -720,7 +723,11 @@ function exitTemplates(): Map<string, Json> {
   }
   for (const order of orders) {
     const meta = info(order);
-    if (meta?.closing && working.has(String(order.status)) && !latest.has(meta.key)) {
+    if (
+      meta?.closing && working.has(String(order.status))
+      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying)
+      && !latest.has(meta.key)
+    ) {
       latest.set(meta.key, order);
     }
   }
@@ -740,7 +747,8 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
   const inventory = inventoryByStrategy.get(strategy) ?? 0;
   const active = orders.filter((order) => {
     const meta = info(order);
-    return working.has(String(order.status)) && meta?.closing && meta.key === strategy;
+    return working.has(String(order.status)) && meta?.closing && meta.key === strategy
+      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
   }).sort((a, b) => remaining(b) - remaining(a) || eventTime(a) - eventTime(b));
   if (inventory <= 0) {
     for (const staleSell of active) {
