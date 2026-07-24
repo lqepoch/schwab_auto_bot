@@ -302,7 +302,7 @@ function recordOpeningFillLot(strategy: string, order: Json): void {
   openingFillLots.set(strategy, lots);
   lastOpeningFillAt.set(strategy, Math.max(lastOpeningFillAt.get(strategy) ?? 0, filledAt));
   rememberExitTemplate(strategy, order);
-  if (firstObserved && !readOnly) {
+  if (firstObserved && !readOnly && mayRecoverFixedPriceFill(filledAt, runtimeStartedAt)) {
     scheduleExitWorker(strategy, order, Math.max(Date.now(), filledAt + EXIT_IDLE_BUY_FILL_DELAY_MS), "opening-fill-idle-deadline");
   }
 }
@@ -1407,6 +1407,15 @@ function nextExitWorkerDue(strategy: string): number {
   return Math.min(pendingIdleDeadline, nextSellRefresh ?? Number.POSITIVE_INFINITY, now + policy.roundCooldownMs);
 }
 
+function exitStrategyNeedsWorker(strategy: string): boolean {
+  if (liquidityExitRefreshes.has(strategy) || (inventoryByStrategy.get(strategy) ?? 0) > 0) return true;
+  return orders.some((order) => {
+    const meta = info(order);
+    return working.has(String(order.status)) && meta?.closing && meta.key === strategy
+      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
+  });
+}
+
 function scheduleExitWorker(strategy: string, template: Json, dueAt: number, reason: string): void {
   if (stopping || readOnly) return;
   const safeDueAt = Math.max(Date.now(), dueAt);
@@ -1445,7 +1454,9 @@ async function runExitWorker(strategy: string, template: Json, reason: string): 
     executionJournal.record("exit.worker.failed", { strategy, reason, error: String(error) });
   } finally {
     evaluatingExitStrategies.delete(strategy);
-    if (!stopping) scheduleExitWorker(strategy, template, nextExitWorkerDue(strategy), "worker-next-round");
+    if (!stopping && exitStrategyNeedsWorker(strategy)) {
+      scheduleExitWorker(strategy, template, nextExitWorkerDue(strategy), "worker-next-round");
+    }
   }
 }
 
@@ -1726,7 +1737,7 @@ function evaluateExits(forceStartup = false): void {
     // rounds may only create workers for newly current strategies: resetting
     // existing timers here defeats their per-strategy refresh and retry due
     // times, causing repeated Preview traffic every global round.
-    if (forceStartup || (!exitWorkerTimers.has(strategy) && !evaluatingExitStrategies.has(strategy))) {
+    if (exitStrategyNeedsWorker(strategy) && (forceStartup || (!exitWorkerTimers.has(strategy) && !evaluatingExitStrategies.has(strategy)))) {
       scheduleExitWorker(strategy, template, Date.now(), forceStartup ? "startup-recovery" : "discovery-round");
     }
   }
@@ -1737,7 +1748,7 @@ function reconcileCurrentExitStrategies(): void {
   for (const [strategy, template] of exitTemplates()) {
     // Keep a live strategy's own timer intact. A current full-order response
     // only starts a worker for a strategy that is not already being watched.
-    if (!exitWorkerTimers.has(strategy) && !evaluatingExitStrategies.has(strategy)) {
+    if (exitStrategyNeedsWorker(strategy) && !exitWorkerTimers.has(strategy) && !evaluatingExitStrategies.has(strategy)) {
       scheduleExitWorker(strategy, template, Date.now(), "full-order-reconciliation");
     }
   }
