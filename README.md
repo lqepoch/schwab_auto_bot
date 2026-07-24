@@ -171,9 +171,11 @@ match the strategy target, the bot records `exit.refresh-noop` instead of
 sending an identical Replace that Schwab rejects.  It still replaces an exit
 when any of those values differs.
 
-Orders that remain working for at least 90 seconds may be recreated only one at
-a time, with a 15-second global cooldown: cancel, full REST reconciliation,
-verify no working order remains for that strategy, then Preview and submit.
+Only closing orders that remain working for at least 90 seconds may be
+recreated. The oldest eligible closing order is selected one at a time, with a
+15-second global cooldown: cancel, full REST reconciliation, verify no working
+order remains for that strategy, then Preview and submit. Working opening
+orders are never canceled by this maintenance path.
 
 ```powershell
 npm run check

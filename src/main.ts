@@ -903,10 +903,6 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
       await fixedPriceRefreshPacer.admit(budget.fixedPriceRefreshIntervalMs());
       const latest = orders.find((order) => orderId(order) === id);
       if (!latest || !working.has(String(latest.status)) || !managedOpening(latest)) return;
-      if (mayRecreateStaleOrder(eventTime(latest), Date.now(), nextStaleRecreateAt)) {
-        queueVerifiedStaleRecreate("opening", meta.key, latest, payloadFrom(latest, 1, false, Math.round(Number(latest.price) * 100)), 2);
-        return;
-      }
       executionJournal.record("fixed-price-cycle.refresh-noop", { strategy: meta.key, orderId: id, reason: "unchanged-working-order" });
     },
   });
@@ -916,6 +912,12 @@ function queueVerifiedStaleRecreate(
   direction: "opening" | "closing", strategy: string, source: Json, payload: Json, priority: Priority,
 ): void {
   const id = orderId(source);
+  if (direction === "closing") {
+    const oldest = orders.filter((order) => working.has(String(order.status)) && info(order)?.closing
+      && info(order)?.expiration === newYorkDate() && policy.underlyings.has(info(order)?.underlying ?? ""))
+      .sort((left, right) => eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)))[0];
+    if (!oldest || orderId(oldest) !== id) return;
+  }
   if (staleRecreateActive || !mayRecreateStaleOrder(eventTime(source), Date.now(), nextStaleRecreateAt)) return;
   staleRecreateActive = true;
   nextStaleRecreateAt = Date.now() + STALE_ORDER_RECREATE_COOLDOWN_MS;
