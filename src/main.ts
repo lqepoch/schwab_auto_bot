@@ -8,14 +8,14 @@ import { PriorityGate, PriorityWriter, type Priority } from "./priority_runtime.
 import { SchwabRestClient } from "./schwab_client.ts";
 import { SchwabApiError } from "../vendor/schwab-api-nodejs/src/utils/errors.ts";
 import { parseRuntimePolicy } from "./runtime_policy.ts";
-import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./order_policy.ts";
+import { EXIT_ORDER_PRICE, isWithinStrikeRange, orderInfo, orderPolicyViolation, type Json } from "./order_policy.ts";
 import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./price_explorer.ts";
 import { ExecutionJournal } from "./execution_journal.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility } from "./exit_policy.ts";
 import { acquireRuntimeLock } from "./runtime_lock.ts";
 import { mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
-import { fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
+import { FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -222,6 +222,7 @@ let controlCheckRunning = false;
 let activityRestTimer: NodeJS.Timeout | null = null;
 const runtimeIntervals: NodeJS.Timeout[] = [];
 let activityRestRunning = false;
+let fixedPriceRefreshRoundActive = false;
 let lastIncompleteActivityAt = 0;
 let lastActivityRestAt = 0;
 let lastFillPollAt = 0;
@@ -251,6 +252,7 @@ let explorerSavePending = Promise.resolve();
 let fixedPriceCycleSavePending = Promise.resolve();
 let exitTemplateSavePending = Promise.resolve();
 const normalExplorerActionPacer = new ExplorerActionPacer();
+const fixedPriceRefreshPacer = new FixedPriceRefreshPacer();
 const observedOrderStates = new Map<string, { status: string; filledQuantity: number; price: string; closeTime: string | null }>();
 const deferredExplorerRetries = new Map<string, { attempts: number; nextAt: number }>();
 const EXPLORER_FUNDING_RETRY_MS = LIQUIDITY_EXIT_DELAY_MS + LIQUIDITY_EXIT_REFRESH_MS * LIQUIDITY_EXIT_REFRESH_ROUNDS;
@@ -762,6 +764,7 @@ function managedOpening(order: Json): Json | null {
   const meta = info(order);
   if (
     !meta?.opening || meta.expiration !== newYorkDate() || !policy.underlyings.has(meta.underlying)
+    || !isWithinStrikeRange(meta, policy.strikeMin, policy.strikeMax)
     || quantity(order) !== 1 || orderPolicyViolation(order, policy, newYorkDate())
   ) return null;
   return meta;
@@ -1110,6 +1113,8 @@ async function explorerRoundLoop(): Promise<void> {
 }
 
 async function fixedPriceRefreshRound(): Promise<void> {
+  fixedPriceRefreshRoundActive = true;
+  try {
   if (!policy.isExecutionWindowOpen()) {
     await wait(60_000);
     return;
@@ -1136,7 +1141,10 @@ async function fixedPriceRefreshRound(): Promise<void> {
         if (stopping || !policy.isExecutionWindowOpen()) return;
         const current = orders.find((order) => orderId(order) === id);
         if (!current || !working.has(String(current.status)) || !managedOpening(current)) return;
-        const payload = payloadFrom(current, 1, false, Math.round(Number(current.price) * 100));
+        await fixedPriceRefreshPacer.admit(budget.fixedPriceRefreshIntervalMs());
+        const latest = orders.find((order) => orderId(order) === id);
+        if (!latest || !working.has(String(latest.status)) || !managedOpening(latest)) return;
+        const payload = payloadFrom(latest, 1, false, Math.round(Number(latest.price) * 100));
         const replacement = await writeOrder(
           `fixed-price-cycle-refresh:${id}:${Date.now()}`,
           "PUT",
@@ -1145,15 +1153,17 @@ async function fixedPriceRefreshRound(): Promise<void> {
           2,
         );
         applyLocalReplace(id, payload, replacement);
-        stamp(`FIXED_PRICE_CYCLE_REPLACE sourceOrder=${id} price=${Number(current.price).toFixed(2)} replacement=${replacement}`);
+        stamp(`FIXED_PRICE_CYCLE_REPLACE sourceOrder=${id} price=${Number(latest.price).toFixed(2)} replacement=${replacement}`);
         executionJournal.record("fixed-price-cycle.order-replaced", {
-          sourceOrder: orderAuditData(current), replacementOrderId: replacement, order: payloadAuditData(payload),
+          sourceOrder: orderAuditData(latest), replacementOrderId: replacement, order: payloadAuditData(payload),
         });
       },
     });
-    await wait(budget.fixedPriceRefreshIntervalMs());
   }
   await wait(policy.roundCooldownMs);
+  } finally {
+    fixedPriceRefreshRoundActive = false;
+  }
 }
 
 function trackInventoryFillDeltas(): void {
@@ -1315,6 +1325,7 @@ function exitTemplates(): Map<string, Json> {
       order.status !== "FILLED" || !meta?.opening
       || !policy.underlyings.has(meta.underlying)
       || meta.expiration !== newYorkDate()
+      || !isWithinStrikeRange(meta, policy.strikeMin, policy.strikeMax)
     ) continue;
     const previous = latest.get(meta.key);
     if (!previous || eventTime(order) > eventTime(previous)) latest.set(meta.key, order);
@@ -1325,6 +1336,7 @@ function exitTemplates(): Map<string, Json> {
     if (
       meta?.closing && working.has(String(order.status))
       && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying)
+      && isWithinStrikeRange(meta, policy.strikeMin, policy.strikeMax)
       && !latest.has(meta.key)
     ) {
       latest.set(meta.key, order);
@@ -1335,12 +1347,17 @@ function exitTemplates(): Map<string, Json> {
     if (
       meta?.opening && meta.expiration === newYorkDate()
       && policy.underlyings.has(meta.underlying)
+      && isWithinStrikeRange(meta, policy.strikeMin, policy.strikeMax)
       && (inventoryByStrategy.get(meta.key) ?? 0) > 0
       && !latest.has(meta.key)
     ) latest.set(meta.key, order);
   }
   for (const [strategy, template] of exitTemplatesByStrategy) {
-    if ((inventoryByStrategy.get(strategy) ?? 0) > 0 && !latest.has(strategy)) latest.set(strategy, template);
+    const meta = info(template);
+    if (
+      (inventoryByStrategy.get(strategy) ?? 0) > 0 && !latest.has(strategy)
+      && meta && isWithinStrikeRange(meta, policy.strikeMin, policy.strikeMax)
+    ) latest.set(strategy, template);
   }
   return latest;
 }
@@ -1722,6 +1739,9 @@ if (once) {
     if (!activityStream?.ready || fallbackDue) void poll(false);
   }, 2_000));
   if (!policy.repeatBuyAtOrderPrice) runtimeIntervals.push(setInterval(() => void explorerTick(), 200));
+  if (policy.repeatBuyAtOrderPrice) runtimeIntervals.push(setInterval(() => {
+    if (fixedPriceRefreshRoundActive) void poll(true, 3);
+  }, 2_000));
   runtimeIntervals.push(setInterval(() => void evaluateExits(), policy.roundCooldownMs));
   runtimeIntervals.push(setInterval(() => void reconcileAll(), 110_000));
   runtimeIntervals.push(setInterval(() => void checkControlRequest(), 250));

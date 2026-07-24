@@ -47,6 +47,10 @@ export function orderInfo(order: Json): OptionOrderInfo | null {
   };
 }
 
+export function isWithinStrikeRange(meta: OptionOrderInfo, strikeMin: number, strikeMax: number): boolean {
+  return meta.lowerStrike >= strikeMin && meta.higherStrike <= strikeMax;
+}
+
 export function orderPolicyViolation(order: Json, policy: OrderPolicy, tradingDate: string): OrderPolicyViolation | null {
   const meta = orderInfo(order);
   if (!meta) return { code: "ORDER_STRUCTURE_INVALID", message: "订单不是可识别的双腿垂直期权策略" };
