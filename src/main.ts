@@ -903,7 +903,19 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
       await fixedPriceRefreshPacer.admit(budget.fixedPriceRefreshIntervalMs());
       const latest = orders.find((order) => orderId(order) === id);
       if (!latest || !working.has(String(latest.status)) || !managedOpening(latest)) return;
-      executionJournal.record("fixed-price-cycle.refresh-noop", { strategy: meta.key, orderId: id, reason: "unchanged-working-order" });
+      const payload = payloadFrom(latest, 1, false, Math.round(Number(latest.price) * 100));
+      const replacement = await writeOrder(
+        `fixed-price-cycle-refresh:${id}:${Date.now()}`,
+        "PUT",
+        `/trader/v1/accounts/${accountHash}/orders/${id}`,
+        payload,
+        2,
+      );
+      applyLocalReplace(id, payload, replacement);
+      stamp(`FIXED_PRICE_CYCLE_REPLACE sourceOrder=${id} price=${Number(latest.price).toFixed(2)} replacement=${replacement}`);
+      executionJournal.record("fixed-price-cycle.order-replaced", {
+        sourceOrder: orderAuditData(latest), replacementOrderId: replacement, order: payloadAuditData(payload),
+      });
     },
   });
 }
