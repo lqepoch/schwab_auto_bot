@@ -290,7 +290,8 @@ async function loadExitTemplates(): Promise<Map<string, Json>> {
 }
 
 function recordOpeningFillLot(strategy: string, order: Json): void {
-  const filledAt = eventTime(order);
+  if (order.status !== "FILLED") return;
+  const filledAt = Date.parse(String(order.closeTime ?? ""));
   if (!Number.isFinite(filledAt)) return;
   const lots = openingFillLots.get(strategy) ?? new Map<string, number>();
   const firstObserved = !lots.has(orderId(order));
@@ -1182,7 +1183,7 @@ function trackInventoryFillDeltas(): void {
       meta.key,
       Math.max(0, (inventoryByStrategy.get(meta.key) ?? 0) + direction * delta),
     );
-    if (meta.opening) {
+    if (meta.opening && order.status === "FILLED") {
       recordOpeningFillLot(meta.key, order);
       inventoryObservedAt.set(meta.key, Date.now());
     }
@@ -1366,7 +1367,7 @@ function nextExitWorkerDue(strategy: string): number {
   const now = Date.now();
   const liquidity = liquidityExitRefreshes.get(strategy);
   if (liquidity) return Math.max(now, liquidity.nextAt);
-  const nextIdleDeadline = (lastOpeningFillAt.get(strategy) ?? inventoryObservedAt.get(strategy) ?? now) + EXIT_IDLE_BUY_FILL_DELAY_MS;
+  const nextIdleDeadline = (lastOpeningFillAt.get(strategy) ?? now) + EXIT_IDLE_BUY_FILL_DELAY_MS;
   const nextSellRefresh = orders
     .filter((order) => info(order)?.closing && info(order)?.key === strategy)
     .map((order) => sellDue.get(orderId(order)) ?? Number.POSITIVE_INFINITY)
@@ -1553,8 +1554,8 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     for (const sell of active) queueSellCancel(strategy, sell, "empty-inventory");
     return;
   }
-  const idleSince = lastOpeningFillAt.get(strategy) ?? inventoryObservedAt.get(strategy) ?? now;
-  const eligibility = exitEligibility(inventory, idleSince, now);
+  const confirmedOpeningFillAt = lastOpeningFillAt.get(strategy) ?? null;
+  const eligibility = exitEligibility(inventory, confirmedOpeningFillAt, now);
   const liquidity = liquidityExitRefreshes.get(strategy);
   const liquidityReady = liquidity !== undefined && now >= liquidity.sellAt;
   const targetQuantity = liquidityReady ? inventory : eligibility.targetQuantity;
@@ -1564,7 +1565,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     executionJournal.record("exit.gate", {
       strategy,
       inventory,
-      lastOpeningFillAt: new Date(idleSince).toISOString(),
+      lastOpeningFillAt: confirmedOpeningFillAt === null ? null : new Date(confirmedOpeningFillAt).toISOString(),
       liquidity: liquidity ?? null,
       ...eligibility,
       targetQuantity,

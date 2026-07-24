@@ -16,6 +16,14 @@ test("resets a vertical's full-exit countdown on its most recent buy fill", () =
   });
 });
 
+test("does not start an exit countdown from inventory observation without a confirmed buy fill", () => {
+  assert.deepEqual(exitEligibility(1, null, 9_000_000), {
+    targetQuantity: 0,
+    reason: "waiting-for-confirmed-buy-fill",
+    remainingDelayMs: EXIT_IDLE_BUY_FILL_DELAY_MS,
+  });
+});
+
 test("inventory threshold starts exits immediately and refresh interval is eight seconds", () => {
   assert.equal(EXIT_INVENTORY_TRIGGER, 5);
   assert.equal(EXIT_REFRESH_MS, 8_000);
