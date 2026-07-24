@@ -23,16 +23,16 @@ test("runtime policy accepts explicit symbols, strike range, and entry notional 
     "--underlyings", "SPY,QQQ",
     "--strike-min", "720",
     "--strike-max", "790",
-    "--entry-notional-min", "80",
-    "--entry-notional-max", "100",
+    "--entry-notional-min", "84",
+    "--entry-notional-max", "90",
     "--execution-start", "09:15",
     "--execution-end", "15:45",
     "--order-cooldown-seconds", "2.5",
     "--round-cooldown-seconds", "7",
   ]);
   assert.deepEqual([...policy.underlyings], ["SPY", "QQQ"]);
-  assert.equal(policy.entryNotionalMin, 80);
-  assert.equal(policy.entryNotionalMax, 100);
+  assert.equal(policy.entryNotionalMin, 84);
+  assert.equal(policy.entryNotionalMax, 90);
   assert.equal(policy.orderCooldownMs, 2_500);
   assert.equal(policy.roundCooldownMs, 7_000);
   assert.equal(isWithinInclusiveRange(84, 84, 90), true);
@@ -46,4 +46,5 @@ test("runtime policy rejects inverted time and strike ranges", () => {
   assert.throws(() => parseRuntimePolicy(["--strike-min", "790", "--strike-max", "720"]), /STRIKE_RANGE_INVALID/);
   assert.throws(() => parseRuntimePolicy(["--order-cooldown-seconds", "0"]), /ORDER_COOLDOWN_INVALID/);
   assert.throws(() => parseRuntimePolicy(["--round-cooldown-seconds", "0"]), /ROUND_COOLDOWN_INVALID/);
+  assert.throws(() => parseRuntimePolicy(["--entry-notional-min", "80"]), /ENTRY_NOTIONAL_POLICY_FIXED/);
 });

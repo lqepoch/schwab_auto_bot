@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
@@ -7,12 +7,15 @@ import { requireWeeklyReauthorization, SchwabTokenProvider } from "./auth.ts";
 import { PriorityGate, PriorityWriter, type Priority } from "./priority_runtime.ts";
 import { SchwabRestClient } from "./schwab_client.ts";
 import { SchwabApiError } from "../vendor/schwab-api-nodejs/src/utils/errors.ts";
-import { isWithinInclusiveRange, parseRuntimePolicy } from "./runtime_policy.ts";
+import { parseRuntimePolicy } from "./runtime_policy.ts";
 import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./order_policy.ts";
+import { completeNetDebitFill } from "./fill_price.ts";
+import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./price_explorer.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
 const policyAlertPath = join(root, ".state", "policy-alerts.jsonl");
+const explorerStatePath = join(root, ".state", "net-price-explorer.json");
 const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
 const readOnly = process.argv.includes("--read-only");
 const once = process.argv.includes("--once");
@@ -32,6 +35,45 @@ function stamp(message: string): void {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function loadExplorer(): Promise<PriceExplorer> {
+  try {
+    const value = JSON.parse(await readFile(explorerStatePath, "utf8")) as ExplorerSnapshot;
+    if (!value || typeof value !== "object" || !value.groups || typeof value.groups !== "object") {
+      throw new Error("EXPLORER_STATE_INVALID");
+    }
+    return new PriceExplorer(value);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new PriceExplorer();
+    throw error;
+  }
+}
+
+function persistExplorer(): void {
+  if (readOnly) return;
+  const snapshot = explorer.snapshot();
+  explorerSavePending = explorerSavePending.then(async () => {
+    await mkdir(dirname(explorerStatePath), { recursive: true });
+    const temporary = `${explorerStatePath}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, JSON.stringify(snapshot), "utf8");
+    await rename(temporary, explorerStatePath);
+  }).catch((error) => stamp(`PRICE_EXPLORER_STATE_SAVE_FAILED error=${String(error)}`));
+}
+
+class ExplorerActionPacer {
+  private tail = Promise.resolve();
+  private lastNormalActionAt = 0;
+
+  async admit(): Promise<void> {
+    const next = this.tail.then(async () => {
+      const delay = policy.orderCooldownMs - (Date.now() - this.lastNormalActionAt);
+      if (delay > 0) await wait(delay);
+      this.lastNormalActionAt = Date.now();
+    });
+    this.tail = next.catch(() => undefined);
+    await next;
+  }
 }
 
 class RequestBudget {
@@ -114,10 +156,6 @@ let activityRestRunning = false;
 let lastIncompleteActivityAt = 0;
 let lastActivityRestAt = 0;
 let lastFillPollAt = 0;
-const startedAt = Date.now();
-let fillWatchEstablished = false;
-const handledFills = new Set<string>();
-const watchedBuyFills = new Map<string, number>();
 const lastBuyFillAt = new Map<string, number>();
 const inventoryByStrategy = new Map<string, number>();
 const observedFillQuantities = new Map<string, number>();
@@ -125,10 +163,14 @@ let inventoryFillBaselineEstablished = false;
 const unknownWrites = new Set<string>();
 const sellDue = new Map<string, number>();
 const sellSubmitDue = new Map<string, number>();
-const sellRefreshFailures = new Map<string, number>();
 const cancelingSells = new Set<string>();
 const previewRejectedUntil = new Map<string, number>();
 const reportedPolicyAlerts = new Set<string>();
+const explorer = await loadExplorer();
+const explorerTemplates = new Map<string, Json>();
+const reportedUnpricedFills = new Set<string>();
+let explorerSavePending = Promise.resolve();
+const normalExplorerActionPacer = new ExplorerActionPacer();
 
 function flatten(source: any[]): Json[] {
   const output: Json[] = [];
@@ -158,7 +200,7 @@ function newYorkDate(): string {
   return `${value.year}-${value.month}-${value.day}`;
 }
 
-function payloadFrom(order: Json, requestedQuantity = quantity(order), closing = false): Json {
+function payloadFrom(order: Json, requestedQuantity = quantity(order), closing = false, openingPriceCents?: number): Json {
   const legs = order.orderLegCollection.map((leg: Json) => {
     let instruction = String(leg.instruction);
     if (closing) {
@@ -177,7 +219,8 @@ function payloadFrom(order: Json, requestedQuantity = quantity(order), closing =
     session: "NORMAL",
     duration: "DAY",
     orderType: closing ? "NET_CREDIT" : "NET_DEBIT",
-    price: closing ? String(EXIT_ORDER_PRICE) : String(order.price),
+    price: closing ? String(EXIT_ORDER_PRICE) : openingPriceCents === undefined
+      ? String(order.price) : (openingPriceCents / 100).toFixed(2),
     quantity: requestedQuantity,
     orderStrategyType: "SINGLE",
     complexOrderStrategyType: "VERTICAL",
@@ -391,6 +434,8 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
       orders = incoming;
       lastFullOrderPollAt = Date.now();
       reportWorkingOrderPolicyViolations();
+      if (!readOnly && policy.isExecutionWindowOpen()) detectExplorerFills();
+      reconcileExplorerSnapshot();
       stamp(`完整当前订单同步 orders=${orders.length}`);
     } else {
       const merged = new Map(orders.map((order) => [orderId(order), order]));
@@ -401,7 +446,7 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
     if (!readOnly) {
       trackInventoryFillDeltas();
       if (policy.isExecutionWindowOpen()) {
-        detectFills();
+        detectExplorerFills();
         adoptSells();
       }
     }
@@ -457,6 +502,184 @@ async function runActivityRestConfirmation(): Promise<void> {
   }
 }
 
+function managedOpening(order: Json): Json | null {
+  const meta = info(order);
+  if (
+    !meta?.opening || meta.expiration !== newYorkDate() || !policy.underlyings.has(meta.underlying)
+    || quantity(order) !== 1 || orderPolicyViolation(order, policy, newYorkDate())
+  ) return null;
+  return meta;
+}
+
+function reconcileExplorerSnapshot(): void {
+  const liveByGroup = new Map<string, Set<string>>();
+  for (const order of orders) {
+    const meta = managedOpening(order);
+    if (!meta) continue;
+    explorerTemplates.set(meta.key, order);
+    if (!working.has(String(order.status))) continue;
+    explorer.registerWorkingOrder(meta.key, orderId(order), Math.round(Number(order.price) * 100), eventTime(order));
+    const ids = liveByGroup.get(meta.key) ?? new Set<string>();
+    ids.add(orderId(order));
+    liveByGroup.set(meta.key, ids);
+  }
+  for (const groupKey of explorer.groupKeys()) explorer.reconcileWorkingBrokerOrders(groupKey, liveByGroup.get(groupKey) ?? new Set());
+  persistExplorer();
+}
+
+function queueExplorerActions(groupKey: string, actions: ExplorerAction[]): void {
+  for (const action of actions) {
+    writer.enqueue({
+      key: `price-explorer:${groupKey}:${action.generation}:${action.dueAt}:${action.logicalId}:${action.kind}`,
+      priority: 0,
+      run: () => executeExplorerAction(groupKey, action),
+    });
+  }
+}
+
+function activeOpeningOrders(groupKey: string): Json[] {
+  return orders.filter((order) => {
+    const meta = info(order);
+    return working.has(String(order.status)) && meta?.opening && meta.key === groupKey
+      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
+  }).sort((left, right) => Number(left.price) - Number(right.price) || eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)));
+}
+
+async function executeExplorerAction(groupKey: string, action: ExplorerAction): Promise<void> {
+  if (stopping || readOnly || !policy.isExecutionWindowOpen() || !explorer.isCurrentGeneration(groupKey, action.generation)) return;
+  if (action.kind === "resolve-three") {
+    const followups = explorer.resolveThree(groupKey, action.generation, Date.now());
+    persistExplorer();
+    queueExplorerActions(groupKey, followups);
+    return;
+  }
+  if (action.binding === false) await normalExplorerActionPacer.admit();
+  const complete = (): void => {
+    explorer.acknowledge(groupKey, action);
+    persistExplorer();
+  };
+  const logical = explorer.order(groupKey, action.logicalId);
+  if (!logical || logical.filled) {
+    complete();
+    return;
+  }
+  const desiredPrice = action.priceCents === undefined ? logical.priceCents : explorer.setPrice(groupKey, logical.id, action.priceCents);
+  const current = logical.brokerOrderId === null ? null : orders.find((order) => orderId(order) === logical.brokerOrderId && working.has(String(order.status)));
+  if (current) {
+    if (action.kind === "ensure" && Math.round(Number(current.price) * 100) === desiredPrice) {
+      complete();
+      return;
+    }
+    const payload = payloadFrom(current, 1, false, desiredPrice);
+    try {
+      const replacement = await writeOrder(
+        `price-explorer-replace:${groupKey}:${logical.id}:${Date.now()}`,
+        "PUT", `/trader/v1/accounts/${accountHash}/orders/${orderId(current)}`, payload, 0,
+      );
+      applyLocalReplace(orderId(current), payload, replacement);
+      explorer.replaceBrokerOrder(groupKey, logical.id, replacement, desiredPrice);
+      stamp(`PRICE_EXPLORER_REPLACE group=${groupKey} logical=${logical.id} price=${(desiredPrice / 100).toFixed(2)} replacement=${replacement}`);
+    } finally {
+      complete();
+    }
+    return;
+  }
+  if (logical.brokerOrderId !== null || action.kind === "refresh") {
+    complete();
+    return;
+  }
+  const template = explorerTemplates.get(groupKey);
+  if (!template) {
+    stamp(`PRICE_EXPLORER_TEMPLATE_MISSING group=${groupKey} logical=${logical.id}`);
+    complete();
+    return;
+  }
+  if (activeOpeningOrders(groupKey).length >= MAX_ACTIVE_ORDERS) {
+    stamp(`PRICE_EXPLORER_SLOT_FULL group=${groupKey} logical=${logical.id} active=${MAX_ACTIVE_ORDERS}`);
+    complete();
+    return;
+  }
+  const payload = payloadFrom(template, 1, false, desiredPrice);
+  try {
+    const brokerOrderId = await writeOrder(
+      `price-explorer-submit:${groupKey}:${logical.id}:${Date.now()}`,
+      "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, 0,
+    );
+    applyLocalSubmit(payload, brokerOrderId);
+    explorer.bindBrokerOrder(groupKey, logical.id, brokerOrderId);
+    stamp(`PRICE_EXPLORER_SUBMIT group=${groupKey} logical=${logical.id} price=${(desiredPrice / 100).toFixed(2)} order=${brokerOrderId}`);
+  } finally {
+    complete();
+  }
+}
+
+function detectExplorerFills(): void {
+  const now = Date.now();
+  for (const order of orders) {
+    const meta = managedOpening(order);
+    if (!meta || order.status !== "FILLED") continue;
+    const fill = completeNetDebitFill(order);
+    if (!fill) {
+      const id = orderId(order);
+      if (!reportedUnpricedFills.has(id)) {
+        reportedUnpricedFills.add(id);
+        stamp(`PRICE_EXPLORER_FILL_PRICE_UNAVAILABLE order=${id}; no exploration action sent`);
+      }
+      continue;
+    }
+    if (fill.priceCents < policy.entryNotionalMin || fill.priceCents > policy.entryNotionalMax) {
+      stamp(`PRICE_EXPLORER_FILL_PRICE_OUT_OF_RANGE order=${orderId(order)} actualPrice=${(fill.priceCents / 100).toFixed(2)}; no exploration action sent`);
+      continue;
+    }
+    if (now - fill.filledAt > 10_000) continue;
+    const transition = explorer.recordCompleteFill(meta.key, orderId(order), fill.priceCents, fill.filledAt);
+    persistExplorer();
+    if (transition.actions.length > 0) queueExplorerActions(meta.key, transition.actions);
+    if (transition.triggered) {
+      stamp(`PRICE_EXPLORER_PAIR group=${meta.key} actualPrice=${(fill.priceCents / 100).toFixed(2)} generation=${transition.generation}`);
+    }
+  }
+}
+
+async function explorerTick(): Promise<void> {
+  if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
+  for (const groupKey of explorer.groupKeys()) {
+    const actions = explorer.due(groupKey, Date.now());
+    if (actions.length > 0) queueExplorerActions(groupKey, actions);
+  }
+  persistExplorer();
+}
+
+function shuffled<T>(values: readonly T[]): T[] {
+  const output = [...values];
+  for (let index = output.length - 1; index > 0; index -= 1) {
+    const selected = Math.floor(Math.random() * (index + 1));
+    [output[index], output[selected]] = [output[selected], output[index]];
+  }
+  return output;
+}
+
+async function explorerRoundLoop(): Promise<void> {
+  while (!stopping && !readOnly) {
+    if (!policy.isExecutionWindowOpen()) {
+      await wait(60_000);
+      continue;
+    }
+    while (polling && !stopping) await wait(50);
+    if (stopping || !await poll(true, 0)) {
+      await wait(policy.roundCooldownMs);
+      continue;
+    }
+    for (const groupKey of shuffled(explorer.groupKeys())) {
+      if (explorer.hasPendingActions(groupKey)) continue;
+      const actions = explorer.planRoundRecovery(groupKey, Date.now());
+      queueExplorerActions(groupKey, actions);
+      if (actions.length > 0) await wait(policy.orderCooldownMs);
+    }
+    await wait(policy.roundCooldownMs);
+  }
+}
+
 function trackInventoryFillDeltas(): void {
   const today = newYorkDate();
   for (const order of orders) {
@@ -477,146 +700,6 @@ function trackInventoryFillDeltas(): void {
     stamp(`内存库存更新 strategy=${meta.key} delta=${direction * delta} inventory=${inventoryByStrategy.get(meta.key)}`);
   }
   inventoryFillBaselineEstablished = true;
-}
-
-function detectFills(): void {
-  const today = newYorkDate();
-  let watchedAtStartup = 0;
-  for (const order of orders) {
-    const meta = info(order);
-    const id = orderId(order);
-    const notional = Number(order.price) * quantity(order) * 100;
-    const eligible = Boolean(
-      meta?.opening && policy.underlyings.has(meta.underlying)
-      && meta.expiration === today
-      && quantity(order) <= 1
-      && notional >= policy.entryNotionalMin && notional <= policy.entryNotionalMax
-    );
-    if (!eligible) continue;
-    const filled = Number(order.filledQuantity ?? 0);
-    if (!fillWatchEstablished) {
-      if (working.has(String(order.status))) {
-        watchedBuyFills.set(id, filled);
-        watchedAtStartup += 1;
-      }
-      continue;
-    }
-    const previous = watchedBuyFills.get(id);
-    const createdAfterStartup = Date.parse(order.enteredTime ?? 0) >= startedAt;
-    const transitionedToFill = previous !== undefined && filled > previous;
-    const instantlyFilledNewOrder = previous === undefined && createdAfterStartup && order.status === "FILLED";
-    if ((transitionedToFill || instantlyFilledNewOrder) && !handledFills.has(id)) {
-      lastBuyFillAt.set(meta.key, Date.now());
-      writer.enqueue({ key: `buy:${id}`, priority: 0, run: () => replenish(order, meta) });
-    }
-    if (working.has(String(order.status))) watchedBuyFills.set(id, filled);
-    else if (previous !== undefined) watchedBuyFills.delete(id);
-  }
-  if (!fillWatchEstablished) {
-    fillWatchEstablished = true;
-    stamp(`当前活动买单认领完成 watchedWorkingBuys=${watchedAtStartup}；历史成交未读取为补买事件`);
-  }
-}
-
-async function replenish(source: Json, meta: Json): Promise<void> {
-  const id = orderId(source);
-  const same = orders.filter((order) => {
-    const candidate = info(order);
-    return working.has(String(order.status)) && candidate?.opening && candidate.key === meta.key
-      && Number(order.price) === Number(source.price);
-  }).sort((a, b) => eventTime(a) - eventTime(b));
-  const activeQuantity = same.reduce((sum, order) => sum + remaining(order), 0);
-  if (activeQuantity >= 3 && same[0]) {
-    const target = same[0];
-    const key = `buy-capacity-refresh:${id}:${orderId(target)}`;
-    if (unknownWrites.has(key)) return;
-    const payload = payloadFrom(target);
-    const replacement = await writeOrder(
-      key, "PUT",
-      `/trader/v1/accounts/${accountHash}/orders/${orderId(target)}`,
-      payload, 0,
-    );
-    applyLocalReplace(orderId(target), payload, replacement);
-    handledFills.add(id);
-    stamp(`成交补买容量已满，刷新最旧买单 strategy=${meta.key} source=${id} replacement=${replacement}`);
-    return;
-  }
-  const key = `buy-submit:${id}`;
-  if (unknownWrites.has(key)) return;
-  const payload = payloadFrom(source, 1);
-  const replacement = await writeOrder(
-    key, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, 0,
-  );
-  applyLocalSubmit(payload, replacement);
-  handledFills.add(id);
-  stamp(`成交后立即补买 strategy=${meta.key} source=${id} newOrder=${replacement}`);
-  void maintainReplenishmentOrder(replacement, payload, meta.key);
-}
-async function maintainReplenishmentOrder(
-  initialOrderId: string,
-  payload: Json,
-  strategy: string,
-): Promise<void> {
-  let currentOrderId = initialOrderId;
-  await wait(3_000);
-  currentOrderId = await refreshReplenishmentStage(
-    currentOrderId, payload, strategy, "3s",
-  ) ?? "";
-  if (!currentOrderId || stopping) return;
-  await wait(5_000);
-  await refreshReplenishmentStage(currentOrderId, payload, strategy, "3s+5s");
-}
-async function refreshReplenishmentStage(
-  currentOrderId: string,
-  payload: Json,
-  strategy: string,
-  stage: string,
-): Promise<string | null> {
-  const observed = orders.find((order) => orderId(order) === currentOrderId);
-  if (!observed || !working.has(String(observed.status))) {
-    stamp(
-      `补买定时刷新跳过 stage=${stage} strategy=${strategy} order=${currentOrderId} `
-      + `observedStatus=${String(observed?.status ?? "MISSING")}；未发送REST`,
-    );
-    return null;
-  }
-  let nextOrderId = currentOrderId;
-  await writer.enqueueAndWait({
-    key: `buy-followup-refresh:${stage}:${currentOrderId}`,
-    priority: 1,
-    run: async () => {
-      const latest = orders.find((order) => orderId(order) === currentOrderId);
-      if (!latest || !working.has(String(latest.status))) {
-        nextOrderId = "";
-        stamp(
-          `补买定时刷新在写入前跳过 stage=${stage} strategy=${strategy} order=${currentOrderId} `
-          + `observedStatus=${String(latest?.status ?? "MISSING")}；未发送REST`,
-        );
-        return;
-      }
-      try {
-        const replacement = await writeOrder(
-          `buy-followup-refresh:${stage}:${currentOrderId}:${Date.now()}`,
-          "PUT",
-          `/trader/v1/accounts/${accountHash}/orders/${currentOrderId}`,
-          payload,
-          1,
-        );
-        applyLocalReplace(currentOrderId, payload, replacement);
-        nextOrderId = replacement;
-        stamp(
-          `补买定时刷新完成 stage=${stage} strategy=${strategy} `
-          + `source=${currentOrderId} replacement=${replacement}`,
-        );
-      } catch (error) {
-        stamp(
-          `补买定时刷新未完成 stage=${stage} strategy=${strategy} `
-          + `order=${currentOrderId} error=${String(error)}`,
-        );
-      }
-    },
-  });
-  return nextOrderId || null;
 }
 
 function adoptSells(): void {
@@ -749,7 +832,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     const meta = info(order);
     return working.has(String(order.status)) && meta?.closing && meta.key === strategy
       && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
-  }).sort((a, b) => remaining(b) - remaining(a) || eventTime(a) - eventTime(b));
+  }).sort((left, right) => eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)));
   if (inventory <= 0) {
     for (const staleSell of active) {
       const staleId = orderId(staleSell);
@@ -761,7 +844,6 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
         run: async () => {
           await cancelOrder(`sell-cancel-empty:${staleId}`, staleId);
           sellDue.delete(staleId);
-          sellRefreshFailures.delete(staleId);
           stamp(`库存为零，残留卖单已取消 strategy=${strategy} order=${staleId}`);
         },
       });
@@ -771,82 +853,60 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
   if (forceStartup) {
     stamp(`启动独立卖出 worker strategy=${strategy} inventory=${inventory} activeSells=${active.length}`);
   }
-  if (active[0]) {
-    sellSubmitDue.delete(strategy);
-    for (const duplicate of active.slice(1)) {
-      const duplicateId = orderId(duplicate);
-      if (cancelingSells.has(duplicateId)) continue;
-      cancelingSells.add(duplicateId);
-      writer.enqueue({
-        key: `sell-cancel-duplicate:${duplicateId}`,
-        priority: 2,
-        run: async () => {
-          await cancelOrder(`sell-cancel-duplicate:${duplicateId}`, duplicateId);
-          stamp(`重复卖单已取消 strategy=${strategy} order=${duplicateId}`);
-        },
-      });
-    }
-    const sell = active[0];
-    const due = sellDue.get(orderId(sell)) ?? 0;
-    if (Date.now() < due && remaining(sell) === inventory && Number(sell.price) === 0.99) return;
-    sellDue.set(orderId(sell), Date.now() + 5_000);
-    writer.enqueue({
-      key: `sell-refresh:${orderId(sell)}`, priority: 2,
-      run: async () => {
-        const liveInventory = inventoryByStrategy.get(strategy) ?? 0;
-        const liveSell = orders.find((order) => orderId(order) === orderId(sell));
-        if (liveInventory <= 0 || !liveSell || !working.has(String(liveSell.status))) return;
-        const payload = payloadFrom(template, liveInventory, true);
-        try {
-          const replacement = await writeOrder(
-            `sell-refresh:${orderId(sell)}:${Date.now()}`, "PUT",
-            `/trader/v1/accounts/${accountHash}/orders/${orderId(sell)}`,
-            payload, 2,
-          );
-          sellRefreshFailures.delete(orderId(sell));
-          applyLocalReplace(orderId(sell), payload, replacement);
-          stamp(`卖单 Replace strategy=${strategy} quantity=${liveInventory} replacement=${replacement}`);
-        } catch (error) {
-          const failures = (sellRefreshFailures.get(orderId(sell)) ?? 0) + 1;
-          sellRefreshFailures.set(orderId(sell), failures);
-          const previewRejected = String(error).includes("SCHWAB_PREVIEW_REJECTED");
-          if (previewRejected || (remaining(liveSell) !== liveInventory && failures >= 3)) {
-            stamp(
-              `卖单 Replace Preview 无法计入旧单占用，取消旧单后按最新库存重建 strategy=${strategy} `
-              + `order=${orderId(sell)} oldQuantity=${remaining(liveSell)} inventory=${liveInventory}`,
-            );
-            await cancelOrder(`sell-rebuild-cancel:${orderId(sell)}`, orderId(sell));
-            sellDue.delete(orderId(sell));
-            sellRefreshFailures.delete(orderId(sell));
-            return;
-          }
-          throw error;
-        }
-      },
-    });
+  const unitSells = active.filter((order) => quantity(order) === 1 && remaining(order) === 1);
+  if (unitSells.length !== active.length) {
     return;
   }
-  const mostRecentObservedBuyFill = lastBuyFillAt.get(strategy) ?? 0;
-  if (inventory < 5 && Date.now() - mostRecentObservedBuyFill < 30_000) return;
+  for (const excess of unitSells.slice(inventory)) {
+    const id = orderId(excess);
+    if (cancelingSells.has(id)) continue;
+    cancelingSells.add(id);
+    writer.enqueue({
+      key: `sell-cancel-excess:${id}`, priority: 2,
+      run: async () => cancelOrder(`sell-cancel-excess:${id}`, id),
+    });
+  }
+  for (const sell of unitSells.slice(0, inventory)) {
+    const id = orderId(sell);
+    const due = sellDue.get(id) ?? 0;
+    if (Date.now() < due && Number(sell.price) === EXIT_ORDER_PRICE) continue;
+    sellDue.set(id, Date.now() + 5_000);
+    writer.enqueue({
+      key: `sell-refresh:${id}`, priority: 2,
+      run: async () => {
+        const liveSell = orders.find((order) => orderId(order) === id);
+        if (!liveSell || !working.has(String(liveSell.status)) || quantity(liveSell) !== 1) return;
+        const payload = payloadFrom(template, 1, true);
+        const replacement = await writeOrder(
+          `sell-refresh:${id}:${Date.now()}`, "PUT",
+          `/trader/v1/accounts/${accountHash}/orders/${id}`, payload, 2,
+        );
+        applyLocalReplace(id, payload, replacement);
+        stamp(`卖单 Replace strategy=${strategy} quantity=1 replacement=${replacement}`);
+      },
+    });
+  }
+  const deficit = Math.max(0, inventory - unitSells.length);
+  if (deficit === 0) return;
   const nextSubmitAt = sellSubmitDue.get(strategy) ?? 0;
   if (Date.now() < nextSubmitAt) return;
   if (Date.now() - lastFullOrderPollAt >= 5_000 && !await ensureFreshOrdersForExit()) return;
   sellSubmitDue.set(strategy, Date.now() + 5_000);
-  writer.enqueue({
-    key: `sell-submit:${strategy}`, priority: 2,
-    run: async () => {
-      const liveInventory = inventoryByStrategy.get(strategy) ?? 0;
-      if (liveInventory <= 0) return;
-      const payload = payloadFrom(template, liveInventory, true);
-      const newId = await writeOrder(
-        `sell-submit:${strategy}:${Date.now()}`, "POST",
-        `/trader/v1/accounts/${accountHash}/orders`,
-        payload, 2,
-      );
-      applyLocalSubmit(payload, newId);
-      stamp(`自动卖出 strategy=${strategy} quantity=${liveInventory} newOrder=${newId}`);
-    },
-  });
+  for (let index = 0; index < deficit; index += 1) {
+    writer.enqueue({
+      key: `sell-submit:${strategy}:${index}`, priority: 2,
+      run: async () => {
+        if ((inventoryByStrategy.get(strategy) ?? 0) <= 0) return;
+        const payload = payloadFrom(template, 1, true);
+        const newId = await writeOrder(
+          `sell-submit:${strategy}:${index}:${Date.now()}`, "POST",
+          `/trader/v1/accounts/${accountHash}/orders`, payload, 2,
+        );
+        applyLocalSubmit(payload, newId);
+        stamp(`自动卖出 strategy=${strategy} quantity=1 newOrder=${newId}`);
+      },
+    });
+  }
 }
 
 function evaluateExits(forceStartup = false): void {
@@ -857,61 +917,6 @@ function evaluateExits(forceStartup = false): void {
     void evaluateExitStrategy(strategy, template, forceStartup)
       .catch((error) => stamp(`独立卖出 worker 失败 strategy=${strategy} error=${String(error)}`))
       .finally(() => evaluatingExitStrategies.delete(strategy));
-  }
-}
-
-async function refreshRoundLoop(): Promise<void> {
-  while (!stopping && !readOnly) {
-    if (!policy.isExecutionWindowOpen()) {
-      await wait(60_000);
-      continue;
-    }
-    while (polling && !stopping) await wait(50);
-    if (stopping) return;
-    // Each round owns exactly one fresh full order snapshot. Other workers reuse
-    // the shared `orders` state, but a prior round's snapshot is never reused.
-    const snapshotReady = await poll(true, 0);
-    if (!snapshotReady) {
-      stamp("整体刷新开轮快照未取得；本轮跳过，5s 后重试");
-      await wait(5_000);
-      continue;
-    }
-    const candidates = [...orders].filter((order) => {
-      const meta = info(order);
-      return working.has(String(order.status)) && meta?.opening && policy.underlyings.has(meta.underlying)
-        && meta.expiration === newYorkDate()
-        && meta.lowerStrike >= policy.strikeMin && meta.higherStrike <= policy.strikeMax
-        && remaining(order) <= 1
-        && isWithinInclusiveRange(Number(order.price) * 100, policy.entryNotionalMin, policy.entryNotionalMax);
-    });
-    stamp(`整体刷新轮次启动 candidates=${candidates.length}；本轮仅此一次完整订单GET，逐单失败直接跳过`);
-    const roundJobs: Promise<void>[] = [];
-    for (const [index, candidate] of candidates.entries()) {
-      if (stopping) return;
-      if (index > 0) await wait(policy.orderCooldownMs);
-      const id = orderId(candidate);
-      roundJobs.push(writer.enqueueAndWait({
-        key: `overall-refresh:${id}`,
-        priority: 3,
-        run: async () => {
-          const latest = orders.find((order) => orderId(order) === id);
-          if (!latest || !working.has(String(latest.status))) return;
-          const payload = payloadFrom(latest);
-          const replacement = await writeOrder(
-            `overall-refresh:${id}:${randomUUID()}`,
-            "PUT",
-            `/trader/v1/accounts/${accountHash}/orders/${id}`,
-            payload,
-            3,
-          );
-          applyLocalReplace(id, payload, replacement);
-          stamp(`整体刷新 order=${id} replacement=${replacement}`);
-        },
-      }));
-    }
-    await Promise.all(roundJobs);
-    stamp(`整体刷新轮次完成；等待 ${policy.roundCooldownMs / 1_000}s 后开始下一轮`);
-    await wait(policy.roundCooldownMs);
   }
 }
 
@@ -932,7 +937,7 @@ if (!once) {
     onState: stamp,
   });
   activityStream.start();
-  if (!readOnly) void refreshRoundLoop();
+  if (!readOnly) void explorerRoundLoop();
 }
 if (!readOnly) {
   await reconcilePositions();
@@ -947,6 +952,7 @@ if (once) {
     const fallbackDue = Date.now() - lastFillPollAt >= 30_000;
     if (!activityStream?.ready || fallbackDue) void poll(false);
   }, 2_000);
+  setInterval(() => void explorerTick(), 200);
   setInterval(() => void evaluateExits(), 500);
   setInterval(() => void reconcileAll(), 110_000);
 }
