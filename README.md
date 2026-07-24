@@ -9,7 +9,7 @@
 - 默认拒绝真实写入；只有精确传入 `--confirm-live I_UNDERSTAND` 才会启动真实自动交易循环。
 - `--read-only` 禁止 Preview、Submit、Replace 和 Cancel；`--once` 在一次账户与订单快照后退出。
 - 所有 SDK 请求的内置重试均关闭。配额、429 退避、写入串行化和未知写入结果由主程序统一控制，避免一次逻辑请求产生未计量的 broker 请求。
-- `ACCT_ACTIVITY` 流消息仅触发 REST 订单对账；成交与终态只以 Schwab REST 订单快照为准。
+- `ACCT_ACTIVITY` 流消息仅触发 REST 订单对账；成交与终态只以 Schwab REST 订单快照为准。活动事件以 250ms 合并后发起高优先级轻量成交同步，不会等待正在进行的完整订单刷新；没有可解析活动详情时，仍以该 REST 同步作为安全的确认回退。
 - 写入前必须有 Schwab Preview；最终 broker 写入由单一写入闸门串行化。失败或缺少 broker `Location` 订单 ID 的写入会进入未知结果隔离，不会自动重发。
 
 ## 安装
@@ -121,7 +121,7 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 node .\src\main.ts --confirm-live I_UNDERSTAND --repeat-buy-at-order-price
 ```
 
-With `--repeat-buy-at-order-price`, the bot disables only price exploration, generation expansion, and price-changing repricing. It maintains at most one working opening order per strategy, repeatedly uses native Replace at that order's existing limit price, and replenishes one new opening order at the submitted limit price after a newly confirmed opening fill. The fixed-price fill path is independent of the exploration mode's ten-second pairing window: during a running bot it accepts every newly confirmed in-range fill, while a fresh start recovers only fills from the preceding 60 seconds and ignores older lookback history. Consumed fill IDs are persisted in `.state/fixed-price-cycle.json`, so a hot switch cannot repeat an already handled fill. The independent exit worker and its sell-first priority remain active.
+With `--repeat-buy-at-order-price`, the bot disables only price exploration, generation expansion, and price-changing repricing. It maintains at most one working opening order per strategy, repeatedly uses native Replace at that order's existing limit price, and replenishes one new opening order at the submitted limit price after a newly confirmed opening fill. The confirmed refill has priority over sell refreshes and ordinary opening refreshes, but not over an already executing final broker write. Before Preview it reserves the strategy's single refill slot, so simultaneous activity and full-snapshot observations of the same fill cannot submit duplicate buys; a rejected refill is cooled down for 30 seconds. The fixed-price fill path is independent of the exploration mode's ten-second pairing window: during a running bot it accepts every newly confirmed in-range fill, while a fresh start recovers only fills from the preceding 60 seconds and ignores older lookback history. Consumed fill IDs are persisted in `.state/fixed-price-cycle.json`, so a hot switch cannot repeat an already handled fill. The independent exit worker and its sell-first priority remain active.
 
 固定价刷新在每轮起始及刷新进行中的完整订单确认后，直接按当下订单状态重算有效策略集合，不依赖上一次结果的增量推断。行权价完整位于 `--strike-min` 至 `--strike-max` 内的新工作买单会加入正在进行的刷新轮；已经取消、替换或不再是该策略当前工作买单的订单，会在写入前跳过。卖出 worker 使用相同范围：当前订单确认时会立即为新发现的可卖策略建立独立 worker，但不会重置已存在策略自己的卖单刷新计时器；没有仓位的已取消策略不会继续被调度。
 
@@ -129,7 +129,7 @@ With `--repeat-buy-at-order-price`, the bot disables only price exploration, gen
 
 每个 0DTE 垂直组合都有独立、持久化的卖出评估 worker，不会被其他组合的卖出动作阻塞。每次 worker 唤醒都会先用新鲜的持仓快照核对该组合可平数量；账户级持仓读取最多在 1 秒内合并一次，不会改变各组的独立触发与写入决策。倒计时只从 Schwab 确认的开仓 `FILLED` 订单的 `closeTime` 开始；发现仓位、工作买单或缺少确认成交时间均不会启动 30 秒倒计时。该组最后一次完整买入成交会重置 30 秒空窗倒计时；连续 30 秒没有新的买入成交且有仓位时，worker 挂一张数量等于全部可平仓仓位的卖单。某组合可平仓仓位达到 5 张时不等待倒计时，立即触发全仓卖出。每组同时最多保留一张活动卖单，且每次刷新都会把数量替换为最新可平仓仓位。
 
-卖单价格固定为 0.99。正常刷新间隔为 8 秒，每个策略由自己的定时器维持；全局 5 秒发现循环只创建新 worker，绝不会重置已有策略的刷新或重试时间。若 Schwab Preview 拒绝同一卖单更新，程序会将该精确请求冷却 30 秒并记入 `exit.preview-retry-deferred`，避免反复无效 Preview 耗尽配额；期间其他策略的卖单和新成交补买仍保持独立运行。程序会保存最近的组合模板至 `.state/exit-templates.json`，因此热切换后仍能为已有仓位恢复独立卖出 worker。
+卖单价格固定为 0.99。正常刷新间隔为 8 秒，每个策略由自己的定时器维持；全局 5 秒发现循环只创建新 worker，绝不会重置已有策略的刷新或重试时间。若 Schwab Preview 拒绝同一卖单更新，程序会将该精确请求及资金触发的 5 秒刷新节奏一并冷却 30 秒，并记入 `exit.preview-retry-deferred`，避免反复无效 Preview 耗尽配额；期间其他策略的卖单和新成交补买仍保持独立运行。程序会保存最近的组合模板至 `.state/exit-templates.json`，因此热切换后仍能为已有仓位恢复独立卖出 worker。
 
 如果 Schwab 对新的买入 `Preview` 明确返回资金、现金或购买力不足，程序会暂停该组买入/买单刷新并先进入 15 秒流动性卖出倒计时；倒计时结束后以全仓卖单启动，并以 5 秒间隔强制刷新两轮，随后恢复正常 8 秒节奏。卖出写入优先于买入和买单刷新。该触发及每轮结果会写入执行审计日志中的 `exit.liquidity-*`、`exit.worker-*` 与 `exit.gate` 事件。
 
