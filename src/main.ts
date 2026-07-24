@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
@@ -11,11 +11,18 @@ import { parseRuntimePolicy } from "./runtime_policy.ts";
 import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./order_policy.ts";
 import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./price_explorer.ts";
+import { ExecutionJournal } from "./execution_journal.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
 const policyAlertPath = join(root, ".state", "policy-alerts.jsonl");
 const explorerStatePath = join(root, ".state", "net-price-explorer.json");
+const runtimeStatePath = join(root, ".state", "runtime", "active-run.json");
+const runtimeControlPath = join(root, ".state", "runtime", "control-request.json");
+const runId = randomUUID();
+const executionJournal = new ExecutionJournal(root, runId, (error) => {
+  process.stderr.write(`${new Date().toISOString()} [node-vertical] EXECUTION_JOURNAL_WRITE_FAILED error=${String(error)}\n`);
+});
 const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
 const readOnly = process.argv.includes("--read-only");
 const once = process.argv.includes("--once");
@@ -31,6 +38,28 @@ function stamp(message: string): void {
     timeZone: "Asia/Singapore", dateStyle: "short", timeStyle: "medium", hour12: false,
   }).format(new Date());
   process.stderr.write(`${value} [node-vertical] ${message}\n`);
+  executionJournal.record("console", { message });
+}
+
+async function writeRuntimeState(state: "running" | "stopping" | "stopped", reason?: string): Promise<void> {
+  const value = {
+    schemaVersion: 1,
+    state,
+    reason: reason ?? null,
+    runId,
+    pid: process.pid,
+    workspaceRoot: root,
+    nodePath: process.execPath,
+    entryPath: fileURLToPath(import.meta.url),
+    buildId: process.env.SCHWAB_BOT_BUILD_ID ?? null,
+    args: process.argv.slice(2),
+    journalPath: executionJournal.path,
+    updatedAt: new Date().toISOString(),
+  };
+  await mkdir(dirname(runtimeStatePath), { recursive: true });
+  const temporary = `${runtimeStatePath}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, JSON.stringify(value), "utf8");
+  await rename(temporary, runtimeStatePath);
 }
 
 function wait(ms: number): Promise<void> {
@@ -151,6 +180,8 @@ let lastFullOrderPollAt = 0;
 let lastPositionReconciledAt = 0;
 let positionRefreshPending: Promise<void> | null = null;
 let stopping = false;
+let stopReason = "normal";
+let controlCheckRunning = false;
 let activityRestTimer: NodeJS.Timeout | null = null;
 let activityRestRunning = false;
 let lastIncompleteActivityAt = 0;
@@ -171,6 +202,7 @@ const explorerTemplates = new Map<string, Json>();
 const reportedUnpricedFills = new Set<string>();
 let explorerSavePending = Promise.resolve();
 const normalExplorerActionPacer = new ExplorerActionPacer();
+const observedOrderStates = new Map<string, { status: string; filledQuantity: number; price: string; closeTime: string | null }>();
 
 function flatten(source: any[]): Json[] {
   const output: Json[] = [];
@@ -191,6 +223,81 @@ function remaining(order: Json): number {
 }
 function eventTime(order: Json): number {
   return Date.parse(order.closeTime ?? order.cancelTime ?? order.enteredTime ?? 0);
+}
+
+function orderAuditData(order: Json): Record<string, unknown> {
+  const meta = info(order);
+  return {
+    orderId: orderId(order),
+    status: String(order.status ?? "UNKNOWN"),
+    price: order.price ?? null,
+    quantity: quantity(order),
+    filledQuantity: Number(order.filledQuantity ?? 0),
+    enteredAt: order.enteredTime ?? null,
+    closeTime: order.closeTime ?? null,
+    cancelTime: order.cancelTime ?? null,
+    strategyKey: meta?.key ?? null,
+    direction: meta?.opening ? "opening" : meta?.closing ? "closing" : null,
+    legs: Array.isArray(order.orderLegCollection) ? order.orderLegCollection.map((leg: Json) => ({
+      instruction: leg.instruction ?? null,
+      symbol: leg.instrument?.symbol ?? null,
+      quantity: leg.quantity ?? null,
+    })) : [],
+  };
+}
+
+function payloadAuditData(payload: Json): Record<string, unknown> {
+  return {
+    orderType: payload.orderType ?? null,
+    price: payload.price ?? null,
+    quantity: payload.quantity ?? null,
+    complexOrderStrategyType: payload.complexOrderStrategyType ?? null,
+    legs: Array.isArray(payload.orderLegCollection) ? payload.orderLegCollection.map((leg: Json) => ({
+      instruction: leg.instruction ?? null,
+      symbol: leg.instrument?.symbol ?? null,
+      quantity: leg.quantity ?? null,
+    })) : [],
+  };
+}
+
+function recordOrderTransitions(source: "full" | "fills", values: readonly Json[]): void {
+  for (const order of values) {
+    const id = orderId(order);
+    const current = {
+      status: String(order.status ?? "UNKNOWN"),
+      filledQuantity: Number(order.filledQuantity ?? 0),
+      price: String(order.price ?? ""),
+      closeTime: order.closeTime ? String(order.closeTime) : null,
+    };
+    const previous = observedOrderStates.get(id);
+    if (!previous) {
+      executionJournal.record("order.observed", { source, ...orderAuditData(order) });
+      if (current.filledQuantity > 0 || current.status === "FILLED") {
+        executionJournal.record("order.fill", {
+          source,
+          ...orderAuditData(order),
+          filledAt: order.closeTime ?? null,
+          deltaQuantity: current.filledQuantity,
+        });
+      }
+    } else if (
+      previous.status !== current.status
+      || previous.filledQuantity !== current.filledQuantity
+      || previous.price !== current.price
+      || previous.closeTime !== current.closeTime
+    ) {
+      executionJournal.record("order.transition", { source, previous, current, ...orderAuditData(order) });
+      if (current.filledQuantity > previous.filledQuantity || current.status === "FILLED") {
+        executionJournal.record("order.fill", {
+          source,
+          ...orderAuditData(order),
+          filledAt: order.closeTime ?? null,
+          deltaQuantity: current.filledQuantity - previous.filledQuantity,
+        });
+      }
+    }
+    observedOrderStates.set(id, current);
+  }
 }
 function newYorkDate(): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -310,9 +417,17 @@ function reportWorkingOrderPolicyViolations(): void {
 }
 
 async function writeOrder(key: string, method: "POST" | "PUT", path: string, payload: Json, priority: Priority): Promise<string> {
-  if (readOnly) return "READ_ONLY";
+  if (stopping) {
+    executionJournal.record("broker.write.skipped", { key, reason: "runtime-stopping", method, path, order: payloadAuditData(payload) });
+    throw new Error("RUNTIME_STOPPING");
+  }
+  if (readOnly) {
+    executionJournal.record("broker.write.skipped", { key, reason: "read-only", method, path, order: payloadAuditData(payload) });
+    return "READ_ONLY";
+  }
   const violation = orderPolicyViolation(payload, policy, newYorkDate());
   if (violation) {
+    executionJournal.record("broker.write.blocked", { key, method, path, code: violation.code, message: violation.message, order: payloadAuditData(payload) });
     reportPolicyAlert("write-blocked", payload, violation.code, violation.message);
     throw new Error(`ORDER_POLICY_BLOCKED_${violation.code}`);
   }
@@ -322,8 +437,10 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     .update(`${path}\0${JSON.stringify(payload)}`)
     .digest("hex");
   if (priority > 1 && Date.now() < (previewRejectedUntil.get(previewFingerprint) ?? 0)) {
+    executionJournal.record("broker.preview.skipped", { key, reason: "cached-rejection", method, path, order: payloadAuditData(payload) });
     throw new Error("CACHED_PREVIEW_REJECTED");
   }
+  executionJournal.record("broker.preview.requested", { key, method, path, priority, order: payloadAuditData(payload) });
   const preview = await api(
     `/trader/v1/accounts/${accountHash}/previewOrder`,
     { method: "POST", body: JSON.stringify(payload) },
@@ -331,14 +448,19 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
   );
   if (!previewAccepted(preview.body)) {
     if (priority > 1) previewRejectedUntil.set(previewFingerprint, Date.now() + 30_000);
-    throw new Error(`SCHWAB_PREVIEW_REJECTED blockers=${previewBlockers(preview.body)}`);
+    const blockers = previewBlockers(preview.body);
+    executionJournal.record("broker.preview.rejected", { key, method, path, blockers, order: payloadAuditData(payload) });
+    throw new Error(`SCHWAB_PREVIEW_REJECTED blockers=${blockers}`);
   }
   previewRejectedUntil.delete(previewFingerprint);
+  executionJournal.record("broker.preview.accepted", { key, method, path, order: payloadAuditData(payload) });
   await evidence(key, method, path, payload);
   try {
+    executionJournal.record("broker.write.requested", { key, method, path, priority, order: payloadAuditData(payload) });
     const result = await finalWriteGate.run(
       priority,
       async () => {
+        if (stopping) throw new Error("RUNTIME_STOPPING");
         await requireWeeklyReauthorization();
         policy.requireExecutionWindow();
         return api(path, { method, body: JSON.stringify(payload) }, 0);
@@ -347,31 +469,53 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     const brokerOrderId = result.headers.get("location")?.split("/").at(-1);
     if (!brokerOrderId) {
       unknownWrites.add(key);
+      executionJournal.record("broker.write.unknown", { key, method, path, reason: "missing-location", order: payloadAuditData(payload) });
       throw new Error("SCHWAB_WRITE_ACCEPTED_WITHOUT_LOCATION");
     }
+    executionJournal.record("broker.write.accepted", { key, method, path, brokerOrderId, order: payloadAuditData(payload) });
     return brokerOrderId;
   } catch (error) {
-    unknownWrites.add(key);
+    if (String(error) === "Error: RUNTIME_STOPPING") {
+      executionJournal.record("broker.write.skipped", { key, reason: "runtime-stopping-before-final-write", method, path, order: payloadAuditData(payload) });
+    } else {
+      unknownWrites.add(key);
+      executionJournal.record("broker.write.unknown", { key, method, path, error: String(error), order: payloadAuditData(payload) });
+    }
     throw error;
   }
 }
 
 async function cancelOrder(key: string, orderIdValue: string): Promise<void> {
-  if (readOnly) return;
+  if (stopping) {
+    executionJournal.record("broker.cancel.skipped", { key, orderId: orderIdValue, reason: "runtime-stopping" });
+    throw new Error("RUNTIME_STOPPING");
+  }
+  if (readOnly) {
+    executionJournal.record("broker.cancel.skipped", { key, orderId: orderIdValue, reason: "read-only" });
+    return;
+  }
   await requireWeeklyReauthorization();
   policy.requireExecutionWindow();
   const path = `/trader/v1/accounts/${accountHash}/orders/${orderIdValue}`;
   await evidence(key, "DELETE", path, {});
   try {
+    executionJournal.record("broker.cancel.requested", { key, orderId: orderIdValue, path });
     await finalWriteGate.run(2, async () => {
+      if (stopping) throw new Error("RUNTIME_STOPPING");
       await requireWeeklyReauthorization();
       policy.requireExecutionWindow();
       return api(path, { method: "DELETE" }, 2);
     });
     const source = orders.find((order) => orderId(order) === orderIdValue);
     if (source) source.status = "CANCELED";
+    executionJournal.record("broker.cancel.accepted", { key, orderId: orderIdValue, path });
   } catch (error) {
-    unknownWrites.add(key);
+    if (String(error) === "Error: RUNTIME_STOPPING") {
+      executionJournal.record("broker.cancel.skipped", { key, orderId: orderIdValue, reason: "runtime-stopping-before-final-write" });
+    } else {
+      unknownWrites.add(key);
+      executionJournal.record("broker.cancel.unknown", { key, orderId: orderIdValue, path, error: String(error) });
+    }
     throw error;
   }
 }
@@ -432,6 +576,7 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
     const incoming = flatten(response.body);
     if (full) {
       orders = incoming;
+      recordOrderTransitions("full", orders);
       lastFullOrderPollAt = Date.now();
       reportWorkingOrderPolicyViolations();
       if (!readOnly && policy.isExecutionWindowOpen()) detectExplorerFills();
@@ -441,6 +586,7 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
       const merged = new Map(orders.map((order) => [orderId(order), order]));
       for (const order of incoming) merged.set(orderId(order), order);
       orders = [...merged.values()];
+      recordOrderTransitions("fills", incoming);
       stamp(`轻量成交同步 fills=${incoming.length}`);
     }
     if (!readOnly) {
@@ -529,6 +675,7 @@ function reconcileExplorerSnapshot(): void {
 
 function queueExplorerActions(groupKey: string, actions: ExplorerAction[]): void {
   for (const action of actions) {
+    executionJournal.record("explorer.action.queued", { groupKey, action });
     writer.enqueue({
       key: `price-explorer:${groupKey}:${action.generation}:${action.dueAt}:${action.logicalId}:${action.kind}`,
       priority: 0,
@@ -546,10 +693,22 @@ function activeOpeningOrders(groupKey: string): Json[] {
 }
 
 async function executeExplorerAction(groupKey: string, action: ExplorerAction): Promise<void> {
-  if (stopping || readOnly || !policy.isExecutionWindowOpen() || !explorer.isCurrentGeneration(groupKey, action.generation)) return;
+  if (stopping || readOnly || !policy.isExecutionWindowOpen() || !explorer.isCurrentGeneration(groupKey, action.generation)) {
+    executionJournal.record("explorer.action.skipped", {
+      groupKey,
+      action,
+      stopping,
+      readOnly,
+      executionWindowOpen: policy.isExecutionWindowOpen(),
+      generationCurrent: explorer.isCurrentGeneration(groupKey, action.generation),
+    });
+    return;
+  }
+  executionJournal.record("explorer.action.started", { groupKey, action });
   if (action.kind === "resolve-three") {
     const followups = explorer.resolveThree(groupKey, action.generation, Date.now());
     persistExplorer();
+    executionJournal.record("explorer.three-way.resolved", { groupKey, action, followups });
     queueExplorerActions(groupKey, followups);
     return;
   }
@@ -557,9 +716,11 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
   const complete = (): void => {
     explorer.acknowledge(groupKey, action);
     persistExplorer();
+    executionJournal.record("explorer.action.completed", { groupKey, action });
   };
   const logical = explorer.order(groupKey, action.logicalId);
   if (!logical || logical.filled) {
+    executionJournal.record("explorer.action.noop", { groupKey, action, reason: logical ? "logical-filled" : "logical-missing" });
     complete();
     return;
   }
@@ -567,6 +728,7 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
   const current = logical.brokerOrderId === null ? null : orders.find((order) => orderId(order) === logical.brokerOrderId && working.has(String(order.status)));
   if (current) {
     if (action.kind === "ensure" && Math.round(Number(current.price) * 100) === desiredPrice) {
+      executionJournal.record("explorer.action.noop", { groupKey, action, reason: "working-price-already-matches", order: orderAuditData(current) });
       complete();
       return;
     }
@@ -579,23 +741,27 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
       applyLocalReplace(orderId(current), payload, replacement);
       explorer.replaceBrokerOrder(groupKey, logical.id, replacement, desiredPrice);
       stamp(`PRICE_EXPLORER_REPLACE group=${groupKey} logical=${logical.id} price=${(desiredPrice / 100).toFixed(2)} replacement=${replacement}`);
+      executionJournal.record("explorer.order.replaced", { groupKey, action, logicalId: logical.id, sourceOrder: orderAuditData(current), replacementOrderId: replacement, priceCents: desiredPrice });
     } finally {
       complete();
     }
     return;
   }
   if (logical.brokerOrderId !== null || action.kind === "refresh") {
+    executionJournal.record("explorer.action.noop", { groupKey, action, reason: logical.brokerOrderId !== null ? "stale-broker-order" : "refresh-without-working-order" });
     complete();
     return;
   }
   const template = explorerTemplates.get(groupKey);
   if (!template) {
     stamp(`PRICE_EXPLORER_TEMPLATE_MISSING group=${groupKey} logical=${logical.id}`);
+    executionJournal.record("explorer.action.skipped", { groupKey, action, reason: "template-missing" });
     complete();
     return;
   }
   if (activeOpeningOrders(groupKey).length >= MAX_ACTIVE_ORDERS) {
     stamp(`PRICE_EXPLORER_SLOT_FULL group=${groupKey} logical=${logical.id} active=${MAX_ACTIVE_ORDERS}`);
+    executionJournal.record("explorer.action.skipped", { groupKey, action, reason: "active-order-cap", activeOrderCap: MAX_ACTIVE_ORDERS });
     complete();
     return;
   }
@@ -608,6 +774,7 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
     applyLocalSubmit(payload, brokerOrderId);
     explorer.bindBrokerOrder(groupKey, logical.id, brokerOrderId);
     stamp(`PRICE_EXPLORER_SUBMIT group=${groupKey} logical=${logical.id} price=${(desiredPrice / 100).toFixed(2)} order=${brokerOrderId}`);
+    executionJournal.record("explorer.order.submitted", { groupKey, action, logicalId: logical.id, brokerOrderId, priceCents: desiredPrice, order: payloadAuditData(payload) });
   } finally {
     complete();
   }
@@ -625,19 +792,33 @@ function detectExplorerFills(): void {
       if (!reportedUnpricedFills.has(id)) {
         reportedUnpricedFills.add(id);
         stamp(`PRICE_EXPLORER_FILL_PRICE_UNAVAILABLE order=${id} source=${fillPriceSource}; no exploration action sent`);
+        executionJournal.record("explorer.fill.ignored", { order: orderAuditData(order), fillPriceSource, reason: "price-unavailable" });
       }
       continue;
     }
     if (fill.priceCents < policy.entryNotionalMin || fill.priceCents > policy.entryNotionalMax) {
       stamp(`PRICE_EXPLORER_FILL_PRICE_OUT_OF_RANGE order=${orderId(order)} source=${fillPriceSource} price=${(fill.priceCents / 100).toFixed(2)}; no exploration action sent`);
+      executionJournal.record("explorer.fill.ignored", { order: orderAuditData(order), fillPriceSource, priceCents: fill.priceCents, reason: "price-out-of-range" });
       continue;
     }
-    if (now - fill.filledAt > 10_000) continue;
+    if (now - fill.filledAt > 10_000) {
+      executionJournal.record("explorer.fill.ignored", { order: orderAuditData(order), fillPriceSource, priceCents: fill.priceCents, filledAt: new Date(fill.filledAt).toISOString(), reason: "outside-ten-second-window" });
+      continue;
+    }
     const transition = explorer.recordCompleteFill(meta.key, orderId(order), fill.priceCents, fill.filledAt);
     persistExplorer();
+    executionJournal.record("explorer.fill.accepted", {
+      groupKey: meta.key,
+      order: orderAuditData(order),
+      fillPriceSource,
+      explorationPriceCents: fill.priceCents,
+      filledAt: new Date(fill.filledAt).toISOString(),
+      transition,
+    });
     if (transition.actions.length > 0) queueExplorerActions(meta.key, transition.actions);
     if (transition.triggered) {
       stamp(`PRICE_EXPLORER_PAIR group=${meta.key} source=${fillPriceSource} price=${(fill.priceCents / 100).toFixed(2)} generation=${transition.generation}`);
+      executionJournal.record("explorer.generation.triggered", { groupKey: meta.key, fillPriceSource, priceCents: fill.priceCents, generation: transition.generation, nextActions: transition.actions });
     }
   }
 }
@@ -923,11 +1104,52 @@ function evaluateExits(forceStartup = false): void {
 
 let activityStream: SchwabActivityStream | null = null;
 
-function stop(): void { stopping = true; }
+async function checkControlRequest(): Promise<void> {
+  if (controlCheckRunning || stopping) return;
+  controlCheckRunning = true;
+  try {
+    const request = JSON.parse(await readFile(runtimeControlPath, "utf8")) as { command?: unknown; requestId?: unknown };
+    if ((request.command !== "stop" && request.command !== "stop-for-restart") || typeof request.requestId !== "string" || !request.requestId) {
+      return;
+    }
+    stopReason = String(request.command);
+    stopping = true;
+    executionJournal.record("run.control-requested", { command: request.command, requestId: request.requestId });
+    stamp(`RUNTIME_CONTROL_ACCEPTED command=${request.command} requestId=${request.requestId}`);
+    await writeRuntimeState("stopping", stopReason);
+    await unlink(runtimeControlPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      stamp(`RUNTIME_CONTROL_READ_FAILED error=${String(error)}`);
+    }
+  } finally {
+    controlCheckRunning = false;
+  }
+}
+
+function stop(): void {
+  if (stopping) return;
+  stopReason = "signal";
+  stopping = true;
+  executionJournal.record("run.signal-received", { signal: "SIGINT_OR_SIGTERM" });
+}
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
 if (!readOnly) await requireWeeklyReauthorization();
+await writeRuntimeState("running");
+executionJournal.record("run.started", {
+  readOnly,
+  once,
+  underlyings: [...policy.underlyings],
+  strikeMin: policy.strikeMin,
+  strikeMax: policy.strikeMax,
+  executionWindow: `${policy.executionStart}-${policy.executionEnd}`,
+  repeatBuyAtOrderPrice: policy.repeatBuyAtOrderPrice,
+  buildId: process.env.SCHWAB_BOT_BUILD_ID ?? null,
+});
 stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
 if (!readOnly) stamp(`PRICE_EXPLORER_FILL_PRICE_SOURCE source=${policy.repeatBuyAtOrderPrice ? "orderLimit" : "actualNet"}`);
 await bootstrap();
@@ -957,6 +1179,14 @@ if (once) {
   setInterval(() => void explorerTick(), 200);
   setInterval(() => void evaluateExits(), 500);
   setInterval(() => void reconcileAll(), 110_000);
+  setInterval(() => void checkControlRequest(), 250);
 }
 while (!stopping) await wait(250);
+executionJournal.record("run.stopping", { reason: stopReason });
+if (!readOnly) persistExplorer();
 await activityStream?.stop();
+await writer.waitIdle();
+await explorerSavePending;
+await writeRuntimeState("stopped", stopReason);
+executionJournal.record("run.stopped", { reason: stopReason });
+await executionJournal.flush();
