@@ -14,7 +14,7 @@ import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSna
 import { ExecutionJournal } from "./execution_journal.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "./exit_policy.ts";
 import { acquireRuntimeLock } from "./runtime_lock.ts";
-import { FixedPriceReplenishmentGuard, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
+import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_COOLDOWN_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
 import { FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
 import { classifyPreviewRejection, previewRejectionCooldownFromError } from "./preview_rejection.ts";
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
@@ -230,6 +230,8 @@ let fixedPriceRefreshRoundActive = false;
 let lastIncompleteActivityAt = 0;
 let lastActivityRestAt = 0;
 let lastFillPollAt = 0;
+let staleRecreateActive = false;
+let nextStaleRecreateAt = 0;
 const openingFillLots = new Map<string, Map<string, number>>();
 const lastOpeningFillAt = new Map<string, number>();
 const inventoryObservedAt = new Map<string, number>();
@@ -901,19 +903,48 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
       await fixedPriceRefreshPacer.admit(budget.fixedPriceRefreshIntervalMs());
       const latest = orders.find((order) => orderId(order) === id);
       if (!latest || !working.has(String(latest.status)) || !managedOpening(latest)) return;
-      const payload = payloadFrom(latest, 1, false, Math.round(Number(latest.price) * 100));
-      const replacement = await writeOrder(
-        `fixed-price-cycle-refresh:${id}:${Date.now()}`,
-        "PUT",
-        `/trader/v1/accounts/${accountHash}/orders/${id}`,
-        payload,
-        2,
-      );
-      applyLocalReplace(id, payload, replacement);
-      stamp(`FIXED_PRICE_CYCLE_REPLACE sourceOrder=${id} price=${Number(latest.price).toFixed(2)} replacement=${replacement}`);
-      executionJournal.record("fixed-price-cycle.order-replaced", {
-        sourceOrder: orderAuditData(latest), replacementOrderId: replacement, order: payloadAuditData(payload),
-      });
+      if (mayRecreateStaleOrder(eventTime(latest), Date.now(), nextStaleRecreateAt)) {
+        queueVerifiedStaleRecreate("opening", meta.key, latest, payloadFrom(latest, 1, false, Math.round(Number(latest.price) * 100)), 2);
+        return;
+      }
+      executionJournal.record("fixed-price-cycle.refresh-noop", { strategy: meta.key, orderId: id, reason: "unchanged-working-order" });
+    },
+  });
+}
+
+function queueVerifiedStaleRecreate(
+  direction: "opening" | "closing", strategy: string, source: Json, payload: Json, priority: Priority,
+): void {
+  const id = orderId(source);
+  if (staleRecreateActive || !mayRecreateStaleOrder(eventTime(source), Date.now(), nextStaleRecreateAt)) return;
+  staleRecreateActive = true;
+  nextStaleRecreateAt = Date.now() + STALE_ORDER_RECREATE_COOLDOWN_MS;
+  writer.enqueue({
+    key: `stale-recreate:${direction}:${id}`,
+    priority,
+    run: async () => {
+      try {
+        executionJournal.record("order.stale-recreate.started", { direction, strategy, sourceOrderId: id });
+        await cancelOrder(`stale-recreate-cancel:${id}`, id);
+        if (!await poll(true, priority)) {
+          executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: "full-reconciliation-unavailable" });
+          return;
+        }
+        const stillWorking = direction === "opening"
+          ? activeOpeningOrders(strategy).length > 0
+          : orders.some((order) => working.has(String(order.status)) && info(order)?.closing && info(order)?.key === strategy);
+        if (stillWorking) {
+          executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: "working-order-remains-after-reconciliation" });
+          return;
+        }
+        const brokerOrderId = await writeOrder(`stale-recreate-submit:${id}:${Date.now()}`, "POST", `/trader/v1/accounts/${accountHash}/orders`, payload, priority);
+        applyLocalSubmit(payload, brokerOrderId);
+        executionJournal.record("order.stale-recreate.submitted", { direction, strategy, sourceOrderId: id, brokerOrderId, order: payloadAuditData(payload) });
+      } catch (error) {
+        executionJournal.record("order.stale-recreate.deferred", { direction, strategy, sourceOrderId: id, reason: String(error) });
+      } finally {
+        staleRecreateActive = false;
+      }
     },
   });
 }
@@ -1680,6 +1711,10 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
       Number(sell.price), quantity(sell), remaining(sell), EXIT_ORDER_PRICE, targetQuantity,
     );
     if (!needsReplace) {
+      if (mayRecreateStaleOrder(eventTime(sell), now, nextStaleRecreateAt)) {
+        queueVerifiedStaleRecreate("closing", strategy, sell, payloadFrom(template, targetQuantity, true), executionPriority("exit"));
+        return;
+      }
       if (liquidityRefreshDue && liquidity) advanceLiquidityRefresh(strategy, liquidity, id, now);
       sellDue.set(id, now + (liquidityRefreshDue ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS));
       executionJournal.record("exit.refresh-noop", {
