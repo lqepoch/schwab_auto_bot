@@ -5,6 +5,11 @@ export const LIQUIDITY_EXIT_DELAY_MS = 0;
 export const LIQUIDITY_EXIT_REFRESH_MS = 5_000;
 export const LIQUIDITY_EXIT_REFRESH_ROUNDS = 2;
 
+/** A queued sell submit is not authority; the job must revalidate it. */
+export function maySubmitExit(activeWorkingSellCount: number, submitInFlight: boolean): boolean {
+  return activeWorkingSellCount === 0 && !submitInFlight;
+}
+
 export type ExitEligibility = {
   targetQuantity: number;
   reason: "inventory-threshold" | "idle-after-buy-fill" | "waiting-for-confirmed-buy-fill" | "waiting-for-idle-window";
