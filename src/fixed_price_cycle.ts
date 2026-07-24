@@ -28,7 +28,7 @@ export class FixedPriceReplenishmentGuard {
   reserve(strategy: string, fillId: string, now = Date.now()): boolean {
     if (now < (this.deferredUntil.get(fillId) ?? 0)) return false;
     const existing = this.inFlight.get(strategy);
-    if (existing && existing !== fillId) return false;
+    if (existing) return false;
     this.inFlight.set(strategy, fillId);
     return true;
   }

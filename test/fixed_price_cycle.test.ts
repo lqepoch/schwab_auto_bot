@@ -25,6 +25,7 @@ test("recreates only an old working order and respects the global cooldown", () 
 test("reserves one immediate replenishment per strategy and cools down a rejected fill", () => {
   const guard = new FixedPriceReplenishmentGuard();
   assert.equal(guard.reserve("QQQ:741:742", "fill-1", 1_000), true);
+  assert.equal(guard.reserve("QQQ:741:742", "fill-1", 1_000), false);
   assert.equal(guard.reserve("QQQ:741:742", "fill-2", 1_000), false);
   guard.release("QQQ:741:742", "fill-1");
   guard.defer("fill-1", 31_000);
