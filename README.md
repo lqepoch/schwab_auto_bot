@@ -123,7 +123,7 @@ node .\src\main.ts --confirm-live I_UNDERSTAND --repeat-buy-at-order-price
 
 With `--repeat-buy-at-order-price`, the bot disables only price exploration, generation expansion, and price-changing repricing. It maintains at most one working opening order per strategy, repeatedly uses native Replace at that order's existing limit price, and replenishes one new opening order at the submitted limit price after a newly confirmed opening fill. Consumed fill IDs are persisted in `.state/fixed-price-cycle.json`, so a hot switch cannot repeat an already handled fill. The independent exit worker and its sell-first priority remain active.
 
-固定价刷新进行期间每 2 秒会合并一次完整订单快照，不必等待当前轮完成：手工新增的、完整行权价范围位于 `--strike-min` 至 `--strike-max` 内的 0DTE 垂直策略会被发现并进入下一次候选选择；手工取消或替换后不再处于 WORKING 的买单会在最终 Preview 前被跳过。卖出 worker 使用同一范围过滤，并仅在范围内策略仍有可平仓库存时保留其恢复模板。
+固定价刷新在每轮起始及刷新进行中的完整订单确认后，直接按当下订单状态重算有效策略集合，不依赖上一次结果的增量推断。行权价完整位于 `--strike-min` 至 `--strike-max` 内的新工作买单会加入正在进行的刷新轮；已经取消、替换或不再是该策略当前工作买单的订单，会在写入前跳过。卖出 worker 使用相同范围：当前订单确认时会立即为新发现的可卖策略建立独立 worker，但不会重置已存在策略自己的卖单刷新计时器；没有仓位的已取消策略不会继续被调度。
 
 ### 独立卖出触发与流动性处理
 
