@@ -12,11 +12,13 @@ import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./
 import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./price_explorer.ts";
 import { ExecutionJournal } from "./execution_journal.ts";
+import { EXIT_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility } from "./exit_policy.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
 const policyAlertPath = join(root, ".state", "policy-alerts.jsonl");
 const explorerStatePath = join(root, ".state", "net-price-explorer.json");
+const exitTemplateStatePath = join(root, ".state", "exit-templates.json");
 const runtimeStatePath = join(root, ".state", "runtime", "active-run.json");
 const runtimeControlPath = join(root, ".state", "runtime", "control-request.json");
 const runId = randomUUID();
@@ -187,7 +189,8 @@ let activityRestRunning = false;
 let lastIncompleteActivityAt = 0;
 let lastActivityRestAt = 0;
 let lastFillPollAt = 0;
-const lastBuyFillAt = new Map<string, number>();
+const openingFillLots = new Map<string, Map<string, number>>();
+const inventoryObservedAt = new Map<string, number>();
 const inventoryByStrategy = new Map<string, number>();
 const observedFillQuantities = new Map<string, number>();
 let inventoryFillBaselineEstablished = false;
@@ -195,12 +198,16 @@ const unknownWrites = new Set<string>();
 const sellDue = new Map<string, number>();
 const sellSubmitDue = new Map<string, number>();
 const cancelingSells = new Set<string>();
+const exitGateStates = new Map<string, string>();
+const liquidityExitRefreshes = new Map<string, { remainingRounds: number; nextAt: number }>();
 const previewRejectedUntil = new Map<string, number>();
 const reportedPolicyAlerts = new Set<string>();
 const explorer = await loadExplorer();
 const explorerTemplates = new Map<string, Json>();
+const exitTemplatesByStrategy = await loadExitTemplates();
 const reportedUnpricedFills = new Set<string>();
 let explorerSavePending = Promise.resolve();
+let exitTemplateSavePending = Promise.resolve();
 const normalExplorerActionPacer = new ExplorerActionPacer();
 const observedOrderStates = new Map<string, { status: string; filledQuantity: number; price: string; closeTime: string | null }>();
 
@@ -223,6 +230,31 @@ function remaining(order: Json): number {
 }
 function eventTime(order: Json): number {
   return Date.parse(order.closeTime ?? order.cancelTime ?? order.enteredTime ?? 0);
+}
+
+async function loadExitTemplates(): Promise<Map<string, Json>> {
+  try {
+    const value = JSON.parse(await readFile(exitTemplateStatePath, "utf8")) as Record<string, Json>;
+    if (!value || typeof value !== "object") throw new Error("EXIT_TEMPLATE_STATE_INVALID");
+    return new Map(Object.entries(value).filter(([, template]) => Array.isArray(template?.orderLegCollection)));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
+    throw error;
+  }
+}
+
+function recordOpeningFillLot(strategy: string, order: Json): void {
+  const filledAt = eventTime(order);
+  if (!Number.isFinite(filledAt)) return;
+  const lots = openingFillLots.get(strategy) ?? new Map<string, number>();
+  lots.set(orderId(order), filledAt);
+  openingFillLots.set(strategy, lots);
+}
+
+function maturedOpeningFillCount(strategy: string, now = Date.now()): number {
+  return [...(openingFillLots.get(strategy)?.values() ?? [])]
+    .filter((filledAt) => now - filledAt >= EXIT_BUY_FILL_DELAY_MS)
+    .length;
 }
 
 function orderAuditData(order: Json): Record<string, unknown> {
@@ -348,7 +380,7 @@ function localOrder(payload: Json, id: string): Json {
 function applyLocalSubmit(payload: Json, id: string): void {
   orders.push(localOrder(payload, id));
   observedFillQuantities.set(id, 0);
-  if (info(payload)?.closing) sellDue.set(id, Date.now() + 5_000);
+  if (info(payload)?.closing) sellDue.set(id, Date.now() + EXIT_REFRESH_MS);
 }
 
 function applyLocalReplace(sourceId: string, payload: Json, replacementId: string): void {
@@ -356,7 +388,7 @@ function applyLocalReplace(sourceId: string, payload: Json, replacementId: strin
   if (source) source.status = "REPLACED";
   orders.push(localOrder(payload, replacementId));
   observedFillQuantities.set(replacementId, 0);
-  if (info(payload)?.closing) sellDue.set(replacementId, Date.now() + 5_000);
+  if (info(payload)?.closing) sellDue.set(replacementId, Date.now() + EXIT_REFRESH_MS);
 }
 
 function previewAccepted(body: any): boolean {
@@ -381,6 +413,26 @@ function previewBlockers(body: any): string {
     const raw = String(item.validationRuleName ?? item.overrideName ?? "UNKNOWN");
     return createHash("sha256").update(raw).digest("hex").slice(0, 12);
   }).join(",");
+}
+
+function previewReportsInsufficientFunds(value: unknown): boolean {
+  const text = JSON.stringify(value);
+  return /(insufficient\s+(funds|cash|buying power)|buying power.{0,40}insufficient|cash available.{0,40}insufficient|not enough.{0,40}(funds|cash|buying power))/i.test(text);
+}
+
+function requestLiquidityExit(payload: Json): void {
+  const meta = info(payload);
+  if (!meta?.opening) return;
+  liquidityExitRefreshes.set(meta.key, { remainingRounds: LIQUIDITY_EXIT_REFRESH_ROUNDS, nextAt: Date.now() });
+  executionJournal.record("exit.liquidity-triggered", {
+    strategy: meta.key,
+    refreshIntervalMs: LIQUIDITY_EXIT_REFRESH_MS,
+    refreshRounds: LIQUIDITY_EXIT_REFRESH_ROUNDS,
+    order: payloadAuditData(payload),
+  });
+  void reconcilePositions(false)
+    .catch((error) => stamp(`LIQUIDITY_EXIT_POSITION_REFRESH_FAILED strategy=${meta.key} error=${String(error)}`))
+    .finally(() => evaluateExits());
 }
 
 async function evidence(key: string, method: string, path: string, payload: Json): Promise<void> {
@@ -449,7 +501,9 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
   if (!previewAccepted(preview.body)) {
     if (priority > 1) previewRejectedUntil.set(previewFingerprint, Date.now() + 30_000);
     const blockers = previewBlockers(preview.body);
-    executionJournal.record("broker.preview.rejected", { key, method, path, blockers, order: payloadAuditData(payload) });
+    const insufficientFunds = method === "POST" && previewReportsInsufficientFunds(preview.body);
+    executionJournal.record("broker.preview.rejected", { key, method, path, blockers, insufficientFunds, order: payloadAuditData(payload) });
+    if (insufficientFunds) requestLiquidityExit(payload);
     throw new Error(`SCHWAB_PREVIEW_REJECTED blockers=${blockers}`);
   }
   previewRejectedUntil.delete(previewFingerprint);
@@ -657,12 +711,26 @@ function managedOpening(order: Json): Json | null {
   return meta;
 }
 
+function rememberExitTemplate(strategy: string, order: Json): void {
+  const current = exitTemplatesByStrategy.get(strategy);
+  if (current && orderId(current) === orderId(order)) return;
+  exitTemplatesByStrategy.set(strategy, structuredClone(order));
+  if (readOnly) return;
+  exitTemplateSavePending = exitTemplateSavePending.then(async () => {
+    await mkdir(dirname(exitTemplateStatePath), { recursive: true });
+    const temporary = `${exitTemplateStatePath}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, JSON.stringify(Object.fromEntries(exitTemplatesByStrategy)), "utf8");
+    await rename(temporary, exitTemplateStatePath);
+  }).catch((error) => stamp(`EXIT_TEMPLATE_STATE_SAVE_FAILED error=${String(error)}`));
+}
+
 function reconcileExplorerSnapshot(): void {
   const liveByGroup = new Map<string, Set<string>>();
   for (const order of orders) {
     const meta = managedOpening(order);
     if (!meta) continue;
     explorerTemplates.set(meta.key, order);
+    rememberExitTemplate(meta.key, order);
     if (!working.has(String(order.status))) continue;
     explorer.registerWorkingOrder(meta.key, orderId(order), Math.round(Number(order.price) * 100), eventTime(order));
     const ids = liveByGroup.get(meta.key) ?? new Set<string>();
@@ -878,7 +946,10 @@ function trackInventoryFillDeltas(): void {
       meta.key,
       Math.max(0, (inventoryByStrategy.get(meta.key) ?? 0) + direction * delta),
     );
-    if (meta.opening) lastBuyFillAt.set(meta.key, Date.now());
+    if (meta.opening) {
+      recordOpeningFillLot(meta.key, order);
+      inventoryObservedAt.set(meta.key, Date.now());
+    }
     stamp(`内存库存更新 strategy=${meta.key} delta=${direction * delta} inventory=${inventoryByStrategy.get(meta.key)}`);
   }
   inventoryFillBaselineEstablished = true;
@@ -893,7 +964,7 @@ function adoptSells(): void {
       || meta.expiration !== newYorkDate() || !policy.underlyings.has(meta.underlying)
     ) continue;
     active.add(orderId(order));
-    if (!sellDue.has(orderId(order))) sellDue.set(orderId(order), Date.now());
+    if (!sellDue.has(orderId(order))) sellDue.set(orderId(order), Date.now() + EXIT_REFRESH_MS);
   }
   for (const id of sellDue.keys()) {
     if (!active.has(id)) {
@@ -935,7 +1006,13 @@ async function reconcilePositions(announce = true): Promise<void> {
     if (!templates.has(meta.key) || meta.opening) templates.set(meta.key, order);
   }
   for (const [strategy, template] of templates) {
-    inventoryByStrategy.set(strategy, availableFor(template, current));
+    const inventory = availableFor(template, current);
+    const previous = inventoryByStrategy.get(strategy) ?? 0;
+    inventoryByStrategy.set(strategy, inventory);
+    if (inventory > 0 && previous <= 0) {
+      inventoryObservedAt.set(strategy, Date.now());
+    }
+    if (inventory <= 0) inventoryObservedAt.delete(strategy);
   }
   lastPositionReconciledAt = Date.now();
   if (announce) stamp(`订单与持仓完整对账完成 strategies=${templates.size}；后台仍保留 110s 兜底对账`);
@@ -983,8 +1060,7 @@ function exitTemplates(): Map<string, Json> {
     ) continue;
     const previous = latest.get(meta.key);
     if (!previous || eventTime(order) > eventTime(previous)) latest.set(meta.key, order);
-    const observedFillAt = eventTime(order);
-    if (observedFillAt > (lastBuyFillAt.get(meta.key) ?? 0)) lastBuyFillAt.set(meta.key, observedFillAt);
+    recordOpeningFillLot(meta.key, order);
   }
   for (const order of orders) {
     const meta = info(order);
@@ -1004,6 +1080,9 @@ function exitTemplates(): Map<string, Json> {
       && (inventoryByStrategy.get(meta.key) ?? 0) > 0
       && !latest.has(meta.key)
     ) latest.set(meta.key, order);
+  }
+  for (const [strategy, template] of exitTemplatesByStrategy) {
+    if ((inventoryByStrategy.get(strategy) ?? 0) > 0 && !latest.has(strategy)) latest.set(strategy, template);
   }
   return latest;
 }
@@ -1032,6 +1111,28 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     }
     return;
   }
+  const knownFillLots = openingFillLots.get(strategy)?.size ?? 0;
+  const maturedFills = maturedOpeningFillCount(strategy);
+  const unattributedInventory = Math.max(0, inventory - knownFillLots);
+  const observedAt = inventoryObservedAt.get(strategy) ?? Date.now();
+  const eligibility = exitEligibility(inventory, maturedFills, unattributedInventory, observedAt);
+  const liquidityRefresh = liquidityExitRefreshes.get(strategy);
+  const targetUnitSells = liquidityRefresh ? inventory : eligibility.targetUnitSells;
+  const gateState = `${inventory}:${targetUnitSells}:${eligibility.reason}:${liquidityRefresh?.remainingRounds ?? 0}`;
+  if (exitGateStates.get(strategy) !== gateState) {
+    exitGateStates.set(strategy, gateState);
+    executionJournal.record("exit.gate", {
+      strategy,
+      inventory,
+      knownFillLots,
+      maturedFills,
+      unattributedInventory,
+      unattributedObservedAt: new Date(observedAt).toISOString(),
+      liquidityRefresh: liquidityRefresh ?? null,
+      ...eligibility,
+      targetUnitSells,
+    });
+  }
   if (forceStartup) {
     stamp(`启动独立卖出 worker strategy=${strategy} inventory=${inventory} activeSells=${active.length}`);
   }
@@ -1039,7 +1140,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
   if (unitSells.length !== active.length) {
     return;
   }
-  for (const excess of unitSells.slice(inventory)) {
+  for (const excess of unitSells.slice(targetUnitSells)) {
     const id = orderId(excess);
     if (cancelingSells.has(id)) continue;
     cancelingSells.add(id);
@@ -1048,11 +1149,17 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
       run: async () => cancelOrder(`sell-cancel-excess:${id}`, id),
     });
   }
-  for (const sell of unitSells.slice(0, inventory)) {
+  const liquidityRefreshDue = liquidityRefresh !== undefined && Date.now() >= liquidityRefresh.nextAt
+    && unitSells.length >= targetUnitSells && targetUnitSells > 0;
+  let forcedRefreshCount = 0;
+  for (const sell of unitSells.slice(0, targetUnitSells)) {
     const id = orderId(sell);
     const due = sellDue.get(id) ?? 0;
-    if (Date.now() < due && Number(sell.price) === EXIT_ORDER_PRICE) continue;
-    sellDue.set(id, Date.now() + 5_000);
+    if (!liquidityRefreshDue && Date.now() < due && Number(sell.price) === EXIT_ORDER_PRICE) continue;
+    const nextDelay = liquidityRefreshDue && liquidityRefresh.remainingRounds === 1
+      ? EXIT_REFRESH_MS : liquidityRefreshDue ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS;
+    sellDue.set(id, Date.now() + nextDelay);
+    if (liquidityRefreshDue) forcedRefreshCount += 1;
     writer.enqueue({
       key: `sell-refresh:${id}`, priority: 2,
       run: async () => {
@@ -1068,12 +1175,22 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
       },
     });
   }
-  const deficit = Math.max(0, inventory - unitSells.length);
+  if (liquidityRefreshDue && forcedRefreshCount > 0 && liquidityRefresh) {
+    liquidityRefresh.remainingRounds -= 1;
+    if (liquidityRefresh.remainingRounds <= 0) {
+      liquidityExitRefreshes.delete(strategy);
+      executionJournal.record("exit.liquidity-refresh-complete", { strategy, refreshedOrders: forcedRefreshCount });
+    } else {
+      liquidityRefresh.nextAt = Date.now() + LIQUIDITY_EXIT_REFRESH_MS;
+      executionJournal.record("exit.liquidity-refresh-round", { strategy, refreshedOrders: forcedRefreshCount, remainingRounds: liquidityRefresh.remainingRounds, nextAt: new Date(liquidityRefresh.nextAt).toISOString() });
+    }
+  }
+  const deficit = Math.max(0, targetUnitSells - unitSells.length);
   if (deficit === 0) return;
   const nextSubmitAt = sellSubmitDue.get(strategy) ?? 0;
-  if (Date.now() < nextSubmitAt) return;
+  if (Date.now() < nextSubmitAt && eligibility.reason !== "inventory-threshold" && !liquidityRefresh) return;
   if (Date.now() - lastFullOrderPollAt >= 5_000 && !await ensureFreshOrdersForExit()) return;
-  sellSubmitDue.set(strategy, Date.now() + 5_000);
+  sellSubmitDue.set(strategy, Date.now() + EXIT_REFRESH_MS);
   for (let index = 0; index < deficit; index += 1) {
     writer.enqueue({
       key: `sell-submit:${strategy}:${index}`, priority: 2,
@@ -1187,6 +1304,7 @@ if (!readOnly) persistExplorer();
 await activityStream?.stop();
 await writer.waitIdle();
 await explorerSavePending;
+await exitTemplateSavePending;
 await writeRuntimeState("stopped", stopReason);
 executionJournal.record("run.stopped", { reason: stopReason });
 await executionJournal.flush();
