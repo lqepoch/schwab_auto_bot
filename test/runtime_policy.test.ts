@@ -13,6 +13,7 @@ test("defaults permit QQQ and SPY only during the New York execution window", ()
   assert.equal(policy.executionEnd, "15:45");
   assert.equal(policy.orderCooldownMs, 1_000);
   assert.equal(policy.roundCooldownMs, 5_000);
+  assert.equal(policy.fixedPriceRefreshIntervalMs, 2_000);
   assert.equal(policy.repeatBuyAtOrderPrice, false);
   assert.equal(policy.disableSellOrders, false);
   assert.equal(isWithinExecutionWindow(new Date("2026-07-24T13:15:00Z"), "09:15", "15:45"), true);
@@ -31,6 +32,7 @@ test("runtime policy accepts explicit symbols, strike range, and entry notional 
     "--execution-end", "15:45",
     "--order-cooldown-seconds", "2.5",
     "--round-cooldown-seconds", "7",
+    "--fixed-price-refresh-interval-seconds", "2.5",
     "--repeat-buy-at-order-price",
     "--disable-sell-orders",
   ]);
@@ -39,6 +41,7 @@ test("runtime policy accepts explicit symbols, strike range, and entry notional 
   assert.equal(policy.entryNotionalMax, 92);
   assert.equal(policy.orderCooldownMs, 2_500);
   assert.equal(policy.roundCooldownMs, 7_000);
+  assert.equal(policy.fixedPriceRefreshIntervalMs, 2_500);
   assert.equal(policy.repeatBuyAtOrderPrice, true);
   assert.equal(policy.disableSellOrders, true);
   assert.equal(isWithinInclusiveRange(82, 82, 92), true);
@@ -52,5 +55,6 @@ test("runtime policy rejects inverted time and strike ranges", () => {
   assert.throws(() => parseRuntimePolicy(["--strike-min", "790", "--strike-max", "720"]), /STRIKE_RANGE_INVALID/);
   assert.throws(() => parseRuntimePolicy(["--order-cooldown-seconds", "0"]), /ORDER_COOLDOWN_INVALID/);
   assert.throws(() => parseRuntimePolicy(["--round-cooldown-seconds", "0"]), /ROUND_COOLDOWN_INVALID/);
+  assert.throws(() => parseRuntimePolicy(["--fixed-price-refresh-interval-seconds", "0"]), /FIXED_PRICE_REFRESH_INTERVAL_INVALID/);
   assert.throws(() => parseRuntimePolicy(["--entry-notional-min", "84"]), /ENTRY_NOTIONAL_POLICY_FIXED/);
 });

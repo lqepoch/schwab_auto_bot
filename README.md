@@ -101,7 +101,7 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 
 `--execution-start` 与 `--execution-end` 默认分别为 `09:15` 和 `15:45`（纽约时间）；只在需要变更执行窗口时传入，例如 `--execution-start 09:30 --execution-end 15:30`。
 
-整体刷新每轮完成后默认间隔 5 秒。fixed-price 模式的每个候选订单入队间隔会按最近 60 秒的已准入 API 调用量在 0.7–1.2 秒之间动态调整：低负载时使用 0.7 秒，调用量从 50 RPM 升至 70 RPM 时线性放慢至 1.2 秒。108 RPM 准入、Preview、最终写入串行化和卖单优先级仍是不可绕过的硬边界。每一轮开始都会读取一次完整订单列表；该快照同时供本轮所有候选筛选与原生 Replace 使用，不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用这份完整快照，避免同轮重复读取。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
+整体刷新每轮完成后默认间隔 5 秒。fixed-price 模式的每个候选订单在进入 Preview/Replace 链路前，默认至少间隔 2 秒；可用 `--fixed-price-refresh-interval-seconds <秒数>` 覆盖。例如传入 `--fixed-price-refresh-interval-seconds 3` 时，每个候选订单的刷新起始间隔至少为 3 秒。最近 60 秒的已准入 API 调用量达到压力阈值时，配额控制仍会把间隔从 0.7 秒逐步提高到 1.2 秒，因此实际间隔始终取 CLI 值与配额间隔中的较大者。108 RPM 准入、Preview、最终写入串行化和卖单优先级仍是不可绕过的硬边界。每一轮开始都会读取一次完整订单列表；该快照同时供本轮所有候选筛选与原生 Replace 使用，不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用这份完整快照，避免同轮重复读取。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
 
 所有自动写入在 Preview 前都执行固定订单策略校验：买单必须是配置标的的 0DTE 双腿垂直价差，价格仅允许 0.82–0.92，数量必须为 1；卖单也必须是 0DTE、数量为 1，价格固定为 0.99。完整订单快照发现仍在工作的违规买/卖单时，程序只会发出 `POLICY_ALERT`，写入终端日志及 `.state/policy-alerts.jsonl`，不会静默撤销外部订单。任何不符合规则的自动 Preview、Submit 或 Replace 都会在发送 Schwab 请求前被拒绝。
 

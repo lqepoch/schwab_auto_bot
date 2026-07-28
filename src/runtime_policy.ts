@@ -12,6 +12,7 @@ export type RuntimePolicy = {
   executionEnd: string;
   orderCooldownMs: number;
   roundCooldownMs: number;
+  fixedPriceRefreshIntervalMs: number;
   repeatBuyAtOrderPrice: boolean;
   disableSellOrders: boolean;
   isExecutionWindowOpen: (now?: Date) => boolean;
@@ -34,6 +35,10 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
     option(argv, "--round-cooldown-seconds") ?? "5",
     "ROUND_COOLDOWN_INVALID",
   );
+  const fixedPriceRefreshIntervalMs = parsePositiveSeconds(
+    option(argv, "--fixed-price-refresh-interval-seconds") ?? "2",
+    "FIXED_PRICE_REFRESH_INTERVAL_INVALID",
+  );
   const repeatBuyAtOrderPrice = argv.includes("--repeat-buy-at-order-price");
   const disableSellOrders = argv.includes("--disable-sell-orders");
 
@@ -53,6 +58,7 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
     executionEnd,
     orderCooldownMs,
     roundCooldownMs,
+    fixedPriceRefreshIntervalMs,
     repeatBuyAtOrderPrice,
     disableSellOrders,
     isExecutionWindowOpen,

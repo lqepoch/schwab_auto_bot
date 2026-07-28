@@ -15,7 +15,7 @@ import { ExecutionJournal } from "./execution_journal.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "./exit_policy.ts";
 import { acquireRuntimeLock } from "./runtime_lock.ts";
 import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
-import { FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
+import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
 import { classifyPreviewRejection, previewRejectionCooldownFromError } from "./preview_rejection.ts";
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
 
@@ -960,8 +960,17 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
       if (stopping || !policy.isExecutionWindowOpen()) return;
       const current = orders.find((order) => orderId(order) === id);
       if (!current || !working.has(String(current.status)) || !managedOpening(current)) return;
-      executionJournal.record("fixed-price-cycle.refresh-started", { strategy: meta.key, orderId: id, source });
-      await fixedPriceRefreshPacer.admit(budget.fixedPriceRefreshIntervalMs());
+      const quotaIntervalMs = budget.fixedPriceRefreshIntervalMs();
+      const intervalMs = effectiveFixedPriceRefreshIntervalMs(policy.fixedPriceRefreshIntervalMs, quotaIntervalMs);
+      executionJournal.record("fixed-price-cycle.refresh-started", {
+        strategy: meta.key,
+        orderId: id,
+        source,
+        configuredIntervalMs: policy.fixedPriceRefreshIntervalMs,
+        quotaIntervalMs,
+        intervalMs,
+      });
+      await fixedPriceRefreshPacer.admit(intervalMs);
       const latest = orders.find((order) => orderId(order) === id);
       if (!latest || !working.has(String(latest.status)) || !managedOpening(latest)) return;
       const payload = payloadFrom(latest, 1, false, Math.round(Number(latest.price) * 100));
@@ -2104,11 +2113,12 @@ executionJournal.record("run.started", {
   strikeMin: policy.strikeMin,
   strikeMax: policy.strikeMax,
   executionWindow: `${policy.executionStart}-${policy.executionEnd}`,
+  fixedPriceRefreshIntervalMs: policy.fixedPriceRefreshIntervalMs,
   repeatBuyAtOrderPrice: policy.repeatBuyAtOrderPrice,
   disableSellOrders: policy.disableSellOrders,
   buildId: process.env.SCHWAB_BOT_BUILD_ID ?? null,
 });
-stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
+stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms fixedPriceRefreshInterval=${policy.fixedPriceRefreshIntervalMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
 if (!readOnly) stamp(policy.repeatBuyAtOrderPrice
   ? "FIXED_PRICE_CYCLE_ENABLED source=orderLimit; price exploration is disabled; one working opening order per strategy is maintained and refreshed at its existing price"
   : "PRICE_EXPLORER_FILL_PRICE_SOURCE source=actualNet");

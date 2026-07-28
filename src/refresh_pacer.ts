@@ -16,6 +16,11 @@ export function fixedPriceRefreshIntervalMs(requestsLastMinute: number): number 
   );
 }
 
+/** The operator may slow fixed-price refreshes, but never bypass quota pacing. */
+export function effectiveFixedPriceRefreshIntervalMs(configuredIntervalMs: number, quotaIntervalMs: number): number {
+  return Math.max(configuredIntervalMs, quotaIntervalMs);
+}
+
 export class FixedPriceRefreshPacer {
   private tail = Promise.resolve();
   private lastStartedAt = 0;
