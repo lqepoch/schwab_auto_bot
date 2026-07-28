@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PriceExplorer } from "../src/price_explorer.ts";
+import { clampPrice, PriceExplorer } from "../src/price_explorer.ts";
 
 test("pairs only two same-price full fills within ten seconds and consumes them once", () => {
   const explorer = new PriceExplorer();
@@ -18,7 +18,10 @@ test("pairs only two same-price full fills within ten seconds and consumes them 
 
 test("refuses an execution price outside the hard exploration range", () => {
   const explorer = new PriceExplorer();
-  assert.throws(() => explorer.recordCompleteFill("QQQ:vertical", "1", 83, 1_000), /EXPLORER_FILL_PRICE_OUT_OF_RANGE/);
+  assert.equal(clampPrice(82), 82);
+  assert.equal(clampPrice(92), 92);
+  assert.throws(() => explorer.recordCompleteFill("QQQ:vertical", "1", 81, 1_000), /EXPLORER_FILL_PRICE_OUT_OF_RANGE/);
+  assert.throws(() => explorer.recordCompleteFill("QQQ:vertical", "2", 93, 1_000), /EXPLORER_FILL_PRICE_OUT_OF_RANGE/);
 });
 
 test("persists unacknowledged actions so an interrupted broker write can resume safely", () => {
@@ -67,7 +70,7 @@ test("single mode creates the exact two-order exploration schedule", () => {
   const later = explorer.due("QQQ:vertical", 11_001);
   assert.deepEqual(
     later.map((action) => [action.dueAt, action.kind, action.priceCents]),
-    [[3_000, "ensure", 89], [5_000, "set-price", 90], [7_000, "refresh", undefined], [11_000, "set-price", 90]],
+    [[3_000, "ensure", 89], [5_000, "set-price", 90], [7_000, "refresh", undefined], [11_000, "set-price", 91]],
   );
 });
 

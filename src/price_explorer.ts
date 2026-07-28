@@ -1,5 +1,7 @@
-export const PRICE_MIN_CENTS = 84;
-export const PRICE_MAX_CENTS = 90;
+import { ENTRY_PRICE_MAX_CENTS, ENTRY_PRICE_MIN_CENTS } from "./entry_price_policy.ts";
+
+export const PRICE_MIN_CENTS = ENTRY_PRICE_MIN_CENTS;
+export const PRICE_MAX_CENTS = ENTRY_PRICE_MAX_CENTS;
 export const PRICE_STEP_CENTS = 1;
 export const FILL_WINDOW_MS = 10_000;
 export const MAX_ACTIVE_ORDERS = 3;

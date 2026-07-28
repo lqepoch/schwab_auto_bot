@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EXIT_ORDER_PRICE, orderPolicyViolation } from "../src/order_policy.ts";
 
-const policy = { underlyings: new Set(["QQQ", "SPY"]), entryNotionalMin: 84, entryNotionalMax: 90 };
+const policy = { underlyings: new Set(["QQQ", "SPY"]), entryNotionalMin: 82, entryNotionalMax: 92 };
 const today = "2026-07-24";
 
 function vertical(price: string, closing = false, expiration = "260724") {
@@ -17,10 +17,10 @@ function vertical(price: string, closing = false, expiration = "260724") {
 }
 
 test("0DTE buy orders must stay inside the configured price range", () => {
-  assert.equal(orderPolicyViolation(vertical("0.84"), policy, today), null);
-  assert.equal(orderPolicyViolation(vertical("0.90"), policy, today), null);
-  assert.equal(orderPolicyViolation(vertical("0.83"), policy, today)?.code, "BUY_PRICE_OUT_OF_RANGE");
-  assert.equal(orderPolicyViolation(vertical("0.91"), policy, today)?.code, "BUY_PRICE_OUT_OF_RANGE");
+  assert.equal(orderPolicyViolation(vertical("0.82"), policy, today), null);
+  assert.equal(orderPolicyViolation(vertical("0.92"), policy, today), null);
+  assert.equal(orderPolicyViolation(vertical("0.81"), policy, today)?.code, "BUY_PRICE_OUT_OF_RANGE");
+  assert.equal(orderPolicyViolation(vertical("0.93"), policy, today)?.code, "BUY_PRICE_OUT_OF_RANGE");
   assert.equal(orderPolicyViolation(vertical("0.87"), policy, "2026-07-25")?.code, "ORDER_NOT_0DTE");
 });
 

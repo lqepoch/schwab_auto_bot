@@ -1,3 +1,5 @@
+import { ENTRY_PRICE_MAX_CENTS, ENTRY_PRICE_MIN_CENTS } from "./entry_price_policy.ts";
+
 const executionTimeZone = "America/New_York";
 
 export type RuntimePolicy = {
@@ -20,8 +22,8 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
   const underlyings = parseUnderlyings(option(argv, "--underlyings") ?? "QQQ,SPY");
   const strikeMin = parseNumber(option(argv, "--strike-min") ?? "720", "STRIKE_MIN_INVALID");
   const strikeMax = parseNumber(option(argv, "--strike-max") ?? "790", "STRIKE_MAX_INVALID");
-  const entryNotionalMin = parseNumber(option(argv, "--entry-notional-min") ?? "84", "ENTRY_NOTIONAL_MIN_INVALID");
-  const entryNotionalMax = parseNumber(option(argv, "--entry-notional-max") ?? "90", "ENTRY_NOTIONAL_MAX_INVALID");
+  const entryNotionalMin = parseNumber(option(argv, "--entry-notional-min") ?? String(ENTRY_PRICE_MIN_CENTS), "ENTRY_NOTIONAL_MIN_INVALID");
+  const entryNotionalMax = parseNumber(option(argv, "--entry-notional-max") ?? String(ENTRY_PRICE_MAX_CENTS), "ENTRY_NOTIONAL_MAX_INVALID");
   const executionStart = parseTime(option(argv, "--execution-start") ?? "09:15", "EXECUTION_START_INVALID");
   const executionEnd = parseTime(option(argv, "--execution-end") ?? "15:45", "EXECUTION_END_INVALID");
   const orderCooldownMs = parsePositiveSeconds(
@@ -37,7 +39,7 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
 
   if (strikeMin > strikeMax) throw new Error("STRIKE_RANGE_INVALID");
   if (entryNotionalMin > entryNotionalMax) throw new Error("ENTRY_NOTIONAL_RANGE_INVALID");
-  if (entryNotionalMin !== 84 || entryNotionalMax !== 90) throw new Error("ENTRY_NOTIONAL_POLICY_FIXED");
+  if (entryNotionalMin !== ENTRY_PRICE_MIN_CENTS || entryNotionalMax !== ENTRY_PRICE_MAX_CENTS) throw new Error("ENTRY_NOTIONAL_POLICY_FIXED");
   if (minutes(executionStart) >= minutes(executionEnd)) throw new Error("EXECUTION_WINDOW_INVALID");
 
   const isExecutionWindowOpen = (now = new Date()): boolean => isWithinExecutionWindow(now, executionStart, executionEnd);
