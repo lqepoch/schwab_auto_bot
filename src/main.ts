@@ -45,6 +45,7 @@ if (!readOnly && !confirmedLive) {
 const policy = parseRuntimePolicy(process.argv);
 const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId);
 process.once("exit", () => runtimeLock.release());
+let sellOrderAutomationDisabledRecorded = false;
 
 function stamp(message: string): void {
   const value = new Intl.DateTimeFormat("sv-SE", {
@@ -52,6 +53,22 @@ function stamp(message: string): void {
   }).format(new Date());
   process.stderr.write(`${value} [node-vertical] ${message}\n`);
   executionJournal.record("console", { message });
+}
+
+function recordSellOrderAutomationDisabled(): void {
+  if (sellOrderAutomationDisabledRecorded) return;
+  sellOrderAutomationDisabledRecorded = true;
+  executionJournal.record("exit.automation.disabled", {
+    reason: "cli-disable-sell-orders",
+    existingWorkingSellOrders: "left-unchanged",
+  });
+}
+
+function isClosingPayload(payload: Json): boolean {
+  return info(payload)?.closing === true
+    || (Array.isArray(payload.orderLegCollection) && payload.orderLegCollection.some((leg: Json) =>
+      ["SELL_TO_CLOSE", "BUY_TO_CLOSE"].includes(String(leg.instruction)),
+    ));
 }
 
 async function writeRuntimeState(state: "running" | "stopping" | "stopped", reason?: string): Promise<void> {
@@ -314,7 +331,7 @@ function recordOpeningFillLot(strategy: string, order: Json): void {
   openingFillLots.set(strategy, lots);
   lastOpeningFillAt.set(strategy, Math.max(lastOpeningFillAt.get(strategy) ?? 0, filledAt));
   rememberExitTemplate(strategy, order);
-  if (firstObserved && !readOnly && mayRecoverFixedPriceFill(filledAt, runtimeStartedAt)) {
+  if (firstObserved && !readOnly && !policy.disableSellOrders && mayRecoverFixedPriceFill(filledAt, runtimeStartedAt)) {
     scheduleExitWorker(strategy, order, Math.max(Date.now(), filledAt + EXIT_IDLE_BUY_FILL_DELAY_MS), "opening-fill-idle-deadline");
   }
 }
@@ -482,6 +499,13 @@ function previewBlockers(body: any): string {
 }
 
 function requestLiquidityExit(payload: Json): void {
+  if (policy.disableSellOrders) {
+    executionJournal.record("exit.liquidity-suppressed", {
+      reason: "cli-disable-sell-orders",
+      order: payloadAuditData(payload),
+    });
+    return;
+  }
   const meta = info(payload);
   if (!meta?.opening) return;
   rememberExitTemplate(meta.key, payload);
@@ -563,6 +587,12 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     executionJournal.record("broker.write.skipped", { key, reason: "read-only", method, path, order: payloadAuditData(payload) });
     return "READ_ONLY";
   }
+  if (policy.disableSellOrders && isClosingPayload(payload)) {
+    executionJournal.record("exit.write.blocked", {
+      key, method, path, reason: "cli-disable-sell-orders", order: payloadAuditData(payload),
+    });
+    throw new Error("SELL_ORDERS_DISABLED");
+  }
   const violation = orderPolicyViolation(payload, policy, newYorkDate());
   if (violation) {
     executionJournal.record("broker.write.blocked", { key, method, path, code: violation.code, message: violation.message, order: payloadAuditData(payload) });
@@ -640,6 +670,13 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
   if (readOnly) {
     executionJournal.record("broker.cancel.skipped", { key, orderId: orderIdValue, reason: "read-only" });
     return;
+  }
+  const source = orders.find((order) => orderId(order) === orderIdValue);
+  if (policy.disableSellOrders && (info(source ?? {})?.closing || key.startsWith("sell-") || key.startsWith("stale-recreate"))) {
+    executionJournal.record("exit.cancel.blocked", {
+      key, orderId: orderIdValue, reason: "cli-disable-sell-orders",
+    });
+    throw new Error("SELL_ORDERS_DISABLED");
   }
   await requireWeeklyReauthorization();
   policy.requireExecutionWindow();
@@ -945,6 +982,7 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
 }
 
 function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template: Json): void {
+  if (policy.disableSellOrders) return;
   const id = orderId(source);
   if (staleExitRecreateInFlight.has(id)) return;
   if (!mayRecreateStaleOrder(eventTime(source), Date.now(), staleExitRetryAt.get(id) ?? 0)) return;
@@ -1007,6 +1045,7 @@ function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template
 }
 
 function hasExitPriority(groupKey: string): boolean {
+  if (policy.disableSellOrders) return false;
   if (liquidityExitRefreshes.has(groupKey)) return true;
   return orders.some((order) => {
     const meta = info(order);
@@ -1355,6 +1394,13 @@ function trackInventoryFillDeltas(): void {
 }
 
 function adoptSells(): void {
+  if (policy.disableSellOrders) {
+    sellDue.clear();
+    staleExitRetryAt.clear();
+    staleExitRecreateInFlight.clear();
+    cancelingSells.clear();
+    return;
+  }
   const active = new Set<string>();
   for (const order of orders) {
     const meta = info(order);
@@ -1594,7 +1640,7 @@ function exitStrategyNeedsWorker(strategy: string): boolean {
 }
 
 function scheduleExitWorker(strategy: string, template: Json, dueAt: number, reason: string): void {
-  if (stopping || readOnly) return;
+  if (stopping || readOnly || policy.disableSellOrders) return;
   const safeDueAt = Math.max(Date.now(), dueAt);
   const existing = exitWorkerTimers.get(strategy);
   if (existing && existing.dueAt <= safeDueAt) return;
@@ -1612,7 +1658,7 @@ function scheduleExitWorker(strategy: string, template: Json, dueAt: number, rea
 }
 
 async function runExitWorker(strategy: string, template: Json, reason: string): Promise<void> {
-  if (stopping || readOnly) return;
+  if (stopping || readOnly || policy.disableSellOrders) return;
   if (!policy.isExecutionWindowOpen()) {
     scheduleExitWorker(strategy, template, Date.now() + policy.roundCooldownMs, "outside-execution-window");
     return;
@@ -1759,6 +1805,7 @@ async function evaluateExitStrategyLegacy(strategy: string, template: Json, forc
 }
 
 async function evaluateExitStrategy(strategy: string, template: Json, forceStartup: boolean): Promise<void> {
+  if (policy.disableSellOrders) return;
   const now = Date.now();
   const inventory = inventoryByStrategy.get(strategy) ?? 0;
   const activeClosingOrders = (): Json[] => orders.filter((order) => {
@@ -1917,6 +1964,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
 }
 
 function queueSellCancel(strategy: string, sell: Json, reason: string): void {
+  if (policy.disableSellOrders) return;
   const id = orderId(sell);
   if (cancelingSells.has(id)) return;
   cancelingSells.add(id);
@@ -1988,7 +2036,7 @@ function advanceLiquidityRefresh(
 }
 
 function evaluateExits(forceStartup = false): void {
-  if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
+  if (stopping || readOnly || policy.disableSellOrders || !policy.isExecutionWindowOpen()) return;
   for (const [strategy, template] of exitTemplates()) {
     // Startup intentionally wakes every known strategy. Subsequent discovery
     // rounds may only create workers for newly current strategies: resetting
@@ -2001,7 +2049,7 @@ function evaluateExits(forceStartup = false): void {
 }
 
 function reconcileCurrentExitStrategies(): void {
-  if (stopping || readOnly || !policy.isExecutionWindowOpen()) return;
+  if (stopping || readOnly || policy.disableSellOrders || !policy.isExecutionWindowOpen()) return;
   for (const [strategy, template] of exitTemplates()) {
     // Keep a live strategy's own timer intact. A current full-order response
     // only starts a worker for a strategy that is not already being watched.
@@ -2057,12 +2105,17 @@ executionJournal.record("run.started", {
   strikeMax: policy.strikeMax,
   executionWindow: `${policy.executionStart}-${policy.executionEnd}`,
   repeatBuyAtOrderPrice: policy.repeatBuyAtOrderPrice,
+  disableSellOrders: policy.disableSellOrders,
   buildId: process.env.SCHWAB_BOT_BUILD_ID ?? null,
 });
 stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
 if (!readOnly) stamp(policy.repeatBuyAtOrderPrice
   ? "FIXED_PRICE_CYCLE_ENABLED source=orderLimit; price exploration is disabled; one working opening order per strategy is maintained and refreshed at its existing price"
   : "PRICE_EXPLORER_FILL_PRICE_SOURCE source=actualNet");
+if (policy.disableSellOrders) {
+  recordSellOrderAutomationDisabled();
+  stamp("SELL_ORDER_AUTOMATION_DISABLED: no sell Submit, Replace, or Cancel will be sent; existing working sells are left unchanged");
+}
 await bootstrap();
 await poll(true);
 if (!once) {
@@ -2076,11 +2129,13 @@ if (!once) {
 }
 if (!readOnly) {
   await reconcilePositions();
-  stamp(policy.repeatBuyAtOrderPrice
+  stamp(policy.disableSellOrders
+    ? "启动阶段：卖单自动化已禁用；仅执行买单与只读订单/持仓对账"
+    : policy.repeatBuyAtOrderPrice
     ? "启动阶段：先处理全部可卖库存；固定价格模式保留整体买单同价 Replace 刷新，并且每个策略只维护一张工作买单"
     : "启动阶段：先处理全部可卖库存，再启动整体买单刷新");
   await evaluateExits(true);
-  stamp("启动卖出评估已调度；成交监听、每策略卖单维护与整体刷新并行运行");
+  if (!policy.disableSellOrders) stamp("启动卖出评估已调度；成交监听、每策略卖单维护与整体刷新并行运行");
 }
 if (once) {
   stop();

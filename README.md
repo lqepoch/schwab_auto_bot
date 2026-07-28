@@ -8,6 +8,7 @@
 
 - 默认拒绝真实写入；只有精确传入 `--confirm-live I_UNDERSTAND` 才会启动真实自动交易循环。
 - `--read-only` 禁止 Preview、Submit、Replace 和 Cancel；`--once` 在一次账户与订单快照后退出。
+- `--disable-sell-orders` 是显式的 live 运行时开关：禁止自动卖单的 Submit、Replace 与 Cancel，并停用所有 exit worker；已有工作卖单保持不变，订单与持仓仍会只读对账。
 - 所有 SDK 请求的内置重试均关闭。配额、429 退避、写入串行化和未知写入结果由主程序统一控制，避免一次逻辑请求产生未计量的 broker 请求。
 - `ACCT_ACTIVITY` 流消息仅触发 REST 订单对账；成交与终态只以 Schwab REST 订单快照为准。首个活动事件在 250ms 合并后发起高优先级轻量成交同步，不会等待正在进行的完整订单刷新；连续、无可解析详情的活动流最多每 1.5 秒确认一次，避免确认风暴耗尽补买和卖单所需的 API 配额。
 - 写入前必须有 Schwab Preview；最终 broker 写入由单一写入闸门串行化。失败或缺少 broker `Location` 订单 ID 的写入会进入未知结果隔离，不会自动重发。
@@ -69,6 +70,14 @@ node .\src\main.ts --read-only
 ```powershell
 node .\src\main.ts --confirm-live I_UNDERSTAND
 ```
+
+如需继续维护买单、但完全关闭自动卖出功能，显式传入：
+
+```powershell
+node .\src\main.ts --confirm-live I_UNDERSTAND --disable-sell-orders
+```
+
+该开关不撤销或修改已存在的工作卖单；它只阻止本次运行创建、Replace 或 Cancel 卖单。执行审计日志会记录 `exit.automation.disabled`，而买单与只读订单/持仓对账保持可用。
 
 当前策略处理配置标的的当日到期两腿垂直价差；启动时要求且只允许一个 Schwab linked account。
 
