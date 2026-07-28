@@ -24,6 +24,14 @@ test("0DTE buy orders must stay inside the configured price range", () => {
   assert.equal(orderPolicyViolation(vertical("0.87"), policy, "2026-07-25")?.code, "ORDER_NOT_0DTE");
 });
 
+test("write-time policy rejects a vertical outside its configured strike range", () => {
+  const scopedPolicy = {
+    ...policy,
+    isWithinStrikeRange: (_underlying: string, lowerStrike: number, higherStrike: number) => lowerStrike >= 750 && higherStrike <= 795,
+  };
+  assert.equal(orderPolicyViolation(vertical("0.87"), scopedPolicy, today)?.code, "STRIKE_OUT_OF_RANGE");
+});
+
 test("0DTE sell orders must use the fixed 0.99 credit", () => {
   assert.equal(orderPolicyViolation(vertical(String(EXIT_ORDER_PRICE), true), policy, today), null);
   assert.equal(orderPolicyViolation(vertical("0.98", true), policy, today)?.code, "SELL_PRICE_INVALID");

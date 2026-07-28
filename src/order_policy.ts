@@ -17,10 +17,11 @@ export type OrderPolicy = {
   underlyings: ReadonlySet<string>;
   entryNotionalMin: number;
   entryNotionalMax: number;
+  isWithinStrikeRange?: (underlying: string, lowerStrike: number, higherStrike: number) => boolean;
 };
 
 export type OrderPolicyViolation = {
-  code: "ORDER_STRUCTURE_INVALID" | "ORDER_QUANTITY_INVALID" | "UNDERLYING_NOT_ALLOWED" | "ORDER_NOT_0DTE" | "BUY_PRICE_OUT_OF_RANGE" | "SELL_PRICE_INVALID";
+  code: "ORDER_STRUCTURE_INVALID" | "ORDER_QUANTITY_INVALID" | "UNDERLYING_NOT_ALLOWED" | "STRIKE_OUT_OF_RANGE" | "ORDER_NOT_0DTE" | "BUY_PRICE_OUT_OF_RANGE" | "SELL_PRICE_INVALID";
   message: string;
 };
 
@@ -64,6 +65,9 @@ export function orderPolicyViolation(order: Json, policy: OrderPolicy, tradingDa
   }
   if (!policy.underlyings.has(meta.underlying)) {
     return { code: "UNDERLYING_NOT_ALLOWED", message: `标的 ${meta.underlying} 不在允许范围` };
+  }
+  if (!policy.isWithinStrikeRange?.(meta.underlying, meta.lowerStrike, meta.higherStrike) && policy.isWithinStrikeRange) {
+    return { code: "STRIKE_OUT_OF_RANGE", message: `价差 ${meta.lowerStrike}-${meta.higherStrike} 不在 ${meta.underlying} 的允许刷新范围` };
   }
   if (meta.expiration !== tradingDate) {
     return { code: "ORDER_NOT_0DTE", message: `到期日 ${meta.expiration} 不是当前纽约交易日 ${tradingDate}` };

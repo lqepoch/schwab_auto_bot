@@ -8,7 +8,7 @@ import { PriorityGate, PriorityWriter, type Priority } from "./priority_runtime.
 import { SchwabRestClient } from "./schwab_client.ts";
 import { SchwabApiError } from "../vendor/schwab-api-nodejs/src/utils/errors.ts";
 import { parseRuntimePolicy } from "./runtime_policy.ts";
-import { EXIT_ORDER_PRICE, isWithinStrikeRange, orderInfo, orderPolicyViolation, type Json } from "./order_policy.ts";
+import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./order_policy.ts";
 import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./price_explorer.ts";
 import { ExecutionJournal } from "./execution_journal.ts";
@@ -848,7 +848,7 @@ function managedOpening(order: Json): Json | null {
   const meta = info(order);
   if (
     !meta?.opening || meta.expiration !== newYorkDate() || !policy.underlyings.has(meta.underlying)
-    || !isWithinStrikeRange(meta, policy.strikeMin, policy.strikeMax)
+    || !policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
     || quantity(order) !== 1 || orderPolicyViolation(order, policy, newYorkDate())
   ) return null;
   return meta;
@@ -1064,8 +1064,12 @@ function hasExitPriority(groupKey: string): boolean {
 }
 
 function isConfiguredExplorerGroup(groupKey: string): boolean {
-  const [underlying, expiration] = groupKey.split(":");
-  return policy.underlyings.has(underlying) && expiration === newYorkDate();
+  const [underlying, expiration, , rawLowerStrike, rawHigherStrike] = groupKey.split(":");
+  const lowerStrike = Number(rawLowerStrike);
+  const higherStrike = Number(rawHigherStrike);
+  return policy.underlyings.has(underlying)
+    && expiration === newYorkDate()
+    && policy.isWithinStrikeRange(underlying, lowerStrike, higherStrike);
 }
 
 async function executeExplorerAction(groupKey: string, action: ExplorerAction): Promise<void> {
@@ -1586,7 +1590,7 @@ function exitTemplates(): Map<string, Json> {
       order.status !== "FILLED" || !meta?.opening
       || !policy.underlyings.has(meta.underlying)
       || meta.expiration !== newYorkDate()
-      || !isWithinStrikeRange(meta, policy.strikeMin, policy.strikeMax)
+      || !policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
     ) continue;
     const previous = latest.get(meta.key);
     if (!previous || eventTime(order) > eventTime(previous)) latest.set(meta.key, order);
@@ -1597,7 +1601,7 @@ function exitTemplates(): Map<string, Json> {
     if (
       meta?.closing && working.has(String(order.status))
       && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying)
-      && isWithinStrikeRange(meta, policy.strikeMin, policy.strikeMax)
+      && policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
       && !latest.has(meta.key)
     ) {
       latest.set(meta.key, order);
@@ -1608,7 +1612,7 @@ function exitTemplates(): Map<string, Json> {
     if (
       meta?.opening && meta.expiration === newYorkDate()
       && policy.underlyings.has(meta.underlying)
-      && isWithinStrikeRange(meta, policy.strikeMin, policy.strikeMax)
+      && policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
       && (inventoryByStrategy.get(meta.key) ?? 0) > 0
       && !latest.has(meta.key)
     ) latest.set(meta.key, order);
@@ -1617,7 +1621,7 @@ function exitTemplates(): Map<string, Json> {
     const meta = info(template);
     if (
       (inventoryByStrategy.get(strategy) ?? 0) > 0 && !latest.has(strategy)
-      && meta && isWithinStrikeRange(meta, policy.strikeMin, policy.strikeMax)
+      && meta && policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
     ) latest.set(strategy, template);
   }
   return latest;
@@ -2112,13 +2116,17 @@ executionJournal.record("run.started", {
   underlyings: [...policy.underlyings],
   strikeMin: policy.strikeMin,
   strikeMax: policy.strikeMax,
+  strikeRanges: Object.fromEntries(policy.strikeRanges),
   executionWindow: `${policy.executionStart}-${policy.executionEnd}`,
   fixedPriceRefreshIntervalMs: policy.fixedPriceRefreshIntervalMs,
   repeatBuyAtOrderPrice: policy.repeatBuyAtOrderPrice,
   disableSellOrders: policy.disableSellOrders,
   buildId: process.env.SCHWAB_BOT_BUILD_ID ?? null,
 });
-stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} strikes=${policy.strikeMin}-${policy.strikeMax} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms fixedPriceRefreshInterval=${policy.fixedPriceRefreshIntervalMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
+const strikeRangesSummary = [...policy.strikeRanges.entries()]
+  .flatMap(([underlying, ranges]) => ranges.map((range) => `${underlying}:${range.minimum}:${range.maximum}`))
+  .join(",");
+stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} refreshStrikeRanges=${strikeRangesSummary} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms fixedPriceRefreshInterval=${policy.fixedPriceRefreshIntervalMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
 if (!readOnly) stamp(policy.repeatBuyAtOrderPrice
   ? "FIXED_PRICE_CYCLE_ENABLED source=orderLimit; price exploration is disabled; one working opening order per strategy is maintained and refreshed at its existing price"
   : "PRICE_EXPLORER_FILL_PRICE_SOURCE source=actualNet");

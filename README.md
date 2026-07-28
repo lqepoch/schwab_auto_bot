@@ -99,6 +99,17 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
   --strike-min 720 --strike-max 790
 ```
 
+如需为每个标的设定一个或多个独立刷新行权价范围，使用 `--refresh-strike-ranges`。格式为逗号分隔的 `标的:最小行权价:最大行权价`；同一标的可重复出现。每个垂直价差的两条腿都必须完整落在其中一个范围内，才会被发现、刷新、补买或通过写入前校验：
+
+```powershell
+node .\src\main.ts --confirm-live I_UNDERSTAND `
+  --refresh-strike-ranges SPY:750:795,SPY:800:820,QQQ:685:790 `
+  --disable-sell-orders `
+  --repeat-buy-at-order-price
+```
+
+使用 `--refresh-strike-ranges` 时不能同时传入 `--underlyings`、`--strike-min` 或 `--strike-max`；范围外的已有工作单只会记录 `POLICY_ALERT`，不会被自动修改或撤销。
+
 `--execution-start` 与 `--execution-end` 默认分别为 `09:15` 和 `15:45`（纽约时间）；只在需要变更执行窗口时传入，例如 `--execution-start 09:30 --execution-end 15:30`。
 
 整体刷新每轮完成后默认间隔 5 秒。fixed-price 模式的每个候选订单在进入 Preview/Replace 链路前，默认至少间隔 2 秒；可用 `--fixed-price-refresh-interval-seconds <秒数>` 覆盖。例如传入 `--fixed-price-refresh-interval-seconds 3` 时，每个候选订单的刷新起始间隔至少为 3 秒。最近 60 秒的已准入 API 调用量达到压力阈值时，配额控制仍会把间隔从 0.7 秒逐步提高到 1.2 秒，因此实际间隔始终取 CLI 值与配额间隔中的较大者。108 RPM 准入、Preview、最终写入串行化和卖单优先级仍是不可绕过的硬边界。每一轮开始都会读取一次完整订单列表；该快照同时供本轮所有候选筛选与原生 Replace 使用，不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用这份完整快照，避免同轮重复读取。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。

@@ -2,10 +2,13 @@ import { ENTRY_PRICE_MAX_CENTS, ENTRY_PRICE_MIN_CENTS } from "./entry_price_poli
 
 const executionTimeZone = "America/New_York";
 
+export type StrikeRange = Readonly<{ minimum: number; maximum: number }>;
+
 export type RuntimePolicy = {
   underlyings: ReadonlySet<string>;
   strikeMin: number;
   strikeMax: number;
+  strikeRanges: ReadonlyMap<string, readonly StrikeRange[]>;
   entryNotionalMin: number;
   entryNotionalMax: number;
   executionStart: string;
@@ -15,12 +18,20 @@ export type RuntimePolicy = {
   fixedPriceRefreshIntervalMs: number;
   repeatBuyAtOrderPrice: boolean;
   disableSellOrders: boolean;
+  isWithinStrikeRange: (underlying: string, lowerStrike: number, higherStrike: number) => boolean;
   isExecutionWindowOpen: (now?: Date) => boolean;
   requireExecutionWindow: (now?: Date) => void;
 };
 
 export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
-  const underlyings = parseUnderlyings(option(argv, "--underlyings") ?? "QQQ,SPY");
+  const configuredStrikeRanges = option(argv, "--refresh-strike-ranges");
+  if (configuredStrikeRanges !== undefined && ["--underlyings", "--strike-min", "--strike-max"].some((name) => argv.includes(name))) {
+    throw new Error("REFRESH_STRIKE_RANGES_CONFLICT");
+  }
+  const parsedStrikeRanges = configuredStrikeRanges === undefined ? null : parseRefreshStrikeRanges(configuredStrikeRanges);
+  const underlyings = parsedStrikeRanges === null
+    ? parseUnderlyings(option(argv, "--underlyings") ?? "QQQ,SPY")
+    : new Set(parsedStrikeRanges.keys());
   const strikeMin = parseNumber(option(argv, "--strike-min") ?? "720", "STRIKE_MIN_INVALID");
   const strikeMax = parseNumber(option(argv, "--strike-max") ?? "790", "STRIKE_MAX_INVALID");
   const entryNotionalMin = parseNumber(option(argv, "--entry-notional-min") ?? String(ENTRY_PRICE_MIN_CENTS), "ENTRY_NOTIONAL_MIN_INVALID");
@@ -47,11 +58,19 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
   if (entryNotionalMin !== ENTRY_PRICE_MIN_CENTS || entryNotionalMax !== ENTRY_PRICE_MAX_CENTS) throw new Error("ENTRY_NOTIONAL_POLICY_FIXED");
   if (minutes(executionStart) >= minutes(executionEnd)) throw new Error("EXECUTION_WINDOW_INVALID");
 
+  const strikeRanges = parsedStrikeRanges ?? new Map(
+    [...underlyings].map((underlying) => [underlying, [{ minimum: strikeMin, maximum: strikeMax }]]),
+  );
+  const effectiveStrikeMin = Math.min(...[...strikeRanges.values()].flat().map((range) => range.minimum));
+  const effectiveStrikeMax = Math.max(...[...strikeRanges.values()].flat().map((range) => range.maximum));
+  const isWithinStrikeRange = (underlying: string, lowerStrike: number, higherStrike: number): boolean =>
+    strikeRanges.get(underlying)?.some((range) => lowerStrike >= range.minimum && higherStrike <= range.maximum) ?? false;
   const isExecutionWindowOpen = (now = new Date()): boolean => isWithinExecutionWindow(now, executionStart, executionEnd);
   return {
     underlyings,
-    strikeMin,
-    strikeMax,
+    strikeMin: effectiveStrikeMin,
+    strikeMax: effectiveStrikeMax,
+    strikeRanges,
     entryNotionalMin,
     entryNotionalMax,
     executionStart,
@@ -61,6 +80,7 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
     fixedPriceRefreshIntervalMs,
     repeatBuyAtOrderPrice,
     disableSellOrders,
+    isWithinStrikeRange,
     isExecutionWindowOpen,
     requireExecutionWindow(now = new Date()): void {
       if (!isExecutionWindowOpen(now)) throw new Error("EXECUTION_WINDOW_CLOSED");
@@ -100,6 +120,27 @@ function parseUnderlyings(raw: string): ReadonlySet<string> {
     throw new Error("UNDERLYINGS_INVALID");
   }
   return new Set(values);
+}
+
+function parseRefreshStrikeRanges(raw: string): ReadonlyMap<string, readonly StrikeRange[]> {
+  const entries = raw.split(",").map((value) => value.trim()).filter(Boolean);
+  if (entries.length === 0) throw new Error("REFRESH_STRIKE_RANGES_INVALID");
+  const ranges = new Map<string, StrikeRange[]>();
+  for (const entry of entries) {
+    const match = entry.match(/^([A-Za-z]{1,6}):(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
+    if (!match) throw new Error("REFRESH_STRIKE_RANGES_INVALID");
+    const [, rawUnderlying, rawMinimum, rawMaximum] = match;
+    const minimum = Number(rawMinimum);
+    const maximum = Number(rawMaximum);
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum < 0 || minimum > maximum) {
+      throw new Error("REFRESH_STRIKE_RANGES_INVALID");
+    }
+    const underlying = rawUnderlying.toUpperCase();
+    const values = ranges.get(underlying) ?? [];
+    values.push({ minimum, maximum });
+    ranges.set(underlying, values);
+  }
+  return ranges;
 }
 
 function parseNumber(raw: string, code: string): number {
