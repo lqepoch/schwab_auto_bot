@@ -159,7 +159,7 @@ While an `ACCT_ACTIVITY` wake-up is awaiting its REST fill confirmation, and for
 
 每次启动都会创建独立、追加写入的 JSONL 审计文件：`.state/executions/<UTC日期>/<runId>.jsonl`。每行均包含 UTC 时间、`runId`、事件类型和结构化数据；不会写入 token 或账户 hash。若 Schwab Preview 拒绝，`broker.preview.rejected` 会保留 Schwab 返回的规则名、说明、活动说明及严重级别等允许字段；文本会归一化、截断，并脱敏长数字、token 和授权值，绝不记录完整 Preview 响应。Replace 会记录 `broker.preview.skipped`，原因为 `existing-order-native-replace`，并在发送证据和最终写入事件中标记 `preflight=EXISTING_ORDER_REPLACE_NO_PREVIEW`。日志覆盖订单首次发现及状态/成交数量变化、Schwab 的成交时间、订单腿与价格、Submit Preview、Replace 跳过 Preview 的依据、最终 Submit/Replace/Cancel、未知写入结果、探索器成交分桶、代际触发、已排队的下一步动作、动作执行/跳过原因，以及运行启动、控制停止和退出。
 
-终端默认只显示启动/停止、安全告警、失败及业务动作；固定价成功换单显示为 `2026-07-29 22:40:04 刷新 SPY 745/746 Put Replace 0.90`。`ACCT_ACTIVITY` 唤醒、完整订单快照和零成交确认属于内部诊断，继续写入 JSONL 审计文件但不输出到终端。禁卖单模式不会维护 `.state/exit-templates.json`。
+终端默认只显示启动/停止、安全告警、失败及业务动作；固定价成功换单显示为 `2026-07-29 22:40:04 刷新 SPY 745/746 Put Replace 0.90`。如果 Schwab 响应实际包含 `X-RateLimit-*`、`RateLimit-*` 或 `X-Rate-Limit-*` Header，所有后续控制台消息都会在末尾追加最近一次响应的 `限速 remaining/limit`，例如 `刷新 SPY 745/746 Put Replace 0.90 限速 87/120`；只有 limit 时显示 `限速 limit`。Schwab 没有公开保证这些 Header 一定存在，因此 Header 缺失或格式无效时不显示限速，也不会用本地 108 RPM 配额冒充 broker 当前值。控制台事件会把同一份已解析值写入 `brokerRateLimit` 字段。`ACCT_ACTIVITY` 唤醒、完整订单快照和零成交确认属于内部诊断，继续写入 JSONL 审计文件但不输出到终端。禁卖单模式不会维护 `.state/exit-templates.json`。
 
 当前运行实例及其日志路径记录在 `.state/runtime/active-run.json`。查看当前实例和实时分析日志：
 
