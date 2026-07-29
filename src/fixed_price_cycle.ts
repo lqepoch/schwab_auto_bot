@@ -17,7 +17,7 @@ export function mayRecreateStaleOrder(enteredAt: number, now: number, nextAllowe
 }
 
 /**
- * Reserves the single replacement slot for a strategy before Preview begins.
+ * Reserves the single refill slot for a strategy before a new Submit's Preview begins.
  * A REST fill can be observed both by activity reconciliation and a full
  * snapshot; only the first observation may create the buy task.
  */

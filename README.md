@@ -11,7 +11,7 @@
 - `--disable-sell-orders` 是显式的 live 运行时开关：禁止自动卖单的 Submit、Replace 与 Cancel，并停用所有 exit worker；已有工作卖单保持不变，订单与持仓仍会只读对账。
 - 所有 SDK 请求的内置重试均关闭。配额、429 退避、写入串行化和未知写入结果由主程序统一控制，避免一次逻辑请求产生未计量的 broker 请求。
 - `ACCT_ACTIVITY` 流消息仅触发 REST 订单对账；成交与终态只以 Schwab REST 订单快照为准。首个活动事件在 250ms 合并后发起高优先级轻量成交同步，不会等待正在进行的完整订单刷新；连续、无可解析详情的活动流最多每 1.5 秒确认一次，避免确认风暴耗尽补买和卖单所需的 API 配额。
-- 写入前必须有 Schwab Preview；最终 broker 写入由单一写入闸门串行化。失败或缺少 broker `Location` 订单 ID 的写入会进入未知结果隔离，不会自动重发。
+- 新 Submit 写入前必须有 Schwab Preview。对当前权威订单快照中已确认仍在工作的既有订单，精确原生 `PUT /orders/{orderId}` Replace 不重复 Preview；程序仍会校验源订单处于工作状态、策略身份不变以及订单策略边界。所有最终 broker 写入都由单一写入闸门串行化；失败或缺少 broker `Location` 订单 ID 的写入会进入未知结果隔离，不会自动重发。
 
 ## 安装
 
@@ -65,7 +65,7 @@ node .\src\main.ts --read-only --once
 node .\src\main.ts --read-only
 ```
 
-以下命令会执行真实自动化写入，包括 Preview、Submit、Replace 和 Cancel。仅在策略、账户、市场时段及风险边界均已人工确认后使用：
+以下命令会执行真实自动化写入，包括 Submit 前的 Preview、无需重复 Preview 的既有订单 Replace，以及 Cancel。仅在策略、账户、市场时段及风险边界均已人工确认后使用：
 
 ```powershell
 node .\src\main.ts --confirm-live I_UNDERSTAND
@@ -112,9 +112,9 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 
 `--execution-start` 与 `--execution-end` 默认分别为 `09:15` 和 `15:45`（纽约时间）；只在需要变更执行窗口时传入，例如 `--execution-start 09:30 --execution-end 15:30`。
 
-整体刷新每轮完成后默认间隔 5 秒。fixed-price 模式的每个候选订单在进入 Preview/Replace 链路前，默认至少间隔 2 秒；可用 `--fixed-price-refresh-interval-seconds <秒数>` 覆盖。例如传入 `--fixed-price-refresh-interval-seconds 3` 时，每个候选订单的刷新起始间隔至少为 3 秒。每个开仓刷新轮开始时，程序都会先完整读取一次 Schwab 订单列表、再强制读取一次 Schwab 当前持仓；两份快照均成功后才筛选候选并进入 Preview/Replace。任一读取失败时，本轮不发单，下一轮从新的完整快照重新判断；不再保留 110 秒持仓兜底定时器。每个固定价刷新轮会等待该轮已入队的策略完成，并且同一策略在该轮至多 Replace 一次；完整订单对账不会将其重复入队。最近 60 秒的已准入 API 调用量达到压力阈值时，配额控制仍会把间隔从 0.7 秒逐步提高到 1.2 秒，因此实际间隔始终取 CLI 值与配额间隔中的较大者。可选 `--max-refresh-rounds <正整数>` 限制普通刷新轮次；省略时无限刷新，传入 `3` 时第三个完整刷新轮结束后受控退出。108 RPM 准入、Preview、最终写入串行化和卖单优先级仍是不可绕过的硬边界。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用每轮快照，避免同轮重复读取。不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。
+整体刷新每轮完成后默认间隔 5 秒。fixed-price 模式的每个候选订单在进入 Replace 链路前，默认至少间隔 2 秒；可用 `--fixed-price-refresh-interval-seconds <秒数>` 覆盖。例如传入 `--fixed-price-refresh-interval-seconds 3` 时，每个候选订单的刷新起始间隔至少为 3 秒。每个开仓刷新轮开始时，程序都会先完整读取一次 Schwab 订单列表、再强制读取一次 Schwab 当前持仓；两份快照均成功后才筛选候选并进入 Replace。任一读取失败时，本轮不发单，下一轮从新的完整快照重新判断；不再保留 110 秒持仓兜底定时器。每个固定价刷新轮会等待该轮已入队的策略完成，并且同一策略在该轮至多 Replace 一次；完整订单对账不会将其重复入队。最近 60 秒的已准入 API 调用量达到压力阈值时，配额控制仍会把间隔从 0.7 秒逐步提高到 1.2 秒，因此实际间隔始终取 CLI 值与配额间隔中的较大者。可选 `--max-refresh-rounds <正整数>` 限制普通刷新轮次；省略时无限刷新，传入 `3` 时第三个完整刷新轮结束后受控退出。108 RPM 准入、最终写入串行化和卖单优先级仍是不可绕过的硬边界；Replace 不占用 Preview 请求。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用每轮快照作为 Replace 源订单证据，避免同轮重复读取。不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。
 
-所有自动写入在 Preview 前都执行固定订单策略校验：买单必须是配置标的的 0DTE 双腿垂直价差，价格仅允许 0.82–0.92，数量必须为 1；卖单也必须是 0DTE、数量为 1，价格固定为 0.99。完整订单快照发现仍在工作的违规买/卖单时，程序只会发出 `POLICY_ALERT`，写入终端日志及 `.state/policy-alerts.jsonl`，不会静默撤销外部订单。任何不符合规则的自动 Preview、Submit 或 Replace 都会在发送 Schwab 请求前被拒绝。
+所有自动写入在发送请求前都执行固定订单策略校验：买单必须是配置标的的 0DTE 双腿垂直价差，价格仅允许 0.82–0.92，数量必须为 1；卖单也必须是 0DTE、数量为 1，价格固定为 0.99。完整订单快照发现仍在工作的违规买/卖单时，程序只会发出 `POLICY_ALERT`，写入终端日志及 `.state/policy-alerts.jsonl`，不会静默撤销外部订单。任何不符合规则的自动 Preview、Submit 或 Replace 都会在发送 Schwab 请求前被拒绝；Replace 还必须在当前快照中找到同一策略身份的工作源订单。
 
 ### 净价探索与收敛
 
@@ -141,9 +141,9 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 node .\src\main.ts --confirm-live I_UNDERSTAND --repeat-buy-at-order-price
 ```
 
-With `--repeat-buy-at-order-price`, the bot disables only price exploration, generation expansion, and price-changing repricing. It maintains at most one working opening order per strategy, repeatedly uses native Replace at that order's existing limit price, and replenishes one new opening order at the submitted limit price after a newly confirmed opening fill. The confirmed refill has priority over sell refreshes and ordinary opening refreshes, but not over an already executing final broker write. Before Preview it reserves the strategy's single refill slot, so simultaneous activity and full-snapshot observations of the same fill cannot submit duplicate buys; a rejected refill is cooled down for 30 seconds. The fixed-price fill path is independent of the exploration mode's ten-second pairing window: during a running bot it accepts every newly confirmed in-range fill, while a fresh start recovers only fills from the preceding 60 seconds and ignores older lookback history. Consumed fill IDs are persisted in `.state/fixed-price-cycle.json`, so a hot switch cannot repeat an already handled fill. The independent exit worker and its sell-first priority remain active.
+With `--repeat-buy-at-order-price`, the bot disables only price exploration, generation expansion, and price-changing repricing. It maintains at most one working opening order per strategy, repeatedly uses native Replace at that order's existing limit price without a redundant Preview, and replenishes one new opening order at the submitted limit price after a newly confirmed opening fill. The confirmed refill has priority over sell refreshes and ordinary opening refreshes, but not over an already executing final broker write. Before the new refill Submit's Preview it reserves the strategy's single refill slot, so simultaneous activity and full-snapshot observations of the same fill cannot submit duplicate buys; a rejected refill is cooled down for 30 seconds. The fixed-price fill path is independent of the exploration mode's ten-second pairing window: during a running bot it accepts every newly confirmed in-range fill, while a fresh start recovers only fills from the preceding 60 seconds and ignores older lookback history. Consumed fill IDs are persisted in `.state/fixed-price-cycle.json`, so a hot switch cannot repeat an already handled fill. The independent exit worker and its sell-first priority remain active.
 
-While an `ACCT_ACTIVITY` wake-up is awaiting its REST fill confirmation, and for five seconds after a confirmed refill is queued, ordinary low-priority opening refreshes may Preview but defer their final broker write. This leaves the serial write gate available for the newly confirmed refill without stopping normal refreshes when there is no fill activity.
+While an `ACCT_ACTIVITY` wake-up is awaiting its REST fill confirmation, and for five seconds after a confirmed refill is queued, ordinary low-priority opening Replace tasks may finish local validation but defer their final broker write. They do not issue Preview requests. This leaves the serial write gate available for the newly confirmed refill without stopping normal refreshes when there is no fill activity.
 
 固定价刷新在每轮起始及刷新进行中的完整订单确认后，直接按当下订单状态重算有效策略集合，不依赖上一次结果的增量推断。行权价完整位于 `--strike-min` 至 `--strike-max` 内的新工作买单会加入正在进行的刷新轮；已经取消、替换或不再是该策略当前工作买单的订单，会在写入前跳过。卖出 worker 使用相同范围：当前订单确认时会立即为新发现的可卖策略建立独立 worker，但不会重置已存在策略自己的卖单刷新计时器；没有仓位的已取消策略不会继续被调度。
 
@@ -151,13 +151,13 @@ While an `ACCT_ACTIVITY` wake-up is awaiting its REST fill confirmation, and for
 
 每个 0DTE 垂直组合都有独立、持久化的卖出评估 worker，不会被其他组合的卖出动作阻塞。每次 worker 唤醒都会先用新鲜的持仓快照核对该组合可平数量；账户级持仓读取最多在 1 秒内合并一次，不会改变各组的独立触发与写入决策。倒计时只从 Schwab 确认的开仓 `FILLED` 订单的 `closeTime` 开始；发现仓位、工作买单或缺少确认成交时间均不会启动 30 秒倒计时。该组最后一次完整买入成交会重置 30 秒空窗倒计时；连续 30 秒没有新的买入成交且有仓位时，worker 挂一张数量等于全部可平仓仓位的卖单。某组合可平仓仓位达到 5 张时不等待倒计时，立即触发全仓卖出。每组同时最多保留一张活动卖单，且每次刷新都会把数量替换为最新可平仓仓位。
 
-卖单价格固定为 0.99。正常刷新间隔为 8 秒，每个策略由自己的定时器维持；全局 5 秒发现循环只创建新 worker，绝不会重置已有策略的刷新或重试时间。卖出 Replace、无工作卖单的 Submit、以及老卖单取消后重建，在真正 Preview 前都会用统一的账户级持仓快照重算可平数量；同一秒内所有策略和排队写入共用一次持仓 REST 读取，而不是每张卖单额外请求。卖出提交在入队、必要的完整订单对账之后、以及真正 Preview 前都会重新确认该策略没有工作卖单；同一策略的提交任务也只能单飞，因此延迟 REST 快照或旧队列任务不会创建重复卖单。若 Schwab Preview 拒绝同一卖单更新，程序会冷却该精确 Replace 并记入 `exit.preview-retry-deferred`，避免反复无效 Preview 耗尽配额；但每张已工作至少 90 秒的卖单都有独立的 10 秒重建重试周期：取消→完整订单对账→共享持仓重算→Preview→新提交。不同策略可并发准备，最终 broker 写入仍保持单串行以隔离未知写入结果。期间其他策略的卖单和新成交补买仍保持独立运行。程序会保存最近的组合模板至 `.state/exit-templates.json`，因此热切换后仍能为已有仓位恢复独立卖出 worker。
+卖单价格固定为 0.99。正常刷新间隔为 8 秒，每个策略由自己的定时器维持；全局 5 秒发现循环只创建新 worker，绝不会重置已有策略的刷新或重试时间。卖出 Replace 在最终写入前、无工作卖单的 Submit 及老卖单取消后重建在 Preview 前，都会用统一的账户级持仓快照重算可平数量；同一秒内所有策略和排队写入共用一次持仓 REST 读取，而不是每张卖单额外请求。卖出提交在入队、必要的完整订单对账之后、以及真正 Preview 前都会重新确认该策略没有工作卖单；同一策略的提交任务也只能单飞，因此延迟 REST 快照或旧队列任务不会创建重复卖单。卖出 Replace 不发送 Preview；它必须绑定当前快照中的工作卖单并保持同一策略身份。新增或取消后重建的卖单仍属于 Submit，若其 Preview 被拒绝，程序会记入 `exit.preview-retry-deferred` 并按拒绝类别冷却。每张已工作至少 90 秒且无需数量或价格变更的卖单仍有独立的 10 秒重建重试周期：取消→完整订单对账→共享持仓重算→Preview→新提交。不同策略可并发准备，最终 broker 写入仍保持单串行以隔离未知写入结果。期间其他策略的卖单和新成交补买仍保持独立运行。程序会保存最近的组合模板至 `.state/exit-templates.json`，因此热切换后仍能为已有仓位恢复独立卖出 worker。
 
 如果 Schwab 对新的买入 `Preview` 明确返回资金、现金或购买力不足，程序会暂停该组买入/买单刷新并先进入 15 秒流动性卖出倒计时；倒计时结束后以全仓卖单启动，并以 5 秒间隔强制刷新两轮，随后恢复正常 8 秒节奏。卖出写入优先于买入和买单刷新。该触发及每轮结果会写入执行审计日志中的 `exit.liquidity-*`、`exit.worker-*` 与 `exit.gate` 事件。
 
 ### 执行审计日志与受控热切换
 
-每次启动都会创建独立、追加写入的 JSONL 审计文件：`.state/executions/<UTC日期>/<runId>.jsonl`。每行均包含 UTC 时间、`runId`、事件类型和结构化数据；不会写入 token 或账户 hash。若 Schwab Preview 拒绝，`broker.preview.rejected` 会保留 Schwab 返回的规则名、说明、活动说明及严重级别等允许字段；文本会归一化、截断，并脱敏长数字、token 和授权值，绝不记录完整 Preview 响应。日志覆盖订单首次发现及状态/成交数量变化、Schwab 的成交时间、订单腿与价格、Preview、最终 Submit/Replace/Cancel、未知写入结果、探索器成交分桶、代际触发、已排队的下一步动作、动作执行/跳过原因，以及运行启动、控制停止和退出。
+每次启动都会创建独立、追加写入的 JSONL 审计文件：`.state/executions/<UTC日期>/<runId>.jsonl`。每行均包含 UTC 时间、`runId`、事件类型和结构化数据；不会写入 token 或账户 hash。若 Schwab Preview 拒绝，`broker.preview.rejected` 会保留 Schwab 返回的规则名、说明、活动说明及严重级别等允许字段；文本会归一化、截断，并脱敏长数字、token 和授权值，绝不记录完整 Preview 响应。Replace 会记录 `broker.preview.skipped`，原因为 `existing-order-native-replace`，并在发送证据和最终写入事件中标记 `preflight=EXISTING_ORDER_REPLACE_NO_PREVIEW`。日志覆盖订单首次发现及状态/成交数量变化、Schwab 的成交时间、订单腿与价格、Submit Preview、Replace 跳过 Preview 的依据、最终 Submit/Replace/Cancel、未知写入结果、探索器成交分桶、代际触发、已排队的下一步动作、动作执行/跳过原因，以及运行启动、控制停止和退出。
 
 终端默认只显示启动/停止、安全告警、失败及业务动作；固定价成功换单显示为 `2026-07-29 22:40:04 刷新 SPY 745/746 Put Replace 0.90`。`ACCT_ACTIVITY` 唤醒、完整订单快照和零成交确认属于内部诊断，继续写入 JSONL 审计文件但不输出到终端。禁卖单模式不会维护 `.state/exit-templates.json`。
 
@@ -196,7 +196,9 @@ sending an identical Replace that Schwab rejects.  It still replaces an exit
 when any of those values differs.
 
 Working opening orders continue to use native Schwab Replace and are never
-canceled by maintenance. Each closing order that remains working for at least
+canceled by maintenance. Native Replace skips Preview only after confirming the
+source order is still working in the current snapshot and the strategy identity
+is unchanged. Each closing order that remains working for at least
 90 seconds has its own 10-second guarded recreate retry: cancel (even while a
 periodic order refresh is running), full REST
 reconciliation, verify no working order remains for that strategy, then Preview
