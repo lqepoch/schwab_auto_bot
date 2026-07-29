@@ -28,6 +28,11 @@ import {
   replacementSourceViolation,
   type OrderWritePreflight,
 } from "./order_write_preflight.ts";
+import {
+  appendBrokerRateLimit,
+  brokerRateLimitFromHeaders,
+  type BrokerRateLimit,
+} from "./broker_rate_limit.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -56,13 +61,18 @@ const policy = parseRuntimePolicy(process.argv);
 const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId);
 process.once("exit", () => runtimeLock.release());
 let sellOrderAutomationDisabledRecorded = false;
+let latestBrokerRateLimit: BrokerRateLimit | null = null;
 
 function stamp(message: string): void {
   const value = new Intl.DateTimeFormat("sv-SE", {
     timeZone: "Asia/Singapore", dateStyle: "short", timeStyle: "medium", hour12: false,
   }).format(new Date());
-  process.stderr.write(`${value} ${message}\n`);
-  executionJournal.record("console", { message });
+  const renderedMessage = appendBrokerRateLimit(message, latestBrokerRateLimit);
+  process.stderr.write(`${value} ${renderedMessage}\n`);
+  executionJournal.record("console", {
+    message: renderedMessage,
+    brokerRateLimit: latestBrokerRateLimit,
+  });
 }
 
 function recordSellOrderAutomationDisabled(): void {
@@ -226,9 +236,12 @@ async function api(
   await budget.admit(priority);
   const token = await tokens.get();
   try {
-    return await client.request<any>(path, init, token);
+    const response = await client.request<any>(path, init, token);
+    latestBrokerRateLimit = brokerRateLimitFromHeaders(response.headers);
+    return response;
   } catch (error) {
     if (error instanceof SchwabApiError) {
+      latestBrokerRateLimit = brokerRateLimitFromHeaders(error.headers);
       if (error.status === 429) budget.rateLimited(error.headers["retry-after"] ?? null);
       if (error.status === 401) void tokens.get(true);
       throw new Error(`SCHWAB_HTTP_${error.status}`);
