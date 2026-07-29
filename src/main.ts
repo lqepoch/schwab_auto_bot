@@ -21,6 +21,7 @@ import { classifyPreviewRejection, previewRejectionCooldownFromError, previewRej
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
 import { formatFixedPriceRebuy, formatFixedPriceReplace } from "./business_log.ts";
 import { FixedPriceRefreshRoundGuard } from "./fixed_price_round_guard.ts";
+import { refreshAuthoritativeSnapshots } from "./refresh_preflight.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -236,10 +237,7 @@ let accountHash = "";
 let orders: Json[] = [];
 let polling = false;
 const evaluatingExitStrategies = new Set<string>();
-let reconciling = false;
 let lastFullOrderPollAt = 0;
-let lastPositionReconciledAt = 0;
-let positionRefreshPending: Promise<void> | null = null;
 let stopping = false;
 let stopReason = "normal";
 let controlCheckRunning = false;
@@ -1347,7 +1345,7 @@ async function explorerRoundLoop(): Promise<void> {
       continue;
     }
     while (polling && !stopping) await wait(50);
-    if (stopping || !await poll(true, 0)) {
+    if (stopping || !await runRefreshPreflight()) {
       await wait(policy.roundCooldownMs);
       continue;
     }
@@ -1396,32 +1394,32 @@ async function finishRefreshLimitedRun(state: ReturnType<typeof refreshRoundLimi
 
 async function fixedPriceRefreshRound(): Promise<boolean> {
   fixedPriceRefreshRoundGuard.beginRound();
-  fixedPriceRefreshRoundActive = true;
   try {
-  if (!policy.isExecutionWindowOpen()) {
-    await wait(60_000);
-    return false;
-  }
-  while (polling && !stopping) await wait(50);
-  if (stopping || !await poll(true, 0)) {
+    if (!policy.isExecutionWindowOpen()) {
+      await wait(60_000);
+      return false;
+    }
+    while (polling && !stopping) await wait(50);
+    if (stopping || !await runRefreshPreflight()) {
+      await wait(policy.roundCooldownMs);
+      return false;
+    }
+    fixedPriceRefreshRoundActive = true;
+    const candidates = shuffled(orders.filter((order) => {
+      const meta = managedOpening(order);
+      if (meta === null || !working.has(String(order.status))) return false;
+      // Existing external duplicates are left untouched, but fixed-price mode
+      // maintains and refreshes only one working opening order per strategy.
+      return orderId(activeOpeningOrders(meta.key)[0]) === orderId(order);
+    }));
+    for (const candidate of candidates) {
+      if (stopping) break;
+      queueFixedPriceRefresh(candidate, "round-start");
+    }
+    await writer.waitIdle();
+    if (stopping) return false;
     await wait(policy.roundCooldownMs);
-    return false;
-  }
-  const candidates = shuffled(orders.filter((order) => {
-    const meta = managedOpening(order);
-    if (meta === null || !working.has(String(order.status))) return false;
-    // Existing external duplicates are left untouched, but fixed-price mode
-    // maintains and refreshes only one working opening order per strategy.
-    return orderId(activeOpeningOrders(meta.key)[0]) === orderId(order);
-  }));
-  for (const candidate of candidates) {
-    if (stopping) break;
-    queueFixedPriceRefresh(candidate, "round-start");
-  }
-  await writer.waitIdle();
-  if (stopping) return false;
-  await wait(policy.roundCooldownMs);
-  return true;
+    return true;
   } finally {
     fixedPriceRefreshRoundActive = false;
     fixedPriceRefreshRoundGuard.endRound();
@@ -1532,8 +1530,7 @@ async function reconcilePositions(announce = true): Promise<void> {
     }
     if (inventory <= 0) inventoryObservedAt.delete(strategy);
   }
-  lastPositionReconciledAt = Date.now();
-  if (announce) stamp(`订单与持仓完整对账完成 strategies=${templates.size}；后台仍保留 110s 兜底对账`);
+  if (announce) stamp(`订单与持仓完整对账完成 strategies=${templates.size}`);
 }
 
 /**
@@ -1598,14 +1595,24 @@ function currentExitTarget(
   };
 }
 
-async function ensureFreshPositions(): Promise<void> {
-  if (Date.now() - lastPositionReconciledAt < 110_000) return;
-  if (!positionRefreshPending) {
-    positionRefreshPending = reconcilePositions(false).finally(() => {
-      positionRefreshPending = null;
+async function runRefreshPreflight(): Promise<boolean> {
+  try {
+    const admitted = await refreshAuthoritativeSnapshots({
+      refreshOrders: () => poll(true, 0),
+      refreshPositions: () => reconcilePositions(false),
     });
+    if (admitted) {
+      executionJournal.record("refresh.preflight.reconciled", {
+        snapshots: ["orders", "positions"],
+        orders: orders.length,
+      });
+    }
+    return admitted;
+  } catch (error) {
+    executionJournal.record("refresh.preflight.failed", { error: String(error) });
+    stamp(`刷新前订单或持仓对账失败 error=${String(error)}`);
+    return false;
   }
-  await positionRefreshPending;
 }
 
 async function ensureFreshOrdersForExit(): Promise<boolean> {
@@ -1614,19 +1621,6 @@ async function ensureFreshOrdersForExit(): Promise<boolean> {
   if (stopping) return false;
   if (Date.now() - lastFullOrderPollAt < 5_000) return true;
   return poll(true, 2);
-}
-
-async function reconcileAll(): Promise<void> {
-  if (reconciling || stopping || readOnly) return;
-  reconciling = true;
-  try {
-    while (polling && !stopping) await wait(100);
-    await ensureFreshPositions();
-  } catch (error) {
-    stamp(`订单与持仓完整对账失败 error=${String(error)}`);
-  } finally {
-    reconciling = false;
-  }
 }
 
 function exitTemplates(): Map<string, Json> {
@@ -2215,7 +2209,6 @@ if (once) {
     if (fixedPriceRefreshRoundActive) void poll(true, 3);
   }, 2_000));
   runtimeIntervals.push(setInterval(() => void evaluateExits(), policy.roundCooldownMs));
-  runtimeIntervals.push(setInterval(() => void reconcileAll(), 110_000));
   runtimeIntervals.push(setInterval(() => void checkControlRequest(), 250));
 }
 while (!stopping) await wait(250);
