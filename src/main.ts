@@ -22,6 +22,12 @@ import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityR
 import { formatFixedPriceRebuy, formatFixedPriceReplace } from "./business_log.ts";
 import { FixedPriceRefreshRoundGuard } from "./fixed_price_round_guard.ts";
 import { refreshAuthoritativeSnapshots } from "./refresh_preflight.ts";
+import {
+  EXISTING_ORDER_REPLACE_NO_PREVIEW,
+  orderWritePreflight,
+  replacementSourceViolation,
+  type OrderWritePreflight,
+} from "./order_write_preflight.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -273,7 +279,7 @@ const REFILL_WRITE_PRIORITY_SETTLEMENT_MS = 5_000;
 const explorer = await loadExplorer();
 const fixedPriceCycleConsumedFills = await loadFixedPriceCycle();
 // A strategy has at most one fixed-price opening order.  Reserve its refill
-// slot before Preview so an activity confirmation and a full snapshot cannot
+// slot before a refill Submit's Preview so activity confirmation and a full snapshot cannot
 // race each other into duplicate buy submissions.
 const fixedPriceReplenishmentGuard = new FixedPriceReplenishmentGuard();
 let replenishmentWritePriorityUntil = 0;
@@ -532,10 +538,16 @@ function requestLiquidityExit(payload: Json): void {
     .finally(() => evaluateExits());
 }
 
-async function evidence(key: string, method: string, path: string, payload: Json): Promise<void> {
+async function evidence(
+  key: string,
+  method: string,
+  path: string,
+  payload: Json,
+  preflight: OrderWritePreflight | "NOT_APPLICABLE",
+): Promise<void> {
   await mkdir(dirname(evidencePath), { recursive: true });
   await appendFile(evidencePath, `${JSON.stringify({
-    at: new Date().toISOString(), key, method, endpoint: path,
+    at: new Date().toISOString(), key, method, endpoint: path, preflight,
     payloadShape: { orderType: payload.orderType, price: payload.price, quantity: payload.quantity },
   })}\n`);
 }
@@ -566,10 +578,11 @@ function reportWorkingOrderPolicyViolations(): void {
 }
 
 async function waitForReplenishmentWriteWindow(priority: Priority, key: string): Promise<void> {
-  // Low-priority fixed-price refreshes may prepare and Preview in parallel,
-  // but must not take the one final broker write just as activity-driven REST
-  // reconciliation is about to reveal a fill.  Once a new refill is queued,
-  // retain a short window for its Preview to finish and enter the final gate.
+  // Low-priority fixed-price Replace tasks may complete local validation in
+  // parallel, but must not take the one final broker write just as
+  // activity-driven REST reconciliation is about to reveal a fill. Once a new
+  // refill is queued, retain a short window for its Submit Preview to finish
+  // and enter the final gate.
   if (priority < 2) return;
   const deferredAt = Date.now();
   while (!stopping && (activityRestRunning || Date.now() < replenishmentWritePriorityUntil)) await wait(25);
@@ -604,41 +617,77 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
   }
   await requireWeeklyReauthorization();
   policy.requireExecutionWindow();
-  const previewFingerprint = createHash("sha256")
-    .update(`${path}\0${JSON.stringify(payload)}`)
-    .digest("hex");
-  if (Date.now() < (previewRejectedUntil.get(previewFingerprint) ?? 0)) {
-    executionJournal.record("broker.preview.skipped", { key, reason: "cached-rejection", method, path, order: payloadAuditData(payload) });
-    throw new Error("CACHED_PREVIEW_REJECTED");
-  }
-  executionJournal.record("broker.preview.requested", { key, method, path, priority, order: payloadAuditData(payload) });
-  const preview = await api(
-    `/trader/v1/accounts/${accountHash}/previewOrder`,
-    { method: "POST", body: JSON.stringify(payload) },
-    priority,
-  );
-  if (!previewAccepted(preview.body)) {
-    const rejection = classifyPreviewRejection(preview.body);
-    previewRejectedUntil.set(previewFingerprint, Date.now() + rejection.cooldownMs);
-    const blockers = previewBlockers(preview.body);
-    const details = previewRejectionDetails(preview.body);
-    const detailSummary = previewRejectionSummary(details);
-    const insufficientFunds = method === "POST" && rejection.code === "INSUFFICIENT_FUNDS";
-    executionJournal.record("broker.preview.rejected", {
-      key, method, path, blockers, details, rejectionCode: rejection.code, cooldownMs: rejection.cooldownMs, insufficientFunds, order: payloadAuditData(payload),
+  const preflightDecision = orderWritePreflight(method, path, accountHash);
+  if (preflightDecision.violation) {
+    executionJournal.record("broker.write.blocked", {
+      key, method, path, code: preflightDecision.violation, order: payloadAuditData(payload),
     });
-    if (insufficientFunds) {
-      requestLiquidityExit(payload);
-      throw new Error(`SCHWAB_PREVIEW_INSUFFICIENT_FUNDS rejectionCode=${rejection.code} cooldownMs=${rejection.cooldownMs} details=${detailSummary}`);
-    }
-    throw new Error(`SCHWAB_PREVIEW_REJECTED rejectionCode=${rejection.code} cooldownMs=${rejection.cooldownMs} details=${detailSummary}`);
+    throw new Error(preflightDecision.violation);
   }
-  previewRejectedUntil.delete(previewFingerprint);
-  executionJournal.record("broker.preview.accepted", { key, method, path, order: payloadAuditData(payload) });
-  await evidence(key, method, path, payload);
+  const preflight = preflightDecision.preflight;
+  if (preflight === EXISTING_ORDER_REPLACE_NO_PREVIEW) {
+    const replaceOrderId = preflightDecision.replaceOrderId;
+    const source = orders.find((order) => orderId(order) === replaceOrderId);
+    const sourceViolation = replacementSourceViolation(source, payload);
+    if (sourceViolation) {
+      executionJournal.record("broker.write.blocked", {
+        key,
+        method,
+        path,
+        code: sourceViolation,
+        sourceOrderId: replaceOrderId,
+        sourceStatus: source?.status ?? null,
+        order: payloadAuditData(payload),
+      });
+      throw new Error(sourceViolation);
+    }
+    executionJournal.record("broker.preview.skipped", {
+      key,
+      reason: "existing-order-native-replace",
+      preflight,
+      method,
+      path,
+      sourceOrderId: replaceOrderId,
+      sourceStatus: source?.status,
+      order: payloadAuditData(payload),
+    });
+  } else {
+    const previewFingerprint = createHash("sha256")
+      .update(`${path}\0${JSON.stringify(payload)}`)
+      .digest("hex");
+    if (Date.now() < (previewRejectedUntil.get(previewFingerprint) ?? 0)) {
+      executionJournal.record("broker.preview.skipped", { key, reason: "cached-rejection", preflight, method, path, order: payloadAuditData(payload) });
+      throw new Error("CACHED_PREVIEW_REJECTED");
+    }
+    executionJournal.record("broker.preview.requested", { key, preflight, method, path, priority, order: payloadAuditData(payload) });
+    const preview = await api(
+      `/trader/v1/accounts/${accountHash}/previewOrder`,
+      { method: "POST", body: JSON.stringify(payload) },
+      priority,
+    );
+    if (!previewAccepted(preview.body)) {
+      const rejection = classifyPreviewRejection(preview.body);
+      previewRejectedUntil.set(previewFingerprint, Date.now() + rejection.cooldownMs);
+      const blockers = previewBlockers(preview.body);
+      const details = previewRejectionDetails(preview.body);
+      const detailSummary = previewRejectionSummary(details);
+      const insufficientFunds = rejection.code === "INSUFFICIENT_FUNDS";
+      executionJournal.record("broker.preview.rejected", {
+        key, preflight, method, path, blockers, details, rejectionCode: rejection.code, cooldownMs: rejection.cooldownMs, insufficientFunds, order: payloadAuditData(payload),
+      });
+      if (insufficientFunds) {
+        requestLiquidityExit(payload);
+        throw new Error(`SCHWAB_PREVIEW_INSUFFICIENT_FUNDS rejectionCode=${rejection.code} cooldownMs=${rejection.cooldownMs} details=${detailSummary}`);
+      }
+      throw new Error(`SCHWAB_PREVIEW_REJECTED rejectionCode=${rejection.code} cooldownMs=${rejection.cooldownMs} details=${detailSummary}`);
+    }
+    previewRejectedUntil.delete(previewFingerprint);
+    executionJournal.record("broker.preview.accepted", { key, preflight, method, path, order: payloadAuditData(payload) });
+  }
+  await evidence(key, method, path, payload, preflight);
   await waitForReplenishmentWriteWindow(priority, key);
   try {
-    executionJournal.record("broker.write.requested", { key, method, path, priority, order: payloadAuditData(payload) });
+    executionJournal.record("broker.write.requested", { key, preflight, method, path, priority, order: payloadAuditData(payload) });
     const result = await finalWriteGate.run(
       priority,
       async () => {
@@ -651,17 +700,17 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     const brokerOrderId = result.headers.get("location")?.split("/").at(-1);
     if (!brokerOrderId) {
       unknownWrites.add(key);
-      executionJournal.record("broker.write.unknown", { key, method, path, reason: "missing-location", order: payloadAuditData(payload) });
+      executionJournal.record("broker.write.unknown", { key, preflight, method, path, reason: "missing-location", order: payloadAuditData(payload) });
       throw new Error("SCHWAB_WRITE_ACCEPTED_WITHOUT_LOCATION");
     }
-    executionJournal.record("broker.write.accepted", { key, method, path, brokerOrderId, order: payloadAuditData(payload) });
+    executionJournal.record("broker.write.accepted", { key, preflight, method, path, brokerOrderId, order: payloadAuditData(payload) });
     return brokerOrderId;
   } catch (error) {
     if (String(error) === "Error: RUNTIME_STOPPING") {
       executionJournal.record("broker.write.skipped", { key, reason: "runtime-stopping-before-final-write", method, path, order: payloadAuditData(payload) });
     } else {
       unknownWrites.add(key);
-      executionJournal.record("broker.write.unknown", { key, method, path, error: String(error), order: payloadAuditData(payload) });
+      executionJournal.record("broker.write.unknown", { key, preflight, method, path, error: String(error), order: payloadAuditData(payload) });
     }
     throw error;
   }
@@ -686,7 +735,7 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
   await requireWeeklyReauthorization();
   policy.requireExecutionWindow();
   const path = `/trader/v1/accounts/${accountHash}/orders/${orderIdValue}`;
-  await evidence(key, "DELETE", path, {});
+  await evidence(key, "DELETE", path, {}, "NOT_APPLICABLE");
   try {
     executionJournal.record("broker.cancel.requested", { key, orderId: orderIdValue, path });
     await finalWriteGate.run(priority, async () => {
@@ -1926,9 +1975,9 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
       run: async () => {
         const liveSell = orders.find((order) => orderId(order) === id);
         if (!liveSell || !working.has(String(liveSell.status))) return;
-        // Revalidate with the shared account-level snapshot immediately
-        // before Preview.  The queue can wait behind unrelated writes, so the
-        // quantity decided by the worker is not safe to reuse here.
+        // Revalidate with the shared account-level snapshot immediately before
+        // the final Replace. The queue can wait behind unrelated writes, so
+        // the quantity decided by the worker is not safe to reuse here.
         const currentInventory = await refreshExitInventory(strategy, template, "before-sell-refresh");
         const currentTarget = currentExitTarget(strategy, currentInventory, Date.now()).targetQuantity;
         if (currentTarget <= 0) {
