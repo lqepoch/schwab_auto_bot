@@ -116,6 +116,8 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 
 所有自动写入在发送请求前都执行固定订单策略校验：买单必须是配置标的的 0DTE 双腿垂直价差，价格仅允许 0.82–0.92，数量必须为 1；卖单也必须是 0DTE、数量为 1，价格固定为 0.99。完整订单快照发现仍在工作的违规买/卖单时，程序只会发出 `POLICY_ALERT`，写入终端日志及 `.state/policy-alerts.jsonl`，不会静默撤销外部订单。任何不符合规则的自动 Preview、Submit 或 Replace 都会在发送 Schwab 请求前被拒绝；Replace 还必须在当前快照中找到同一策略身份的工作源订单。
 
+已有垂直期权订单只有两腿行权价差精确为 1 时才参加 fixed-price、价格探索和卖单维护的刷新。其他宽度的工作订单从 Schwab 快照取得后不会报错、Replace 或进行刷新式取消重建；程序只为每个订单记录一次 `order.refresh-skipped`，并输出例如 `跳过刷新 SPY 745/747 Put order=12345 差价=2 要求=1`。该筛选不是订单违规告警，也不会修改外部订单。库存归零或重复卖单等独立清理策略不属于刷新，仍按原有规则执行。
+
 ### 净价探索与收敛
 
 买单不再保留固定 `0.90` 锚单。每个 0DTE 垂直组合独立维护逻辑订单、订单版本和代际，并把状态保存到 `.state/net-price-explorer.json`；原生 Replace 产生的新 broker order ID 不会改变逻辑订单年龄。
@@ -159,7 +161,7 @@ While an `ACCT_ACTIVITY` wake-up is awaiting its REST fill confirmation, and for
 
 每次启动都会创建独立、追加写入的 JSONL 审计文件：`.state/executions/<UTC日期>/<runId>.jsonl`。每行均包含 UTC 时间、`runId`、事件类型和结构化数据；不会写入 token 或账户 hash。若 Schwab Preview 拒绝，`broker.preview.rejected` 会保留 Schwab 返回的规则名、说明、活动说明及严重级别等允许字段；文本会归一化、截断，并脱敏长数字、token 和授权值，绝不记录完整 Preview 响应。Replace 会记录 `broker.preview.skipped`，原因为 `existing-order-native-replace`，并在发送证据和最终写入事件中标记 `preflight=EXISTING_ORDER_REPLACE_NO_PREVIEW`。日志覆盖订单首次发现及状态/成交数量变化、Schwab 的成交时间、订单腿与价格、Submit Preview、Replace 跳过 Preview 的依据、最终 Submit/Replace/Cancel、未知写入结果、探索器成交分桶、代际触发、已排队的下一步动作、动作执行/跳过原因，以及运行启动、控制停止和退出。
 
-终端默认只显示启动/停止、安全告警、失败及业务动作；固定价成功换单显示为 `2026-07-29 22:40:04 刷新 SPY 745/746 Put Replace 0.90`。`ACCT_ACTIVITY` 唤醒、完整订单快照和零成交确认属于内部诊断，继续写入 JSONL 审计文件但不输出到终端。禁卖单模式不会维护 `.state/exit-templates.json`。
+终端默认只显示启动/停止、安全告警、失败及业务动作；固定价成功换单显示为 `2026-07-29 22:40:04 刷新 SPY 745/746 Put Replace 0.90`。如果 Schwab 响应实际包含 `X-RateLimit-*`、`RateLimit-*` 或 `X-Rate-Limit-*` Header，所有后续控制台消息都会在末尾追加最近一次响应的 `限速 remaining/limit`，例如 `刷新 SPY 745/746 Put Replace 0.90 限速 87/120`；只有 limit 时显示 `限速 limit`。Schwab 没有公开保证这些 Header 一定存在，因此 Header 缺失或格式无效时不显示限速，也不会用本地 108 RPM 配额冒充 broker 当前值。控制台事件会把同一份已解析值写入 `brokerRateLimit` 字段。`ACCT_ACTIVITY` 唤醒、完整订单快照和零成交确认属于内部诊断，继续写入 JSONL 审计文件但不输出到终端。禁卖单模式不会维护 `.state/exit-templates.json`。
 
 当前运行实例及其日志路径记录在 `.state/runtime/active-run.json`。查看当前实例和实时分析日志：
 

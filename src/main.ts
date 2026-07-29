@@ -19,7 +19,11 @@ import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer, fixedPric
 import { RefreshRoundLimit } from "./refresh_round_limit.ts";
 import { classifyPreviewRejection, previewRejectionCooldownFromError, previewRejectionDetails, previewRejectionSummary } from "./preview_rejection.ts";
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
-import { formatFixedPriceRebuy, formatFixedPriceReplace } from "./business_log.ts";
+import {
+  formatFixedPriceRebuy,
+  formatFixedPriceReplace,
+  formatRefreshSpreadSkipped,
+} from "./business_log.ts";
 import { FixedPriceRefreshRoundGuard } from "./fixed_price_round_guard.ts";
 import { refreshAuthoritativeSnapshots } from "./refresh_preflight.ts";
 import {
@@ -28,6 +32,17 @@ import {
   replacementSourceViolation,
   type OrderWritePreflight,
 } from "./order_write_preflight.ts";
+import {
+  appendBrokerRateLimit,
+  brokerRateLimitFromHeaders,
+  type BrokerRateLimit,
+} from "./broker_rate_limit.ts";
+import {
+  RefreshSpreadSkipTracker,
+  REQUIRED_REFRESH_SPREAD_WIDTH,
+  isRefreshSpreadEligible,
+  refreshSpreadWidth,
+} from "./refresh_order_policy.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -56,13 +71,18 @@ const policy = parseRuntimePolicy(process.argv);
 const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId);
 process.once("exit", () => runtimeLock.release());
 let sellOrderAutomationDisabledRecorded = false;
+let latestBrokerRateLimit: BrokerRateLimit | null = null;
 
 function stamp(message: string): void {
   const value = new Intl.DateTimeFormat("sv-SE", {
     timeZone: "Asia/Singapore", dateStyle: "short", timeStyle: "medium", hour12: false,
   }).format(new Date());
-  process.stderr.write(`${value} ${message}\n`);
-  executionJournal.record("console", { message });
+  const renderedMessage = appendBrokerRateLimit(message, latestBrokerRateLimit);
+  process.stderr.write(`${value} ${renderedMessage}\n`);
+  executionJournal.record("console", {
+    message: renderedMessage,
+    brokerRateLimit: latestBrokerRateLimit,
+  });
 }
 
 function recordSellOrderAutomationDisabled(): void {
@@ -226,9 +246,12 @@ async function api(
   await budget.admit(priority);
   const token = await tokens.get();
   try {
-    return await client.request<any>(path, init, token);
+    const response = await client.request<any>(path, init, token);
+    latestBrokerRateLimit = brokerRateLimitFromHeaders(response.headers);
+    return response;
   } catch (error) {
     if (error instanceof SchwabApiError) {
+      latestBrokerRateLimit = brokerRateLimitFromHeaders(error.headers);
       if (error.status === 429) budget.rateLimited(error.headers["retry-after"] ?? null);
       if (error.status === 401) void tokens.get(true);
       throw new Error(`SCHWAB_HTTP_${error.status}`);
@@ -295,6 +318,7 @@ const fixedPriceRefreshPacer = new FixedPriceRefreshPacer();
 const refreshRoundLimit = new RefreshRoundLimit(policy.maxRefreshRounds);
 const fixedPriceRefreshRoundGuard = new FixedPriceRefreshRoundGuard();
 const observedOrderStates = new Map<string, { status: string; filledQuantity: number; price: string; closeTime: string | null }>();
+const refreshSpreadSkipTracker = new RefreshSpreadSkipTracker();
 const deferredExplorerRetries = new Map<string, { attempts: number; nextAt: number }>();
 const EXPLORER_FUNDING_RETRY_MS = LIQUIDITY_EXIT_DELAY_MS + LIQUIDITY_EXIT_REFRESH_MS * LIQUIDITY_EXIT_REFRESH_ROUNDS;
 
@@ -577,6 +601,39 @@ function reportWorkingOrderPolicyViolations(): void {
   }
 }
 
+function recordRefreshSpreadSkip(order: Json, source: string): boolean {
+  const meta = info(order);
+  if (!meta || isRefreshSpreadEligible(meta)) return false;
+  const id = orderId(order);
+  const width = refreshSpreadWidth(meta);
+  if (refreshSpreadSkipTracker.shouldReport(id, meta)) {
+    executionJournal.record("order.refresh-skipped", {
+      source,
+      reason: "spread-width-not-one",
+      requiredSpreadWidth: REQUIRED_REFRESH_SPREAD_WIDTH,
+      actualSpreadWidth: width,
+      ...orderAuditData(order),
+    });
+    stamp(formatRefreshSpreadSkipped(meta, id, width));
+  }
+  return true;
+}
+
+function reportWorkingRefreshSpreadSkips(): void {
+  const today = newYorkDate();
+  for (const order of orders) {
+    const meta = info(order);
+    if (
+      !working.has(String(order.status))
+      || !meta
+      || meta.expiration !== today
+      || !policy.underlyings.has(meta.underlying)
+      || !policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
+    ) continue;
+    recordRefreshSpreadSkip(order, "order-snapshot");
+  }
+}
+
 async function waitForReplenishmentWriteWindow(priority: Priority, key: string): Promise<void> {
   // Low-priority fixed-price Replace tasks may complete local validation in
   // parallel, but must not take the one final broker write just as
@@ -821,6 +878,7 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
       recordOrderTransitions("full", orders);
       lastFullOrderPollAt = Date.now();
       reportWorkingOrderPolicyViolations();
+      reportWorkingRefreshSpreadSkips();
       if (!readOnly && policy.isExecutionWindowOpen()) detectExplorerFills();
       reconcileExplorerSnapshot();
       executionJournal.record("orders.snapshot.synced", { scope: "full", orders: orders.length });
@@ -902,6 +960,7 @@ function managedOpening(order: Json): Json | null {
   if (
     !meta?.opening || meta.expiration !== newYorkDate() || !policy.underlyings.has(meta.underlying)
     || !policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
+    || !isRefreshSpreadEligible(meta)
     || quantity(order) !== 1 || orderPolicyViolation(order, policy, newYorkDate())
   ) return null;
   return meta;
@@ -1046,6 +1105,7 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
 
 function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template: Json): void {
   if (policy.disableSellOrders) return;
+  if (recordRefreshSpreadSkip(source, "stale-exit-recreate")) return;
   const id = orderId(source);
   if (staleExitRecreateInFlight.has(id)) return;
   if (!mayRecreateStaleOrder(eventTime(source), Date.now(), staleExitRetryAt.get(id) ?? 0)) return;
@@ -1171,6 +1231,10 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
   const desiredPrice = action.priceCents === undefined ? logical.priceCents : explorer.setPrice(groupKey, logical.id, action.priceCents);
   const current = logical.brokerOrderId === null ? null : orders.find((order) => orderId(order) === logical.brokerOrderId && working.has(String(order.status)));
   if (current) {
+    if (recordRefreshSpreadSkip(current, "price-explorer")) {
+      complete();
+      return;
+    }
     if (action.kind === "ensure" && Math.round(Number(current.price) * 100) === desiredPrice) {
       executionJournal.record("explorer.action.noop", { groupKey, action, reason: "working-price-already-matches", order: orderAuditData(current) });
       complete();
@@ -1948,6 +2012,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
   const liquidityRefreshDue = liquidity !== undefined
     && liquidityReady && liquidity.remainingRefreshes > 0 && now >= liquidity.nextAt;
   if (sell) {
+    if (recordRefreshSpreadSkip(sell, "sell-refresh")) return;
     const id = orderId(sell);
     const due = sellDue.get(id) ?? 0;
     const needsReplace = exitRefreshNeeded(
