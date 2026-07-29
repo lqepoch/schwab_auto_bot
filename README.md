@@ -116,6 +116,8 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 
 所有自动写入在发送请求前都执行固定订单策略校验：买单必须是配置标的的 0DTE 双腿垂直价差，价格仅允许 0.82–0.92，数量必须为 1；卖单也必须是 0DTE、数量为 1，价格固定为 0.99。完整订单快照发现仍在工作的违规买/卖单时，程序只会发出 `POLICY_ALERT`，写入终端日志及 `.state/policy-alerts.jsonl`，不会静默撤销外部订单。任何不符合规则的自动 Preview、Submit 或 Replace 都会在发送 Schwab 请求前被拒绝；Replace 还必须在当前快照中找到同一策略身份的工作源订单。
 
+已有垂直期权订单只有两腿行权价差精确为 1 时才参加 fixed-price、价格探索和卖单维护的刷新。其他宽度的工作订单从 Schwab 快照取得后不会报错、Replace 或进行刷新式取消重建；程序只为每个订单记录一次 `order.refresh-skipped`，并输出例如 `跳过刷新 SPY 745/747 Put order=12345 差价=2 要求=1`。该筛选不是订单违规告警，也不会修改外部订单。库存归零或重复卖单等独立清理策略不属于刷新，仍按原有规则执行。
+
 ### 净价探索与收敛
 
 买单不再保留固定 `0.90` 锚单。每个 0DTE 垂直组合独立维护逻辑订单、订单版本和代际，并把状态保存到 `.state/net-price-explorer.json`；原生 Replace 产生的新 broker order ID 不会改变逻辑订单年龄。
