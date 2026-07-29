@@ -17,7 +17,7 @@ import { acquireRuntimeLock } from "./runtime_lock.ts";
 import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
 import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
 import { RefreshRoundLimit } from "./refresh_round_limit.ts";
-import { classifyPreviewRejection, previewRejectionCooldownFromError } from "./preview_rejection.ts";
+import { classifyPreviewRejection, previewRejectionCooldownFromError, previewRejectionDetails, previewRejectionSummary } from "./preview_rejection.ts";
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
 import { formatFixedPriceRebuy, formatFixedPriceReplace } from "./business_log.ts";
 import { FixedPriceRefreshRoundGuard } from "./fixed_price_round_guard.ts";
@@ -623,15 +623,17 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     const rejection = classifyPreviewRejection(preview.body);
     previewRejectedUntil.set(previewFingerprint, Date.now() + rejection.cooldownMs);
     const blockers = previewBlockers(preview.body);
+    const details = previewRejectionDetails(preview.body);
+    const detailSummary = previewRejectionSummary(details);
     const insufficientFunds = method === "POST" && rejection.code === "INSUFFICIENT_FUNDS";
     executionJournal.record("broker.preview.rejected", {
-      key, method, path, blockers, rejectionCode: rejection.code, cooldownMs: rejection.cooldownMs, insufficientFunds, order: payloadAuditData(payload),
+      key, method, path, blockers, details, rejectionCode: rejection.code, cooldownMs: rejection.cooldownMs, insufficientFunds, order: payloadAuditData(payload),
     });
     if (insufficientFunds) {
       requestLiquidityExit(payload);
-      throw new Error(`SCHWAB_PREVIEW_INSUFFICIENT_FUNDS rejectionCode=${rejection.code} cooldownMs=${rejection.cooldownMs} blockers=${blockers}`);
+      throw new Error(`SCHWAB_PREVIEW_INSUFFICIENT_FUNDS rejectionCode=${rejection.code} cooldownMs=${rejection.cooldownMs} details=${detailSummary}`);
     }
-    throw new Error(`SCHWAB_PREVIEW_REJECTED rejectionCode=${rejection.code} cooldownMs=${rejection.cooldownMs} blockers=${blockers}`);
+    throw new Error(`SCHWAB_PREVIEW_REJECTED rejectionCode=${rejection.code} cooldownMs=${rejection.cooldownMs} details=${detailSummary}`);
   }
   previewRejectedUntil.delete(previewFingerprint);
   executionJournal.record("broker.preview.accepted", { key, method, path, order: payloadAuditData(payload) });
