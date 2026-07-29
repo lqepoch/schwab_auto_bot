@@ -19,6 +19,7 @@ import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer, fixedPric
 import { RefreshRoundLimit } from "./refresh_round_limit.ts";
 import { classifyPreviewRejection, previewRejectionCooldownFromError } from "./preview_rejection.ts";
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
+import { formatFixedPriceRebuy, formatFixedPriceReplace } from "./business_log.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -771,13 +772,13 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
       reportWorkingOrderPolicyViolations();
       if (!readOnly && policy.isExecutionWindowOpen()) detectExplorerFills();
       reconcileExplorerSnapshot();
-      stamp(`完整当前订单同步 orders=${orders.length}`);
+      executionJournal.record("orders.snapshot.synced", { scope: "full", orders: orders.length });
     } else {
       const merged = new Map(orders.map((order) => [orderId(order), order]));
       for (const order of incoming) merged.set(orderId(order), order);
       orders = [...merged.values()];
       recordOrderTransitions("fills", incoming);
-      stamp(`轻量成交同步 fills=${incoming.length}`);
+      executionJournal.record("orders.snapshot.synced", { scope: "fills", fills: incoming.length });
     }
     if (!readOnly) {
       trackInventoryFillDeltas();
@@ -801,7 +802,7 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
 function handleAccountActivity(batch: ActivityBatch): void {
   // Stream payloads are hints only. The REST order snapshot remains the sole
   // authority for fills, terminal state, and any later broker write.
-  stamp(`ACCT_ACTIVITY signal received hints=${batch.hints.length} complete=${batch.complete}; scheduling priority REST reconciliation`);
+  executionJournal.record("activity.signal.received", { hints: batch.hints.length, complete: batch.complete });
   scheduleActivityRestConfirmation();
 }
 
@@ -832,7 +833,6 @@ async function runActivityRestConfirmation(): Promise<void> {
     // Record the attempt before I/O.  Otherwise a transient REST failure can
     // immediately re-arm every stream message and consume the entire quota.
     lastActivityRestAt = Date.now();
-    stamp(`ACCT_ACTIVITY信息不足；${ACTIVITY_REST_DEBOUNCE_MS}ms合并后优先确认成交，连续无明细事件限速为${ACTIVITY_REST_MIN_INTERVAL_MS}ms`);
     executionJournal.record("activity.rest-confirmation-started", {
       confirmingThrough: new Date(confirmingThrough).toISOString(),
       debounceMs: ACTIVITY_REST_DEBOUNCE_MS,
@@ -984,7 +984,7 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
         2,
       );
       applyLocalReplace(id, payload, replacement);
-      stamp(`FIXED_PRICE_CYCLE_REPLACE sourceOrder=${id} price=${Number(latest.price).toFixed(2)} replacement=${replacement}`);
+      stamp(formatFixedPriceReplace(managedOpening(latest)!, Number(latest.price)));
       executionJournal.record("fixed-price-cycle.order-replaced", {
         sourceOrder: orderAuditData(latest), replacementOrderId: replacement, order: payloadAuditData(payload),
       });
@@ -1281,7 +1281,10 @@ function queueFixedPriceReplenishment(groupKey: string, filledOrder: Json, price
         fixedPriceReplenishmentGuard.clearDeferred(filledOrderId);
         persistFixedPriceCycle();
         const queueDelayMs = Date.now() - queuedAt;
-        stamp(`FIXED_PRICE_CYCLE_REBUY group=${groupKey} sourceOrder=${filledOrderId} price=${(priceCents / 100).toFixed(2)} order=${brokerOrderId} queueDelayMs=${queueDelayMs}`);
+        const filledMeta = info(filledOrder);
+        stamp(filledMeta
+          ? formatFixedPriceRebuy(filledMeta, priceCents / 100)
+          : `补买 ${groupKey} ${(priceCents / 100).toFixed(2)}`);
         executionJournal.record("fixed-price-cycle.rebuy-submitted", { groupKey, filledOrderId, priceCents, brokerOrderId, queueDelayMs, order: payloadAuditData(payload) });
       } catch (error) {
         const message = String(error);
