@@ -1325,7 +1325,13 @@ async function explorerRoundLoop(): Promise<void> {
   while (!stopping && !readOnly) {
     if (!refreshRoundLimit.mayStartRound()) return;
     if (policy.repeatBuyAtOrderPrice) {
-      if (await fixedPriceRefreshRound()) recordRefreshRoundCompleted("fixed-price");
+      if (await fixedPriceRefreshRound()) {
+        const state = recordRefreshRoundCompleted("fixed-price");
+        if (state.maximumReached) {
+          await finishRefreshLimitedRun(state);
+          return;
+        }
+      }
       continue;
     }
     if (!policy.isExecutionWindowOpen()) {
@@ -1351,17 +1357,33 @@ async function explorerRoundLoop(): Promise<void> {
       queueExplorerActions(groupKey, actions);
       if (actions.length > 0) await wait(policy.orderCooldownMs);
     }
-    recordRefreshRoundCompleted("price-explorer");
+    const state = recordRefreshRoundCompleted("price-explorer");
+    if (state.maximumReached) {
+      await finishRefreshLimitedRun(state);
+      return;
+    }
     await wait(policy.roundCooldownMs);
   }
 }
 
-function recordRefreshRoundCompleted(mode: "fixed-price" | "price-explorer"): void {
+function recordRefreshRoundCompleted(mode: "fixed-price" | "price-explorer") {
   const state = refreshRoundLimit.completeRound();
   executionJournal.record("refresh.round.completed", { mode, ...state });
-  if (!state.maximumReached) return;
-  executionJournal.record("refresh.round-limit-reached", { mode, ...state });
-  stamp(`REFRESH_ROUND_LIMIT_REACHED completed=${state.completedRounds} maximum=${state.maximumRounds}; ordinary refreshes are stopped while reconciliation and fill recovery remain active`);
+  if (state.maximumReached) {
+    executionJournal.record("refresh.round-limit-reached", { mode, ...state });
+    stamp(`REFRESH_ROUND_LIMIT_REACHED completed=${state.completedRounds} maximum=${state.maximumRounds}; waiting for queued refresh work before controlled shutdown`);
+  }
+  return state;
+}
+
+async function finishRefreshLimitedRun(state: ReturnType<typeof refreshRoundLimit.completeRound>): Promise<void> {
+  executionJournal.record("run.refresh-round-limit-draining", state);
+  await writer.waitIdle();
+  if (stopping) return;
+  stopReason = "max-refresh-rounds";
+  stopping = true;
+  executionJournal.record("run.refresh-round-limit-completed", state);
+  stamp(`REFRESH_ROUND_LIMIT_COMPLETED completed=${state.completedRounds}; queued refresh work is settled and the runtime is stopping`);
 }
 
 async function fixedPriceRefreshRound(): Promise<boolean> {
