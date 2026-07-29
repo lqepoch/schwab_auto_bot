@@ -16,6 +16,7 @@ export type RuntimePolicy = {
   orderCooldownMs: number;
   roundCooldownMs: number;
   fixedPriceRefreshIntervalMs: number;
+  maxRefreshRounds: number | null;
   repeatBuyAtOrderPrice: boolean;
   disableSellOrders: boolean;
   isWithinStrikeRange: (underlying: string, lowerStrike: number, higherStrike: number) => boolean;
@@ -50,6 +51,10 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
     option(argv, "--fixed-price-refresh-interval-seconds") ?? "2",
     "FIXED_PRICE_REFRESH_INTERVAL_INVALID",
   );
+  const maxRefreshRounds = parseOptionalPositiveInteger(
+    option(argv, "--max-refresh-rounds"),
+    "MAX_REFRESH_ROUNDS_INVALID",
+  );
   const repeatBuyAtOrderPrice = argv.includes("--repeat-buy-at-order-price");
   const disableSellOrders = argv.includes("--disable-sell-orders");
 
@@ -78,6 +83,7 @@ export function parseRuntimePolicy(argv: readonly string[]): RuntimePolicy {
     orderCooldownMs,
     roundCooldownMs,
     fixedPriceRefreshIntervalMs,
+    maxRefreshRounds,
     repeatBuyAtOrderPrice,
     disableSellOrders,
     isWithinStrikeRange,
@@ -160,6 +166,14 @@ function parsePositiveSeconds(raw: string, code: string): number {
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) throw new Error(code);
   return value * 1_000;
+}
+
+function parseOptionalPositiveInteger(raw: string | undefined, code: string): number | null {
+  if (raw === undefined) return null;
+  if (!/^\d+$/.test(raw)) throw new Error(code);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(code);
+  return value;
 }
 
 function minutes(value: string): number {

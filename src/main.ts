@@ -16,6 +16,7 @@ import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, 
 import { acquireRuntimeLock } from "./runtime_lock.ts";
 import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./fixed_price_cycle.ts";
 import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./refresh_pacer.ts";
+import { RefreshRoundLimit } from "./refresh_round_limit.ts";
 import { classifyPreviewRejection, previewRejectionCooldownFromError } from "./preview_rejection.ts";
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
 
@@ -285,6 +286,7 @@ let fixedPriceCycleSavePending = Promise.resolve();
 let exitTemplateSavePending = Promise.resolve();
 const normalExplorerActionPacer = new ExplorerActionPacer();
 const fixedPriceRefreshPacer = new FixedPriceRefreshPacer();
+const refreshRoundLimit = new RefreshRoundLimit(policy.maxRefreshRounds);
 const observedOrderStates = new Map<string, { status: string; filledQuantity: number; price: string; closeTime: string | null }>();
 const deferredExplorerRetries = new Map<string, { attempts: number; nextAt: number }>();
 const EXPLORER_FUNDING_RETRY_MS = LIQUIDITY_EXIT_DELAY_MS + LIQUIDITY_EXIT_REFRESH_MS * LIQUIDITY_EXIT_REFRESH_ROUNDS;
@@ -1321,8 +1323,9 @@ function shuffled<T>(values: readonly T[]): T[] {
 
 async function explorerRoundLoop(): Promise<void> {
   while (!stopping && !readOnly) {
+    if (!refreshRoundLimit.mayStartRound()) return;
     if (policy.repeatBuyAtOrderPrice) {
-      await fixedPriceRefreshRound();
+      if (await fixedPriceRefreshRound()) recordRefreshRoundCompleted("fixed-price");
       continue;
     }
     if (!policy.isExecutionWindowOpen()) {
@@ -1348,21 +1351,30 @@ async function explorerRoundLoop(): Promise<void> {
       queueExplorerActions(groupKey, actions);
       if (actions.length > 0) await wait(policy.orderCooldownMs);
     }
+    recordRefreshRoundCompleted("price-explorer");
     await wait(policy.roundCooldownMs);
   }
 }
 
-async function fixedPriceRefreshRound(): Promise<void> {
+function recordRefreshRoundCompleted(mode: "fixed-price" | "price-explorer"): void {
+  const state = refreshRoundLimit.completeRound();
+  executionJournal.record("refresh.round.completed", { mode, ...state });
+  if (!state.maximumReached) return;
+  executionJournal.record("refresh.round-limit-reached", { mode, ...state });
+  stamp(`REFRESH_ROUND_LIMIT_REACHED completed=${state.completedRounds} maximum=${state.maximumRounds}; ordinary refreshes are stopped while reconciliation and fill recovery remain active`);
+}
+
+async function fixedPriceRefreshRound(): Promise<boolean> {
   fixedPriceRefreshRoundActive = true;
   try {
   if (!policy.isExecutionWindowOpen()) {
     await wait(60_000);
-    return;
+    return false;
   }
   while (polling && !stopping) await wait(50);
   if (stopping || !await poll(true, 0)) {
     await wait(policy.roundCooldownMs);
-    return;
+    return false;
   }
   const candidates = shuffled(orders.filter((order) => {
     const meta = managedOpening(order);
@@ -1376,6 +1388,7 @@ async function fixedPriceRefreshRound(): Promise<void> {
     queueFixedPriceRefresh(candidate, "round-start");
   }
   await wait(policy.roundCooldownMs);
+  return true;
   } finally {
     fixedPriceRefreshRoundActive = false;
   }
@@ -2119,6 +2132,7 @@ executionJournal.record("run.started", {
   strikeRanges: Object.fromEntries(policy.strikeRanges),
   executionWindow: `${policy.executionStart}-${policy.executionEnd}`,
   fixedPriceRefreshIntervalMs: policy.fixedPriceRefreshIntervalMs,
+  maxRefreshRounds: policy.maxRefreshRounds,
   repeatBuyAtOrderPrice: policy.repeatBuyAtOrderPrice,
   disableSellOrders: policy.disableSellOrders,
   buildId: process.env.SCHWAB_BOT_BUILD_ID ?? null,
@@ -2126,7 +2140,7 @@ executionJournal.record("run.started", {
 const strikeRangesSummary = [...policy.strikeRanges.entries()]
   .flatMap(([underlying, ranges]) => ranges.map((range) => `${underlying}:${range.minimum}:${range.maximum}`))
   .join(",");
-stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} refreshStrikeRanges=${strikeRangesSummary} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms fixedPriceRefreshInterval=${policy.fixedPriceRefreshIntervalMs}ms roundCooldown=${policy.roundCooldownMs}ms`);
+stamp(readOnly ? "Node 直连 Schwab 只读启动" : `Node 直连 Schwab 启动 underlyings=${[...policy.underlyings].join(",")} refreshStrikeRanges=${strikeRangesSummary} executionWindow=${policy.executionStart}-${policy.executionEnd} ET orderCooldown=${policy.orderCooldownMs}ms fixedPriceRefreshInterval=${policy.fixedPriceRefreshIntervalMs}ms maxRefreshRounds=${policy.maxRefreshRounds ?? "unlimited"} roundCooldown=${policy.roundCooldownMs}ms`);
 if (!readOnly) stamp(policy.repeatBuyAtOrderPrice
   ? "FIXED_PRICE_CYCLE_ENABLED source=orderLimit; price exploration is disabled; one working opening order per strategy is maintained and refreshed at its existing price"
   : "PRICE_EXPLORER_FILL_PRICE_SOURCE source=actualNet");
