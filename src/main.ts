@@ -20,6 +20,7 @@ import { RefreshRoundLimit } from "./refresh_round_limit.ts";
 import { classifyPreviewRejection, previewRejectionCooldownFromError } from "./preview_rejection.ts";
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
 import { formatFixedPriceRebuy, formatFixedPriceReplace } from "./business_log.ts";
+import { FixedPriceRefreshRoundGuard } from "./fixed_price_round_guard.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -34,7 +35,7 @@ const runId = randomUUID();
 const runtimeStartedAt = Date.now();
 const PREVIEW_REJECTION_COOLDOWN_MS = 30_000;
 const executionJournal = new ExecutionJournal(root, runId, (error) => {
-  process.stderr.write(`${new Date().toISOString()} [node-vertical] EXECUTION_JOURNAL_WRITE_FAILED error=${String(error)}\n`);
+  process.stderr.write(`${new Date().toISOString()} EXECUTION_JOURNAL_WRITE_FAILED error=${String(error)}\n`);
 });
 const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
 const readOnly = process.argv.includes("--read-only");
@@ -53,7 +54,7 @@ function stamp(message: string): void {
   const value = new Intl.DateTimeFormat("sv-SE", {
     timeZone: "Asia/Singapore", dateStyle: "short", timeStyle: "medium", hour12: false,
   }).format(new Date());
-  process.stderr.write(`${value} [node-vertical] ${message}\n`);
+  process.stderr.write(`${value} ${message}\n`);
   executionJournal.record("console", { message });
 }
 
@@ -288,6 +289,7 @@ let exitTemplateSavePending = Promise.resolve();
 const normalExplorerActionPacer = new ExplorerActionPacer();
 const fixedPriceRefreshPacer = new FixedPriceRefreshPacer();
 const refreshRoundLimit = new RefreshRoundLimit(policy.maxRefreshRounds);
+const fixedPriceRefreshRoundGuard = new FixedPriceRefreshRoundGuard();
 const observedOrderStates = new Map<string, { status: string; filledQuantity: number; price: string; closeTime: string | null }>();
 const deferredExplorerRetries = new Map<string, { attempts: number; nextAt: number }>();
 const EXPLORER_FUNDING_RETRY_MS = LIQUIDITY_EXIT_DELAY_MS + LIQUIDITY_EXIT_REFRESH_MS * LIQUIDITY_EXIT_REFRESH_ROUNDS;
@@ -857,10 +859,10 @@ function managedOpening(order: Json): Json | null {
 }
 
 function rememberExitTemplate(strategy: string, order: Json): void {
+  if (readOnly || policy.disableSellOrders) return;
   const current = exitTemplatesByStrategy.get(strategy);
   if (current && orderId(current) === orderId(order)) return;
   exitTemplatesByStrategy.set(strategy, structuredClone(order));
-  if (readOnly) return;
   exitTemplateSavePending = exitTemplateSavePending.then(async () => {
     await mkdir(dirname(exitTemplateStatePath), { recursive: true });
     const temporary = `${exitTemplateStatePath}.${process.pid}.${randomUUID()}.tmp`;
@@ -955,6 +957,7 @@ function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-o
     !meta || !working.has(String(candidate.status))
     || orderId(activeOpeningOrders(meta.key)[0] ?? {}) !== id
   ) return;
+  if (fixedPriceRefreshRoundActive && !fixedPriceRefreshRoundGuard.reserveStrategy(meta.key)) return;
   writer.enqueue({
     key: `fixed-price-cycle-refresh:${id}`,
     priority: 2,
@@ -1390,6 +1393,7 @@ async function finishRefreshLimitedRun(state: ReturnType<typeof refreshRoundLimi
 }
 
 async function fixedPriceRefreshRound(): Promise<boolean> {
+  fixedPriceRefreshRoundGuard.beginRound();
   fixedPriceRefreshRoundActive = true;
   try {
   if (!policy.isExecutionWindowOpen()) {
@@ -1412,10 +1416,13 @@ async function fixedPriceRefreshRound(): Promise<boolean> {
     if (stopping) break;
     queueFixedPriceRefresh(candidate, "round-start");
   }
+  await writer.waitIdle();
+  if (stopping) return false;
   await wait(policy.roundCooldownMs);
   return true;
   } finally {
     fixedPriceRefreshRoundActive = false;
+    fixedPriceRefreshRoundGuard.endRound();
   }
 }
 

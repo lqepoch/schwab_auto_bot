@@ -112,7 +112,7 @@ node .\src\main.ts --confirm-live I_UNDERSTAND `
 
 `--execution-start` 与 `--execution-end` 默认分别为 `09:15` 和 `15:45`（纽约时间）；只在需要变更执行窗口时传入，例如 `--execution-start 09:30 --execution-end 15:30`。
 
-整体刷新每轮完成后默认间隔 5 秒。fixed-price 模式的每个候选订单在进入 Preview/Replace 链路前，默认至少间隔 2 秒；可用 `--fixed-price-refresh-interval-seconds <秒数>` 覆盖。例如传入 `--fixed-price-refresh-interval-seconds 3` 时，每个候选订单的刷新起始间隔至少为 3 秒。最近 60 秒的已准入 API 调用量达到压力阈值时，配额控制仍会把间隔从 0.7 秒逐步提高到 1.2 秒，因此实际间隔始终取 CLI 值与配额间隔中的较大者。可选 `--max-refresh-rounds <正整数>` 限制普通刷新轮次；省略时无限刷新，传入 `3` 时第三个成功完成调度的刷新轮结束后不再启动下一轮。到达上限后，程序先等待已经进入串行队列的刷新操作完成，再以 `max-refresh-rounds` 原因受控退出；不会强制中断在途 broker 写入。108 RPM 准入、Preview、最终写入串行化和卖单优先级仍是不可绕过的硬边界。每一轮开始都会读取一次完整订单列表；该快照同时供本轮所有候选筛选与原生 Replace 使用，不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用这份完整快照，避免同轮重复读取。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
+整体刷新每轮完成后默认间隔 5 秒。fixed-price 模式的每个候选订单在进入 Preview/Replace 链路前，默认至少间隔 2 秒；可用 `--fixed-price-refresh-interval-seconds <秒数>` 覆盖。例如传入 `--fixed-price-refresh-interval-seconds 3` 时，每个候选订单的刷新起始间隔至少为 3 秒。每个固定价刷新轮会等待该轮已入队的策略完成，并且同一策略在该轮至多 Replace 一次；完整订单对账不会将其重复入队。最近 60 秒的已准入 API 调用量达到压力阈值时，配额控制仍会把间隔从 0.7 秒逐步提高到 1.2 秒，因此实际间隔始终取 CLI 值与配额间隔中的较大者。可选 `--max-refresh-rounds <正整数>` 限制普通刷新轮次；省略时无限刷新，传入 `3` 时第三个完整刷新轮结束后受控退出。108 RPM 准入、Preview、最终写入串行化和卖单优先级仍是不可绕过的硬边界。每一轮开始都会读取一次完整订单列表；该快照同时供本轮所有候选筛选与原生 Replace 使用，不会在每次 Replace 前发起 `/orders/{orderId}` 的额外 GET。订单列表与账户、持仓属于不同 Schwab 端点，不能合成单一 HTTP 请求；程序会复用这份完整快照，避免同轮重复读取。没有可用 ID 或刷新失败时，该候选在本轮失败，下一轮从新的完整快照重新判断。
 
 所有自动写入在 Preview 前都执行固定订单策略校验：买单必须是配置标的的 0DTE 双腿垂直价差，价格仅允许 0.82–0.92，数量必须为 1；卖单也必须是 0DTE、数量为 1，价格固定为 0.99。完整订单快照发现仍在工作的违规买/卖单时，程序只会发出 `POLICY_ALERT`，写入终端日志及 `.state/policy-alerts.jsonl`，不会静默撤销外部订单。任何不符合规则的自动 Preview、Submit 或 Replace 都会在发送 Schwab 请求前被拒绝。
 
@@ -159,7 +159,7 @@ While an `ACCT_ACTIVITY` wake-up is awaiting its REST fill confirmation, and for
 
 每次启动都会创建独立、追加写入的 JSONL 审计文件：`.state/executions/<UTC日期>/<runId>.jsonl`。每行均包含 UTC 时间、`runId`、事件类型和结构化数据；不会写入 token 或账户 hash。日志覆盖订单首次发现及状态/成交数量变化、Schwab 的成交时间、订单腿与价格、Preview、最终 Submit/Replace/Cancel、未知写入结果、探索器成交分桶、代际触发、已排队的下一步动作、动作执行/跳过原因，以及运行启动、控制停止和退出。
 
-终端默认只显示启动/停止、安全告警、失败及业务动作；固定价成功换单显示为 `刷新 SPY 745/746 Put Replace 0.90`。`ACCT_ACTIVITY` 唤醒、完整订单快照和零成交确认属于内部诊断，继续写入 JSONL 审计文件但不输出到终端。
+终端默认只显示启动/停止、安全告警、失败及业务动作；固定价成功换单显示为 `2026-07-29 22:40:04 刷新 SPY 745/746 Put Replace 0.90`。`ACCT_ACTIVITY` 唤醒、完整订单快照和零成交确认属于内部诊断，继续写入 JSONL 审计文件但不输出到终端。禁卖单模式不会维护 `.state/exit-templates.json`。
 
 当前运行实例及其日志路径记录在 `.state/runtime/active-run.json`。查看当前实例和实时分析日志：
 
