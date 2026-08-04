@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { SchwabActivityStream, type ActivityBatch } from "./activity_stream.ts";
 import { requireWeeklyReauthorization, SchwabTokenProvider } from "./auth.ts";
+import { runInteractiveLogin } from "./auth_cli.ts";
+import { createWeeklyReauthorizationEnsurer } from "./weekly_reauthorization.ts";
 import { PriorityGate, PriorityWriter, type Priority } from "./priority_runtime.ts";
 import { SchwabRestClient } from "./schwab_client.ts";
 import { SchwabApiError } from "../vendor/schwab-api-nodejs/src/utils/errors.ts";
@@ -84,6 +86,19 @@ function stamp(message: string): void {
     brokerRateLimit: latestBrokerRateLimit,
   });
 }
+
+const ensureWeeklyReauthorization = createWeeklyReauthorizationEnsurer({
+  requireWeeklyReauthorization,
+  reauthorizeInteractively: runInteractiveLogin,
+  onReauthorizationRequired: () => {
+    executionJournal.record("auth.weekly-reauth-required", { action: "interactive-login" });
+    stamp("AUTH_WEEKLY_REAUTH_REQUIRED: interactive OAuth login is required before broker writes; browser opening now");
+  },
+  onReauthorized: () => {
+    executionJournal.record("auth.weekly-reauthorized", { action: "interactive-login" });
+    stamp("AUTH_WEEKLY_REAUTHORIZED: weekly OAuth authorization confirmed; broker-write guards remain active");
+  },
+});
 
 function recordSellOrderAutomationDisabled(): void {
   if (sellOrderAutomationDisabledRecorded) return;
@@ -672,7 +687,7 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     reportPolicyAlert("write-blocked", payload, violation.code, violation.message);
     throw new Error(`ORDER_POLICY_BLOCKED_${violation.code}`);
   }
-  await requireWeeklyReauthorization();
+  await ensureWeeklyReauthorization();
   policy.requireExecutionWindow();
   const preflightDecision = orderWritePreflight(method, path, accountHash);
   if (preflightDecision.violation) {
@@ -749,7 +764,7 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
       priority,
       async () => {
         if (stopping) throw new Error("RUNTIME_STOPPING");
-        await requireWeeklyReauthorization();
+        await ensureWeeklyReauthorization();
         policy.requireExecutionWindow();
         return api(path, { method, body: JSON.stringify(payload) }, 0);
       },
@@ -789,7 +804,7 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
     });
     throw new Error("SELL_ORDERS_DISABLED");
   }
-  await requireWeeklyReauthorization();
+  await ensureWeeklyReauthorization();
   policy.requireExecutionWindow();
   const path = `/trader/v1/accounts/${accountHash}/orders/${orderIdValue}`;
   await evidence(key, "DELETE", path, {}, "NOT_APPLICABLE");
@@ -797,7 +812,7 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
     executionJournal.record("broker.cancel.requested", { key, orderId: orderIdValue, path });
     await finalWriteGate.run(priority, async () => {
       if (stopping) throw new Error("RUNTIME_STOPPING");
-      await requireWeeklyReauthorization();
+      await ensureWeeklyReauthorization();
       policy.requireExecutionWindow();
       return api(path, { method: "DELETE" }, priority);
     });
@@ -2263,7 +2278,7 @@ function stop(): void {
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
-if (!readOnly) await requireWeeklyReauthorization();
+if (!readOnly) await ensureWeeklyReauthorization();
 await writeRuntimeState("running");
 executionJournal.record("run.started", {
   readOnly,
