@@ -10,6 +10,14 @@ function openBrowser(url: string): void {
 
 type CallbackInput = NodeJS.ReadableStream & { unref?: () => void };
 
+export type InteractiveLoginDependencies = {
+  beginLogin?: typeof beginLogin;
+  login?: typeof login;
+  openBrowser?: (url: string) => void;
+  readCallbackUrl?: () => Promise<string>;
+  output?: Pick<NodeJS.WritableStream, "write">;
+};
+
 export async function readCallbackUrl(
   input: CallbackInput = process.stdin,
   output: Pick<NodeJS.WritableStream, "write"> = process.stdout,
@@ -36,6 +44,20 @@ export async function readCallbackUrl(
   });
 }
 
+export async function runInteractiveLogin({
+  beginLogin: startLogin = beginLogin,
+  login: completeLogin = login,
+  openBrowser: launchBrowser = openBrowser,
+  readCallbackUrl: readCallback = readCallbackUrl,
+  output = process.stdout,
+}: InteractiveLoginDependencies = {}): Promise<void> {
+  const { state, authorizationUrl } = startLogin();
+  output.write("OAuth 授权已打开浏览器；完成后请将完整回调 URL 粘贴到此终端。\n");
+  launchBrowser(authorizationUrl);
+  await completeLogin(await readCallback(), state);
+  output.write("登录完成；Token 已写入本机 state/schwab-auth.json。\n");
+}
+
 export async function runAuthCli(argv = process.argv): Promise<void> {
   const command = argv[2] || "status";
   if (command === "status") {
@@ -44,10 +66,7 @@ export async function runAuthCli(argv = process.argv): Promise<void> {
     if (command === "relogin" && (argv[3] !== "--confirm" || argv[4] !== "REAUTHORIZE_SCHWAB")) {
       throw new Error("重登录必须传入 --confirm REAUTHORIZE_SCHWAB");
     }
-    const { state, authorizationUrl } = beginLogin();
-    openBrowser(authorizationUrl);
-    await login(await readCallbackUrl(), state);
-    process.stdout.write("登录完成；Token 已写入本机 state/schwab-auth.json。\n");
+    await runInteractiveLogin();
   } else {
     throw new Error("用法: node src/auth_cli.ts [status|login|relogin --confirm REAUTHORIZE_SCHWAB]");
   }

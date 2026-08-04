@@ -45,7 +45,7 @@ npm run auth:status
 npm run auth:relogin
 ```
 
-`auth:status` 中的 `weeklyReauthRequired: true` 表示真实写入会被拒绝；只读命令不受影响。
+`auth:status` 中的 `weeklyReauthRequired: true` 表示需要重新授权；只读命令不受影响。已使用 `--confirm-live I_UNDERSTAND` 启动的真实运行遇到这一状态时，会在创建运行状态、发出 Preview 或任何 broker 写入前自动打开同一套 OAuth 登录流程，并暂停等待完整回调 URL。回调成功、token 持久化且周授权再次校验通过后，才会继续运行；取消或登录失败会保持无 broker 写入并退出。
 
 完成回调 URL 粘贴并出现“登录完成”后，`auth:login` 和 `auth:relogin` 会自动退出并返回 PowerShell 提示符；不需要手动按 `Ctrl+C`。
 
