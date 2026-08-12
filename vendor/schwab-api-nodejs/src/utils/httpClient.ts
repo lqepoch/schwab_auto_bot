@@ -178,14 +178,11 @@ export class HttpClient {
     const url = this.buildUrl(path, opts.query);
 
     // 合并请求头，调用方覆盖默认值
-    const headers: Record<string, string> = {
-      ...this.defaultHeaders,
-      ...opts.headers,
-    };
+    const headers = mergeHeaders(this.defaultHeaders, opts.headers);
 
     // 根据配置自动附加认证信息
     if (opts.accessToken) {
-      headers.Authorization = `Bearer ${opts.accessToken}`;
+      setHeader(headers, 'Authorization', `Bearer ${opts.accessToken}`);
     }
     // Resolve retry policy without inferring broker idempotency from a client
     // supplied header. Mutating requests must opt into retrying explicitly at
@@ -643,7 +640,9 @@ export class HttpClient {
     }
 
     // 非 BodyInit 类型默认视为 JSON
-    headers['Content-Type'] = headers['Content-Type'] ?? 'application/json';
+    if (!hasHeader(headers, 'Content-Type')) {
+      headers['Content-Type'] = 'application/json';
+    }
     const payload = JSON.stringify(body);
     return {
       canRetry: true,
@@ -947,6 +946,30 @@ function headersToObject(headers: Headers): Record<string, string> {
     result[key] = value;
   });
   return result;
+}
+
+function mergeHeaders(
+  defaults: Record<string, string>,
+  overrides?: Record<string, string>,
+): Record<string, string> {
+  const result: Record<string, string> = { ...defaults };
+  for (const [name, value] of Object.entries(overrides ?? {})) {
+    setHeader(result, name, value);
+  }
+  return result;
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  const normalized = name.toLowerCase();
+  return Object.keys(headers).some((key) => key.toLowerCase() === normalized);
+}
+
+function setHeader(headers: Record<string, string>, name: string, value: string): void {
+  const normalized = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === normalized) delete headers[key];
+  }
+  headers[name] = value;
 }
 
 function isReadableStream(value: unknown): value is ReadableStream {
