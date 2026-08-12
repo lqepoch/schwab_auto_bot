@@ -44,8 +44,8 @@ class FakeSocket extends EventEmitter {
     this.emit("error", error);
   }
 
-  response(requestid: string, service: string, code: unknown): void {
-    this.emit("message", Buffer.from(JSON.stringify({ response: [{ requestid, service, content: { code } }] })));
+  response(requestid: string, service: string, command: string, code: unknown): void {
+    this.emit("message", Buffer.from(JSON.stringify({ response: [{ requestid, service, command, content: { code } }] })));
   }
 
   activity(entries: any[]): void {
@@ -76,7 +76,7 @@ function createHarness(options: {
         const request = frame.requests[0];
         const code = options.codes && codeIndex < options.codes.length ? options.codes[codeIndex] : 0;
         codeIndex += 1;
-        queueMicrotask(() => current.response(request.requestid, request.service, code));
+        queueMicrotask(() => current.response(request.requestid, request.service, request.command, code));
       });
       sockets.push(socket);
       if (options.open !== false) queueMicrotask(() => socket.open());
@@ -99,7 +99,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 250): Promise<void>
 }
 
 test("Activity stream performs LOGIN and SUBS, accepts protocol success codes, and coalesces activity hints", async () => {
-  const harness = createHarness({ codes: [26, 28] });
+  const harness = createHarness({ codes: [0, 26] });
   harness.stream.start();
   await waitFor(() => harness.stream.ready);
   assert.equal(harness.sockets.length, 1);
@@ -155,6 +155,50 @@ test("invalid ACK codes fail closed instead of coercing null into success", asyn
   await waitFor(() => harness.states.some((message) => message.includes("订阅断开")));
   assert.equal(harness.stream.ready, false);
   await harness.stream.stop();
+});
+
+test("command-specific ACK codes reject a subscription code for LOGIN and a VIEW code for SUBS", async () => {
+  const loginWrong = createHarness({ codes: [27] });
+  loginWrong.stream.start();
+  await waitFor(() => loginWrong.states.some((message) => message.includes("订阅断开")));
+  assert.equal(loginWrong.stream.ready, false);
+  await loginWrong.stream.stop();
+
+  const subsWrong = createHarness({ codes: [0, 29] });
+  subsWrong.stream.start();
+  await waitFor(() => subsWrong.states.some((message) => message.includes("订阅断开")));
+  assert.equal(subsWrong.stream.ready, false);
+  await subsWrong.stream.stop();
+});
+
+test("stale ACKs with a reused request ID but wrong service or command do not settle the pending request", async () => {
+  const states: string[] = [];
+  const socket = new FakeSocket((frame, current) => {
+    const request = frame.requests[0];
+    if (request.command === "LOGIN") {
+      queueMicrotask(() => current.response(request.requestid, "STALE_SERVICE", request.command, 0));
+      queueMicrotask(() => current.response(request.requestid, request.service, request.command, 0));
+      return;
+    }
+    queueMicrotask(() => current.response(request.requestid, request.service, "VIEW", 0));
+    queueMicrotask(() => current.response(request.requestid, request.service, request.command, 26));
+  });
+  const stream = new SchwabActivityStream({
+    loadContext: async () => context,
+    onActivity: () => undefined,
+    onState: (message) => states.push(message),
+    createWebSocket: () => {
+      queueMicrotask(() => socket.open());
+      return socket as unknown as WebSocket;
+    },
+    openTimeoutMs: 30,
+    ackTimeoutMs: 30,
+    reconnectDelayMs: 1,
+  });
+  stream.start();
+  await waitFor(() => stream.ready);
+  assert.equal(states.some((message) => message.includes("订阅断开")), false);
+  await stream.stop();
 });
 
 test("a synchronous socket send failure rejects immediately and does not leave an ACK timer pending", async () => {

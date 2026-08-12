@@ -35,12 +35,12 @@ export type ActivityBatch = {
 };
 
 type PendingRequest = {
+  service: string;
+  command: string;
   resolve: () => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
 };
-
-const acceptedResponseCodes = new Set([0, 26, 27, 28, 29]);
 
 export class SchwabActivityStream {
   private readonly options: ActivityStreamOptions;
@@ -165,7 +165,7 @@ export class SchwabActivityStream {
         this.pending.delete(requestid);
         reject(new Error(`STREAM_ACK_TIMEOUT_${service}`));
       }, this.options.ackTimeoutMs ?? 15_000);
-      this.pending.set(requestid, { resolve, reject, timer });
+      this.pending.set(requestid, { service, command, resolve, reject, timer });
     });
     try {
       this.socket!.send(JSON.stringify(frame));
@@ -191,10 +191,11 @@ export class SchwabActivityStream {
       const requestid = String(response?.requestid ?? "");
       const pending = this.pending.get(requestid);
       if (!pending) continue;
+      if (response?.service !== pending.service || response?.command !== pending.command) continue;
       clearTimeout(pending.timer);
       this.pending.delete(requestid);
       const code = responseCode(response?.content?.code);
-      if (code !== null && acceptedResponseCodes.has(code)) pending.resolve();
+      if (code !== null && isAcceptedResponse(String(response?.service ?? ""), String(response?.command ?? ""), code)) pending.resolve();
       else pending.reject(new Error(`STREAM_RESPONSE_${String(response?.service ?? "UNKNOWN")}_${code ?? "INVALID_CODE"}`));
     }
     const accountActivities = (Array.isArray(frame?.data) ? frame.data : [])
@@ -224,6 +225,19 @@ export class SchwabActivityStream {
       pending.reject(new Error(reason));
     }
     this.pending.clear();
+  }
+}
+
+function isAcceptedResponse(service: string, command: string, code: number): boolean {
+  if (!Number.isInteger(code) || !Number.isFinite(code)) return false;
+  if (code === 0) return true;
+  if (service !== "ACCT_ACTIVITY") return false;
+  switch (command) {
+    case "SUBS": return code === 26;
+    case "UNSUBS": return code === 27;
+    case "ADD": return code === 28;
+    case "VIEW": return code === 29;
+    default: return false;
   }
 }
 
