@@ -34,8 +34,11 @@ test('accepts generic and command-specific Streamer success codes only for their
   assert.equal(isSuccessfulStreamerCommand('LEVELONE_OPTIONS', 'SUBS', 1.5), false);
 });
 
-test('response schema rejects null, string, and non-integral acknowledgement codes', () => {
-  for (const code of [null, '0', 1.5, NaN]) {
+test('response schema preserves numeric wire strings but rejects null and malformed codes', () => {
+  const numericString = StreamerCommandResponseSchema.safeParse(response('SUBS', '26' as unknown as number));
+  assert.equal(numericString.success, true);
+  assert.equal(numericString.success && numericString.data.content.code, 26);
+  for (const code of [null, '', '1.5', 1.5, NaN]) {
     const result = StreamerCommandResponseSchema.safeParse(response('SUBS', code as number));
     assert.equal(result.success, false, `code ${String(code)} must be rejected`);
   }

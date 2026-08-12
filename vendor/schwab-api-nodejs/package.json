@@ -22,7 +22,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --experimental-strip-types --test test/marketData.test.mjs test/safety.test.ts test/streamerClient.test.ts test/subscriptionState.test.ts"
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "test:unit": "npm run build && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs",
+    "test": "npm run typecheck:test && npm run test:unit"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

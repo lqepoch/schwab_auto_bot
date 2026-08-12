@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { TokenManager } from '../dist/auth/tokenManager.js';
+import type { TokenStore } from '../dist/auth/tokenStore.js';
+import type { PersistedToken } from '../dist/types/auth.js';
 import { ReauthRequiredError } from '../dist/utils/errors.js';
 
 const config = {
@@ -9,7 +11,7 @@ const config = {
   redirectUri: 'https://localhost/callback?x=1',
 };
 
-function cached(overrides = {}) {
+function cached(overrides: Partial<PersistedToken> = {}): PersistedToken {
   return {
     access_token: 'cached-access',
     refresh_token: 'cached-refresh',
@@ -21,15 +23,22 @@ function cached(overrides = {}) {
   };
 }
 
-function store(initial = cached(), overrides = {}) {
-  const saved = [];
+type MockStore = {
+  path: string;
+  saved: PersistedToken[];
+  load: () => Promise<PersistedToken | null>;
+  save: (value: PersistedToken) => Promise<void>;
+};
+
+function store(initial: PersistedToken | null = cached(), overrides: Partial<MockStore> = {}): MockStore & TokenStore {
+  const saved: PersistedToken[] = [];
   return {
     path: '/tmp/token-manager-test.json',
     saved,
     load: async () => initial,
-    save: async (value) => { saved.push(value); },
+    save: async (value: PersistedToken) => { saved.push(value); },
     ...overrides,
-  };
+  } as unknown as MockStore & TokenStore;
 }
 
 function tokenResponse(access = 'new-access', refresh = 'new-refresh') {
@@ -53,30 +62,32 @@ test('authorization URL encodes redirect URI, state, and scope', () => {
 
 test('authorization-code exchange sends form data and Basic client authentication', async () => {
   let observedUrl = '';
-  let observedInit;
+  let observedInit: RequestInit | undefined;
   const savedStore = store(null);
   const manager = new TokenManager(config, savedStore, {
     fetch: async (url, init) => {
-      observedUrl = url;
+      observedUrl = String(url);
       observedInit = init;
       return new Response(JSON.stringify(tokenResponse()), { status: 200, headers: { 'content-type': 'application/json' } });
     },
   });
   const persisted = await manager.exchangeCodeForToken('code with spaces');
+  assert.ok(observedInit);
+  const init = observedInit;
   assert.match(observedUrl, /\/v1\/oauth\/token$/);
-  assert.equal(observedInit.method, 'POST');
-  assert.equal(new Headers(observedInit.headers).get('authorization'), `Basic ${Buffer.from('client-id:client-secret').toString('base64')}`);
-  assert.equal(new Headers(observedInit.headers).get('content-type'), 'application/x-www-form-urlencoded');
-  assert.equal(new URLSearchParams(observedInit.body).get('code'), 'code with spaces');
-  assert.equal(new URLSearchParams(observedInit.body).get('redirect_uri'), config.redirectUri);
+  assert.equal(init.method, 'POST');
+  assert.equal(new Headers(init.headers).get('authorization'), `Basic ${Buffer.from('client-id:client-secret').toString('base64')}`);
+  assert.equal(new Headers(init.headers).get('content-type'), 'application/x-www-form-urlencoded');
+  assert.equal(new URLSearchParams(init.body as URLSearchParams).get('code'), 'code with spaces');
+  assert.equal(new URLSearchParams(init.body as URLSearchParams).get('redirect_uri'), config.redirectUri);
   assert.equal(persisted.access_token, 'new-access');
   assert.equal(savedStore.saved.length, 1);
 });
 
 test('refresh requests for one refresh token are single-flight', async () => {
   let calls = 0;
-  let release;
-  const gate = new Promise((resolve) => { release = resolve; });
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
   const manager = new TokenManager(config, store(), {
     fetch: async () => {
       calls += 1;

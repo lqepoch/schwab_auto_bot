@@ -11,9 +11,12 @@ export const StreamerCommandResponseSchema = z.object({
   command: z.string(),
   timestamp: z.coerce.number(),
   content: z.object({
-    // Do not coerce null into zero. Schwab's success codes are protocol
-    // values, and an absent/malformed code must never acknowledge a command.
-    code: z.number().int().finite(),
+    // Accept the numeric and numeric-string wire forms documented by Schwab,
+    // but never coerce null, empty strings, decimals, or NaN into success.
+    code: z.union([
+      z.number().int().finite(),
+      z.string().regex(/^-?\d+$/).transform(Number),
+    ]),
     msg: z.string(),
   }),
 });
