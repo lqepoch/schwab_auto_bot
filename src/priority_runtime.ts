@@ -105,7 +105,6 @@ export class PriorityGate {
     reject: (error: unknown) => void;
   }>> = [[], [], [], []];
   private active = false;
-  private consecutiveHighPriority = 0;
 
   run<T>(priority: Priority, operation: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
@@ -116,16 +115,9 @@ export class PriorityGate {
 
   private drain(): void {
     if (this.active) return;
-    const lowerPriorityPending = this.queues[1].length > 0
-      || this.queues[2].length > 0
-      || this.queues[3].length > 0;
-    const shouldAgeLowerPriority = lowerPriorityPending && this.consecutiveHighPriority >= 4;
-    const next = shouldAgeLowerPriority
-      ? (this.queues[1].shift() ?? this.queues[2].shift() ?? this.queues[3].shift() ?? this.queues[0].shift())
-      : (this.queues[0].shift() ?? this.queues[1].shift()
-        ?? this.queues[2].shift() ?? this.queues[3].shift());
+    const next = this.queues[0].shift() ?? this.queues[1].shift()
+      ?? this.queues[2].shift() ?? this.queues[3].shift();
     if (!next) return;
-    this.consecutiveHighPriority = next.priority <= 1 ? this.consecutiveHighPriority + 1 : 0;
     this.active = true;
     void next.operation().then(next.resolve, next.reject).finally(() => {
       this.active = false;
