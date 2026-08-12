@@ -1,9 +1,8 @@
 import EventEmitter from 'node:events';
-import WebSocket from 'ws';
+import WebSocket, { type RawData } from 'ws';
 import { StreamerInfo } from '../types/trader.js';
 import { Logger, createConsoleLogger } from '../utils/logger.js';
 import { redactSensitive } from '../utils/redact.js';
-import { cloneParameters, stableStringify } from '../utils/objectUtils.js';
 import {
   StreamerCommandResponse,
   StreamerMessage,
@@ -12,7 +11,16 @@ import {
   StreamerRequestEnvelope,
   StreamerServiceRequest,
 } from '../types/streamer.js';
-
+import {
+  applySubscriptionMutation,
+  cloneParameters,
+  cloneState,
+  parametersForState,
+} from './subscriptionState.js';
+import type { CanonicalSubscriptionState, SubscriptionMutation } from './subscriptionState.js';
+import { StreamerCommandTracker } from './commandTracker.js';
+import { StreamerCommandError, StreamerCommandNotSentError, StreamerConnectionError } from './streamerErrors.js';
+import { createLifecycle, toError, type PendingLifecycle } from './streamerLifecycle.js';
 export interface StreamerClientOptions {
   autoReconnect?: boolean;
   reconnectDelayMs?: number;
@@ -26,21 +34,21 @@ export interface StreamerClientOptions {
   heartbeatCheckIntervalMs?: number;
   heartbeatTimeoutMs?: number;
   clientPingIntervalMs?: number;
+  /** Maximum time to wait for a Streamer command acknowledgement. */
+  commandAckTimeoutMs?: number;
+  /** Injectable WebSocket constructor for deterministic tests and custom transports. */
+  webSocketFactory?: (url: string) => WebSocket;
 }
-
 export interface SubscriptionOptions {
   service: string;
-  command?: 'SUBS' | 'ADD';
+  command?: 'SUBS' | 'ADD' | 'VIEW';
   parameters?: Record<string, unknown>;
 }
-
 export interface UnsubscribeOptions {
   service: string;
   parameters?: Record<string, unknown>;
 }
-
 export type StreamerConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
-
 type StreamerEventMap = {
   open: [];
   close: [code: number, reason: Buffer];
@@ -52,14 +60,7 @@ type StreamerEventMap = {
   ready: [];
   reconnecting: [info: { attempt: number; delayMs: number }];
 };
-
-type StoredSubscription = {
-  service: string;
-  parameters?: Record<string, unknown>;
-  command: 'SUBS' | 'ADD';
-  replayCommand: 'SUBS' | 'ADD';
-};
-
+type ServiceCommand = 'SUBS' | 'ADD' | 'VIEW' | 'UNSUBS';
 /**
  * WebSocket Streamer 基础客户端，负责登录、订阅命令下发与事件派发。
  */
@@ -83,33 +84,38 @@ export class StreamerClient extends EventEmitter {
   private clientPingTimer: NodeJS.Timeout | null = null;
   private lastHeartbeatAt: number | null = null;
   private isLoggedIn = false;
-  private readonly subscriptions = new Map<string, StoredSubscription>();
+  private readonly subscriptionStates = new Map<string, CanonicalSubscriptionState>();
+  private readonly subscriptionGenerations = new Map<string, number>();
+  private readonly serviceQueues = new Map<string, Promise<void>>();
+  private readonly commandTracker: StreamerCommandTracker;
+  private readonly webSocketFactory: (url: string) => WebSocket;
+  private pendingAuthenticated: PendingLifecycle | null = null;
+  private pendingReady: PendingLifecycle | null = null;
+  private readyGeneration: number | null = null;
   private connectionStatus: StreamerConnectionStatus = 'disconnected';
   private reconnectAttempts = 0;
-
+  private socketGeneration = 0;
+  private forceReconnect = false;
   constructor(options: StreamerClientOptions = {}) {
     super();
     this.options = options;
     this.logger = options.logger ?? createConsoleLogger({ scope: 'StreamerClient' });
     this.reconnectStrategy = this.resolveReconnectStrategy(options);
+    this.commandTracker = new StreamerCommandTracker(Math.max(1, options.commandAckTimeoutMs ?? 15_000));
+    this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));
   }
-
   get status(): StreamerConnectionStatus {
     return this.connectionStatus;
   }
-
   override on<K extends keyof StreamerEventMap>(eventName: K, listener: (...args: StreamerEventMap[K]) => void): this {
     return super.on(eventName, listener);
   }
-
   override once<K extends keyof StreamerEventMap>(eventName: K, listener: (...args: StreamerEventMap[K]) => void): this {
     return super.once(eventName, listener);
   }
-
   override emit<K extends keyof StreamerEventMap>(eventName: K, ...args: StreamerEventMap[K]): boolean {
     return super.emit(eventName, ...args);
   }
-
   /**
    * 更新内部连接状态，并在状态切换时输出详细调试日志。
    */
@@ -123,7 +129,6 @@ export class StreamerClient extends EventEmitter {
     });
     this.connectionStatus = status;
   }
-
   /**
    * 建立 WebSocket 连接并完成后续登录步骤。
    * @param accessToken 通过 OAuth 获得的访问令牌，即 `access_token` 字段的原始值。
@@ -135,12 +140,12 @@ export class StreamerClient extends EventEmitter {
     this.streamerInfo = info;
     this.tokenProvider = provider;
     this.reconnectAttempts = 0;
+    this.forceReconnect = false;
     this.setStatus('connecting');
-
     this.logger.info('开始建立 WebSocket 连接');
     await this.openSocket();
+    await this.waitForReady({ timeoutMs: this.options.commandAckTimeoutMs ?? 15_000 });
   }
-
   /**
    * 主动关闭当前 WebSocket 连接，同时清理自动重连定时器与心跳监控。
    */
@@ -148,8 +153,16 @@ export class StreamerClient extends EventEmitter {
     this.clearReconnectTimer();
     this.stopHeartbeatMonitor();
     this.stopClientPing();
+    this.commandTracker.rejectAll(new StreamerConnectionError('Streamer disconnected before command acknowledgement'));
+    this.rejectLifecycle(this.pendingAuthenticated, new StreamerConnectionError('Streamer disconnected before login'));
+    this.rejectLifecycle(this.pendingReady, new StreamerConnectionError('Streamer disconnected before ready'));
+    this.pendingAuthenticated = null;
+    this.pendingReady = null;
+    this.readyGeneration = null;
     this.isLoggedIn = false;
     this.reconnectAttempts = 0;
+    this.forceReconnect = false;
+    this.socketGeneration += 1;
     this.setStatus('disconnected');
     if (this.socket) {
       this.logger.info('关闭现有 WebSocket 连接');
@@ -158,91 +171,100 @@ export class StreamerClient extends EventEmitter {
       this.socket = null;
     }
   }
-
   /**
    * 发送订阅命令到指定服务。会缓存订阅参数，重连后自动恢复。
    */
-  subscribe(options: SubscriptionOptions): void {
+  async subscribe(options: SubscriptionOptions): Promise<void> {
     if (!this.streamerInfo) {
       throw new Error('Streamer info not set. Call connect() first.');
     }
-
     const command = options.command ?? 'SUBS';
-    const replayCommand: 'SUBS' | 'ADD' = command === 'ADD' ? 'SUBS' : command;
     const parameters = cloneParameters(options.parameters);
-    const key = this.buildSubscriptionKey(options.service, parameters);
-    const stored: StoredSubscription = {
-      service: options.service,
-      parameters,
-      command,
-      replayCommand,
-    };
-
-    this.subscriptions.set(key, stored);
-    this.logger.info('记录订阅命令', { service: stored.service, command: stored.command, parameters: stored.parameters });
-
-    if (this.isSocketReady()) {
-      this.logger.info('WebSocket 已就绪，立即发送订阅', {
-        service: stored.service,
-        command: stored.command,
+    await this.waitForCommandReady();
+    return this.enqueueService(options.service, async () => {
+      const mutation = applySubscriptionMutation(
+        this.subscriptionStates,
+        this.subscriptionGenerations,
+        command,
+        options.service,
+        parameters,
+      );
+      this.logger.info('记录订阅状态', {
+        service: options.service,
+        command,
+        parameters,
+        generation: this.subscriptionGenerations.get(options.service),
       });
-      this.sendSubscription(stored, stored.command);
-    } else {
-      this.logger.debug('WebSocket 尚未登录完成，订阅将在登录成功后自动发送', { service: stored.service });
-    }
+      const commandGeneration = this.socketGeneration;
+      try {
+        this.logger.info('WebSocket 已就绪，立即发送订阅', { service: options.service, command });
+        await this.sendServiceCommand(options.service, command, parameters, commandGeneration);
+      } catch (error) {
+        this.handleMutationFailure(mutation, error, commandGeneration);
+        throw error;
+      }
+    });
   }
-
   /**
    * 取消指定订阅，并从自动恢复列表中移除。
    */
-  unsubscribe(options: UnsubscribeOptions): void {
+  async unsubscribe(options: UnsubscribeOptions): Promise<void> {
     if (!this.streamerInfo) {
       throw new Error('Streamer info not set. Call connect() first.');
     }
-    const key = this.buildSubscriptionKey(options.service, options.parameters);
-    const removed = this.subscriptions.delete(key);
-    this.logger.info('取消订阅', { service: options.service, removed });
-
-    if (this.isSocketReady()) {
-      const request: StreamerServiceRequest = {
+    const parameters = cloneParameters(options.parameters);
+    await this.waitForCommandReady();
+    return this.enqueueService(options.service, async () => {
+      const previous = this.subscriptionStates.get(options.service);
+      const mutation = applySubscriptionMutation(
+        this.subscriptionStates,
+        this.subscriptionGenerations,
+        'UNSUBS',
+        options.service,
+        parameters,
+      );
+      this.logger.info('更新取消订阅状态', {
         service: options.service,
-        command: 'UNSUBS',
-        requestid: `${this.requestId++}`,
-        SchwabClientCustomerId: this.streamerInfo.schwabClientCustomerId,
-        SchwabClientCorrelId: this.streamerInfo.schwabClientCorrelId,
-        parameters: options.parameters,
-      };
-      this.send({ requests: [request] });
-    }
+        removed: this.subscriptionStates.has(options.service) === false && previous !== undefined,
+        parameters,
+        generation: this.subscriptionGenerations.get(options.service),
+      });
+      const commandGeneration = this.socketGeneration;
+      try {
+        await this.sendServiceCommand(options.service, 'UNSUBS', parameters, commandGeneration);
+      } catch (error) {
+        this.handleMutationFailure(mutation, error, commandGeneration);
+        throw error;
+      }
+    });
   }
-
   /**
    * 发送自定义的 Streamer 请求包裹。
    * @param payload 完整的 Streamer 请求对象，包含一个或多个 `requests`。
    */
   send(payload: StreamerRequestEnvelope): void {
     const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      throw new Error('WebSocket is not open');
+    if (!socket) throw new StreamerConnectionError('WebSocket is not open');
+    this.sendOnSocket(socket, payload);
+  }
+  private sendOnSocket(socket: WebSocket, payload: StreamerRequestEnvelope): void {
+    if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) {
+      throw new StreamerConnectionError('WebSocket is not open');
     }
     this.logger.debug('发送 WebSocket 消息', { payload: redactSensitive(payload) });
     socket.send(JSON.stringify(payload));
   }
-
   /**
    * 等待 WebSocket 完成登录流程。可用于确保在发送订阅前连接已经就绪。
    */
   async waitForReady(options: { timeoutMs?: number } = {}): Promise<void> {
-    if (this.isSocketReady()) {
+    if (this.isReady()) {
       return;
     }
-
     const { timeoutMs } = options;
-
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       let timeoutHandle: NodeJS.Timeout | null = null;
-
       const cleanup = () => {
         if (timeoutHandle) {
           clearTimeout(timeoutHandle);
@@ -252,21 +274,18 @@ export class StreamerClient extends EventEmitter {
         this.off('error', handleError);
         this.off('close', handleClose);
       };
-
       const handleReady = () => {
         if (settled) return;
         settled = true;
         cleanup();
         resolve();
       };
-
       const handleError = (error: Error) => {
         if (settled) return;
         settled = true;
         cleanup();
         reject(error);
       };
-
       const handleClose = (code: number, reason: Buffer) => {
         if (settled) return;
         settled = true;
@@ -274,11 +293,9 @@ export class StreamerClient extends EventEmitter {
         const detail = reason?.toString() || 'no reason provided';
         reject(new Error(`Streamer connection closed before ready: ${code} ${detail}`));
       };
-
       this.on('ready', handleReady);
       this.on('error', handleError);
       this.on('close', handleClose);
-
       if (timeoutMs && timeoutMs > 0) {
         timeoutHandle = setTimeout(() => {
           if (settled) {
@@ -291,91 +308,80 @@ export class StreamerClient extends EventEmitter {
       }
     });
   }
-
-  /**
-   * 打开 WebSocket 连接并挂载必要的事件监听，包括自动登录与心跳监控。
-   */
+  private async waitForCommandReady(): Promise<void> {
+    if (this.isReady()) return;
+    const canWait = this.isSocketReady()
+      || this.connectionStatus === 'connecting'
+      || this.connectionStatus === 'reconnecting'
+      || this.reconnectTimer !== null
+      || (this.socket?.readyState === WebSocket.CONNECTING);
+    if (!canWait) {
+      throw new StreamerConnectionError('Streamer is not connected; command was not sent');
+    }
+    await this.waitForReady({ timeoutMs: this.options.commandAckTimeoutMs ?? 15_000 });
+    if (!this.isReady()) {
+      throw new StreamerConnectionError('Streamer did not become ready; command was not sent');
+    }
+  }
   private async openSocket(): Promise<void> {
     if (!this.accessToken || !this.streamerInfo) {
       throw new Error('Missing access token or streamer info');
     }
-
     this.clearReconnectTimer();
     this.stopHeartbeatMonitor();
     this.stopClientPing();
     this.isLoggedIn = false;
     this.setStatus('connecting');
-
+    const previousSocket = this.socket;
+    const previousGeneration = this.socketGeneration;
+    if (previousSocket) {
+      this.commandTracker.rejectGeneration(
+        previousGeneration,
+        new StreamerConnectionError('Streamer socket replaced before command acknowledgement'),
+      );
+      previousSocket.removeAllListeners();
+      if (previousSocket.readyState === WebSocket.OPEN || previousSocket.readyState === WebSocket.CONNECTING) {
+        previousSocket.close();
+      }
+    }
     const { streamerSocketUrl } = this.streamerInfo;
-    const socket = new WebSocket(streamerSocketUrl);
+    const socket = this.webSocketFactory(streamerSocketUrl);
+    const generation = ++this.socketGeneration;
     this.socket = socket;
-
+    this.pendingAuthenticated = createLifecycle(generation);
+    this.pendingReady = null;
+    this.readyGeneration = null;
     socket.on('open', () => {
+      if (!this.isCurrentSocket(socket, generation)) return;
       this.logger.info('Streamer WebSocket 已打开');
       this.lastHeartbeatAt = Date.now();
       this.startHeartbeatMonitor();
       this.startClientPing();
       this.emit('open');
-      this.login();
+      this.login(socket, generation);
     });
-
     socket.on('message', (data) => {
-      this.logger.debug('收到 WebSocket 消息');
-      let message: StreamerMessage;
-      try {
-        const parsed = JSON.parse(data.toString());
-        message = StreamerMessageSchema.parse(parsed);
-      } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
-        this.logger.error('解析 WebSocket 消息失败', { error: err.message });
-        this.emit('error', err);
-        return;
-      }
-
-      this.emit('message', message);
-
-      for (const resp of message.response ?? []) {
-        this.emit('response', resp);
-        this.handleResponse(resp);
-      }
-      for (const payload of message.data ?? []) {
-        this.emit('data', payload);
-      }
-      for (const notify of message.notify ?? []) {
-        this.emit('notify', notify);
-        this.handleNotify(notify);
-      }
+      this.handleSocketMessage(socket, generation, data);
     });
-
     socket.on('close', (code, reason) => {
-      this.logger.warn('Streamer WebSocket 已关闭', { code, reason: reason.toString() });
-      this.stopHeartbeatMonitor();
-      this.stopClientPing();
-      this.isLoggedIn = false;
-      this.setStatus('disconnected');
-      this.emit('close', code, reason);
-      this.scheduleReconnect();
+      this.handleSocketClose(socket, generation, code, reason);
     });
-
     socket.on('pong', () => {
+      if (!this.isCurrentSocket(socket, generation)) return;
       this.lastHeartbeatAt = Date.now();
       this.logger.debug('收到 WebSocket pong');
     });
-
     socket.on('error', (error) => {
+      if (!this.isCurrentSocket(socket, generation)) return;
+      const err = toError(error);
       this.logger.error('Streamer WebSocket 错误', {
-        error: error instanceof Error ? error.message : String(error),
+        error: err.message,
       });
-      this.emit('error', error instanceof Error ? error : new Error(String(error)));
+      this.emitError(err);
     });
   }
-
-  /**
-   * 构造并发送 ADMIN/LOGIN 请求，用于完成 Streamer 的登录流程。
-   */
-  private login(): void {
-    if (!this.streamerInfo || !this.accessToken) return;
-
+  private login(socket: WebSocket, generation: number): void {
+    if (!this.streamerInfo || !this.accessToken || !this.isCurrentSocket(socket, generation)) return;
     this.isLoggedIn = false;
     this.logger.info('发送 ADMIN/LOGIN 请求');
     const loginRequest: StreamerRequestEnvelope = {
@@ -394,53 +400,121 @@ export class StreamerClient extends EventEmitter {
         },
       ],
     };
-
-    this.send(loginRequest);
+    const request = loginRequest.requests[0];
+    if (!request) return;
+    void this.sendTrackedRequest(socket, request, generation).catch((error) => {
+      if (!this.isCurrentSocket(socket, generation)) return;
+      const err = toError(error);
+      this.logger.error('Streamer 登录失败', { error: err.message });
+      this.setStatus('disconnected');
+      this.emitError(err);
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        socket.close();
+      }
+    });
   }
-
-  /**
-   * 处理服务端返回的命令响应，特别关注登录结果并触发后续流程。
-   */
-  private handleResponse(response: StreamerCommandResponse): void {
-    if (response.service !== 'ADMIN' || response.command !== 'LOGIN') {
+  private handleResponse(response: StreamerCommandResponse, generation: number): void {
+    const handled = this.commandTracker.handle(response, generation);
+    if (!handled || response.service !== 'ADMIN' || response.command !== 'LOGIN') {
       return;
     }
-
-    if (response.content.code === 0) {
+    if (response.content.code === 0 && generation === this.socketGeneration && this.socket) {
       this.logger.info('Streamer 登录成功');
       this.isLoggedIn = true;
       this.reconnectAttempts = 0;
       this.setStatus('connected');
-      this.replaySubscriptions();
-      this.emit('ready');
-    } else {
-      this.logger.error('Streamer 登录失败', {
-        code: response.content.code,
-        message: response.content.msg,
-      });
+      this.resolveLifecycle(this.pendingAuthenticated);
+      this.pendingAuthenticated = null;
+      this.pendingReady = createLifecycle(generation);
+      void this.replaySubscriptions(generation).then(
+        () => {
+          if (this.socketGeneration !== generation || this.socket === null || !this.pendingReady) return;
+          this.forceReconnect = false;
+          this.readyGeneration = generation;
+          this.resolveLifecycle(this.pendingReady);
+          this.pendingReady = null;
+          this.emit('ready');
+        },
+        (error) => {
+          const err = toError(error);
+          this.rejectLifecycle(this.pendingReady, err);
+          this.pendingReady = null;
+          this.emitError(err);
+          if (this.isCurrentSocket(this.socket!, generation)) this.socket?.close();
+        },
+      );
+    } else if (response.content.code !== 0) {
+      const err = new StreamerConnectionError(
+        `Streamer login failed: ${response.content.code} ${response.content.msg}`,
+        response.content.code,
+      );
+      this.rejectLifecycle(this.pendingAuthenticated, err);
+      this.pendingAuthenticated = null;
+      this.rejectLifecycle(this.pendingReady, err);
+      this.pendingReady = null;
+      this.readyGeneration = null;
       this.setStatus('disconnected');
-      this.emit('error', new Error(`Streamer login failed: ${response.content.code} ${response.content.msg}`));
+      this.emitError(err);
+      if (this.isCurrentSocket(this.socket!, generation)) this.socket?.close();
     }
   }
-
-  /**
-   * 处理 notify 类型消息，目前仅追踪心跳时间戳。
-   */
+  private handleSocketMessage(socket: WebSocket, generation: number, data: RawData): void {
+    if (!this.isCurrentSocket(socket, generation)) return;
+    this.logger.debug('收到 WebSocket 消息');
+    let message: StreamerMessage;
+    try {
+      const parsed = JSON.parse(data.toString());
+      message = StreamerMessageSchema.parse(parsed);
+    } catch (error) {
+      const err = toError(error);
+      this.logger.error('解析 WebSocket 消息失败', { error: err.message });
+      this.emitError(err);
+      return;
+    }
+    this.emit('message', message);
+    for (const resp of message.response ?? []) {
+      this.emit('response', resp);
+      this.handleResponse(resp, generation);
+    }
+    for (const payload of message.data ?? []) {
+      this.emit('data', payload);
+    }
+    for (const notify of message.notify ?? []) {
+      this.emit('notify', notify);
+      this.handleNotify(notify);
+    }
+  }
+  private handleSocketClose(socket: WebSocket, generation: number, code: number, reason: Buffer): void {
+    const detail = reason?.toString() || 'no reason provided';
+    this.commandTracker.rejectGeneration(
+      generation,
+      new StreamerConnectionError(`Streamer connection closed: ${code} ${detail}`, code),
+    );
+    if (!this.isCurrentSocket(socket, generation)) return;
+    this.logger.warn('Streamer WebSocket 已关闭', { code, reason: detail });
+    this.stopHeartbeatMonitor();
+    this.stopClientPing();
+    this.isLoggedIn = false;
+    this.socket = null;
+    this.readyGeneration = null;
+    this.rejectLifecycle(this.pendingAuthenticated, new StreamerConnectionError('Streamer connection closed before login', code));
+    this.rejectLifecycle(this.pendingReady, new StreamerConnectionError('Streamer connection closed before ready', code));
+    this.pendingAuthenticated = null;
+    this.pendingReady = null;
+    this.setStatus('disconnected');
+    this.emit('close', code, reason);
+    this.scheduleReconnect();
+  }
   private handleNotify(notify: StreamerNotifyPayload): void {
     if (notify.heartbeat) {
       this.lastHeartbeatAt = Date.now();
       this.logger.debug('收到心跳', { heartbeat: notify.heartbeat });
     }
   }
-
-  /**
-   * 根据配置调度下一次自动重连，超出尝试次数时会停止重连。
-   */
   private scheduleReconnect(): void {
-    if (!this.options.autoReconnect) {
+    if (!this.options.autoReconnect && !this.forceReconnect) {
       return;
     }
-
     this.clearReconnectTimer();
     const attempt = ++this.reconnectAttempts;
     const maxAttempts = this.reconnectStrategy.maxAttempts;
@@ -467,20 +541,15 @@ export class StreamerClient extends EventEmitter {
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         this.logger.error('自动重连失败，将重试', { error: err.message });
-        this.emit('error', err);
+        this.emitError(err);
         this.scheduleReconnect();
       }
     }, delay);
   }
-
-  /**
-   * 根据指数退避策略计算重连等待时间，支持固定间隔与随机抖动。
-   */
   private computeReconnectDelay(attemptIndex: number): number {
     if (this.reconnectStrategy.useConstantDelay) {
       return Math.max(0, Math.round(this.reconnectStrategy.initialDelayMs));
     }
-
     const base = this.reconnectStrategy.initialDelayMs * Math.pow(this.reconnectStrategy.multiplier, attemptIndex);
     const capped = Math.min(base, this.reconnectStrategy.maxDelayMs);
     if (!Number.isFinite(capped) || capped <= 0) {
@@ -488,10 +557,6 @@ export class StreamerClient extends EventEmitter {
     }
     return Math.max(0, Math.round(Math.random() * capped));
   }
-
-  /**
-   * 解析并标准化自动重连策略，填充默认值确保后续逻辑统一。
-   */
   private resolveReconnectStrategy(options: StreamerClientOptions): {
     initialDelayMs: number;
     maxDelayMs: number;
@@ -509,7 +574,6 @@ export class StreamerClient extends EventEmitter {
         useConstantDelay: true,
       };
     }
-
     const defaults = {
       initialDelayMs: 1_000,
       maxDelayMs: 30_000,
@@ -525,7 +589,6 @@ export class StreamerClient extends EventEmitter {
       rawMaxAttempts === undefined || rawMaxAttempts === null
         ? defaults.maxAttempts
         : Math.max(0, Math.floor(rawMaxAttempts));
-
     return {
       initialDelayMs: initial,
       maxDelayMs: max,
@@ -534,20 +597,12 @@ export class StreamerClient extends EventEmitter {
       useConstantDelay: false,
     };
   }
-
-  /**
-   * 清理正在等待执行的重连定时器，避免重复触发。
-   */
   private clearReconnectTimer(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
   }
-
-  /**
-   * 启动客户端 ping 机制，定期向服务器发送 ping 包辅助检测断线。
-   */
   private startClientPing(): void {
     this.stopClientPing();
     const interval = this.options.clientPingIntervalMs ?? 30_000;
@@ -571,25 +626,16 @@ export class StreamerClient extends EventEmitter {
       }
     }, interval);
   }
-
-  /**
-   * 停止客户端 ping 定时器。
-   */
   private stopClientPing(): void {
     if (this.clientPingTimer) {
       clearInterval(this.clientPingTimer);
       this.clientPingTimer = null;
     }
   }
-
-  /**
-   * 启动心跳检测，超时后会触发重连流程。
-   */
   private startHeartbeatMonitor(): void {
     this.stopHeartbeatMonitor();
     const interval = this.options.heartbeatCheckIntervalMs ?? 5_000;
     const timeout = this.options.heartbeatTimeoutMs ?? 15_000;
-
     this.heartbeatTimer = setInterval(() => {
       if (this.lastHeartbeatAt === null) {
         return;
@@ -601,20 +647,12 @@ export class StreamerClient extends EventEmitter {
       }
     }, interval);
   }
-
-  /**
-   * 停止心跳检测定时器。
-   */
   private stopHeartbeatMonitor(): void {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
   }
-
-  /**
-   * 当检测到心跳超时时执行，主动断开连接并尝试重连。
-   */
   private handleHeartbeatTimeout(): void {
     this.stopHeartbeatMonitor();
     this.stopClientPing();
@@ -624,57 +662,138 @@ export class StreamerClient extends EventEmitter {
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.terminate();
     }
-    this.emit('error', new Error('Streamer heartbeat timeout'));
+    this.emitError(new Error('Streamer heartbeat timeout'));
   }
-
-  /**
-   * 判断当前 WebSocket 是否已建立且通过登录校验。
-   */
   private isSocketReady(): boolean {
     return Boolean(this.socket && this.socket.readyState === WebSocket.OPEN && this.isLoggedIn);
   }
-
-  /**
-   * 在重连成功后重新发送所有缓存的订阅命令。
-   */
-  private replaySubscriptions(): void {
-    if (!this.isSocketReady()) {
-      return;
-    }
-    for (const subscription of this.subscriptions.values()) {
-      this.logger.info('重新发送订阅', {
-        service: subscription.service,
-        command: subscription.replayCommand,
-      });
-      this.sendSubscription(subscription, subscription.replayCommand);
-    }
+  private isReady(): boolean {
+    return this.isSocketReady() && this.readyGeneration === this.socketGeneration;
   }
-
-  /**
-   * 将订阅命令包装为请求并发送到 Streamer 服务。
-   */
-  private sendSubscription(subscription: StoredSubscription, command: 'SUBS' | 'ADD'): void {
+  private async replaySubscriptions(generation: number): Promise<void> {
+    if (!this.isSocketReady() || generation !== this.socketGeneration) return;
+    const replays = [...this.subscriptionStates.keys()].map((service) =>
+      this.enqueueService(service, async () => {
+        const state = this.subscriptionStates.get(service);
+        if (!state || !this.isSocketReady() || generation !== this.socketGeneration) {
+          return;
+        }
+        const parameters = parametersForState(state);
+        this.logger.info('重新发送 service 完整订阅', {
+          service,
+          command: 'SUBS',
+          generation: state.generation,
+          parameters,
+        });
+        await this.sendServiceCommand(service, 'SUBS', parameters, generation, true);
+      }),
+    );
+    await Promise.all(replays);
+  }
+  private sendServiceCommand(
+    service: string,
+    command: ServiceCommand,
+    parameters?: Record<string, unknown>,
+    generation = this.socketGeneration,
+    allowRecovery = false,
+  ): Promise<void> {
     if (!this.streamerInfo) {
-      throw new Error('Streamer info not set. Call connect() first.');
+      return Promise.reject(new StreamerConnectionError('Streamer info not set. Call connect() first.'));
+    }
+    const socket = this.socket;
+    if (!socket || generation !== this.socketGeneration || !(allowRecovery ? this.isSocketReady() : this.isReady())) {
+      return Promise.reject(new StreamerCommandNotSentError('Streamer is not ready for service command'));
     }
     const request: StreamerServiceRequest = {
-      service: subscription.service,
+      service,
       command,
       requestid: `${this.requestId++}`,
       SchwabClientCustomerId: this.streamerInfo.schwabClientCustomerId,
       SchwabClientCorrelId: this.streamerInfo.schwabClientCorrelId,
-      parameters: subscription.parameters,
+      parameters: cloneParameters(parameters),
     };
-    this.send({ requests: [request] });
+    return this.sendTrackedRequest(socket, request, generation);
   }
-
-  /**
-   * 构造订阅缓存的唯一键，保证对象顺序不同也能识别为同一订阅。
-   */
-  private buildSubscriptionKey(service: string, parameters?: Record<string, unknown>): string {
-    if (!parameters) {
-      return service;
+  private sendTrackedRequest(
+    socket: WebSocket,
+    request: StreamerRequestEnvelope['requests'][number],
+    generation: number,
+  ): Promise<void> {
+    if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new StreamerCommandNotSentError('Streamer is not open for service command'));
     }
-    return `${service}:${stableStringify(parameters)}`;
+    const requestid = String(request.requestid);
+    const acknowledgement = this.commandTracker.track({
+      requestid,
+      service: request.service,
+      command: request.command,
+      generation,
+    });
+    try {
+      this.sendOnSocket(socket, { requests: [request] });
+    } catch (error) {
+      this.commandTracker.cancel(requestid, toError(error));
+    }
+    return acknowledgement.then(() => undefined);
+  }
+  private enqueueService(service: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.serviceQueues.get(service) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(operation);
+    this.serviceQueues.set(service, next);
+    next.then(
+      () => this.clearServiceQueue(service, next),
+      () => this.clearServiceQueue(service, next),
+    );
+    return next;
+  }
+  private clearServiceQueue(service: string, completed: Promise<void>): void {
+    if (this.serviceQueues.get(service) === completed) {
+      this.serviceQueues.delete(service);
+    }
+  }
+  private isCurrentSocket(socket: WebSocket, generation: number): boolean {
+    return this.socket === socket && this.socketGeneration === generation;
+  }
+  private rollbackMutation(mutation: SubscriptionMutation): void {
+    if (this.subscriptionGenerations.get(mutation.service) !== mutation.generation) return;
+    const previous = cloneState(mutation.previousState);
+    if (previous) this.subscriptionStates.set(mutation.service, previous);
+    else this.subscriptionStates.delete(mutation.service);
+    this.logger.warn('Streamer 订阅命令失败，回滚本地 canonical state', {
+      service: mutation.service,
+      command: mutation.command,
+      generation: mutation.generation,
+    });
+  }
+  private handleMutationFailure(mutation: SubscriptionMutation, error: unknown, generation: number): void {
+    if (error instanceof StreamerCommandError || error instanceof StreamerCommandNotSentError) {
+      this.rollbackMutation(mutation);
+      return;
+    }
+    if (generation !== this.socketGeneration) return;
+    this.forceReconnect = true;
+    this.readyGeneration = null;
+    const socket = this.socket;
+    if (!socket || socket.readyState === WebSocket.CLOSED) {
+      if (!this.reconnectTimer) this.scheduleReconnect();
+      return;
+    }
+    this.logger.warn('Streamer 命令 ACK 结果未知，保留 canonical state 并重连对账', {
+      generation, error: toError(error).message,
+    });
+    socket.terminate();
+  }
+  private resolveLifecycle(lifecycle: PendingLifecycle | null): void {
+    lifecycle?.resolve();
+  }
+  private rejectLifecycle(lifecycle: PendingLifecycle | null, error: Error): void {
+    lifecycle?.reject(error);
+  }
+  private emitError(error: Error): void {
+    if (this.listenerCount('error') > 0) {
+      this.emit('error', error);
+    } else {
+      this.logger.error('Streamer 未注册 error listener', { error: error.message });
+    }
   }
 }

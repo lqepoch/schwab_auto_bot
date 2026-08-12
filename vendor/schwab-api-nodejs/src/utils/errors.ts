@@ -14,6 +14,84 @@ export interface SchwabApiErrorOptions {
   cause?: unknown;
 }
 
+export const UNKNOWN_OUTCOME_CODE = 'SCHWAB_UNKNOWN_OUTCOME';
+export const REAUTH_REQUIRED_CODE = 'SCHWAB_REAUTH_REQUIRED';
+
+export type MutationOperation = 'PLACE_ORDER' | 'REPLACE_ORDER' | 'CANCEL_ORDER';
+
+export interface UnknownOutcomeErrorOptions {
+  operation: MutationOperation;
+  method: string;
+  path: string;
+  status?: number;
+  requestId?: string;
+  correlationId?: string;
+  location?: string;
+  cause?: unknown;
+}
+
+/**
+ * The broker may have accepted a mutation even though this client cannot prove
+ * the outcome. Callers must reconcile orders before considering another write.
+ */
+export class UnknownOutcomeError extends Error {
+  readonly code = UNKNOWN_OUTCOME_CODE;
+  readonly outcome = 'unknown' as const;
+  readonly operation: MutationOperation;
+  readonly method: string;
+  readonly path: string;
+  readonly status?: number;
+  readonly requestId?: string;
+  readonly correlationId?: string;
+  readonly location?: string;
+
+  constructor(message: string, options: UnknownOutcomeErrorOptions) {
+    super(message, { cause: options.cause });
+    this.name = 'UnknownOutcomeError';
+    this.operation = options.operation;
+    this.method = options.method;
+    this.path = options.path;
+    this.status = options.status;
+    this.requestId = options.requestId;
+    this.correlationId = options.correlationId;
+    this.location = options.location;
+  }
+
+  toJSON() {
+    return {
+      name: this.name,
+      code: this.code,
+      outcome: this.outcome,
+      message: this.message,
+      operation: this.operation,
+      method: this.method,
+      path: this.path,
+      status: this.status,
+      requestId: this.requestId,
+      correlationId: this.correlationId,
+      location: this.location,
+    } as const;
+  }
+}
+
+/** Indicates that interactive OAuth authorization is required. */
+export class ReauthRequiredError extends Error {
+  readonly code = REAUTH_REQUIRED_CODE;
+
+  constructor(message = 'Schwab OAuth reauthorization is required', options: { cause?: unknown } = {}) {
+    super(message, { cause: options.cause });
+    this.name = 'ReauthRequiredError';
+  }
+
+  toJSON() {
+    return {
+      name: this.name,
+      code: this.code,
+      message: this.message,
+    } as const;
+  }
+}
+
 /**
  * 自定义的 Schwab API 错误类型，保留 HTTP 状态码、请求 URL 以及原始响应正文，便于排查问题。
  */

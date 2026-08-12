@@ -11,7 +11,9 @@
 - `--disable-sell-orders` 是显式的 live 运行时开关：禁止自动卖单的 Submit、Replace 与 Cancel，并停用所有 exit worker；已有工作卖单保持不变，订单与持仓仍会只读对账。
 - 所有 SDK 请求的内置重试均关闭。配额、429 退避、写入串行化和未知写入结果由主程序统一控制，避免一次逻辑请求产生未计量的 broker 请求。
 - `ACCT_ACTIVITY` 流消息仅触发 REST 订单对账；成交与终态只以 Schwab REST 订单快照为准。首个活动事件在 250ms 合并后发起高优先级轻量成交同步，不会等待正在进行的完整订单刷新；连续、无可解析详情的活动流最多每 1.5 秒确认一次，避免确认风暴耗尽补买和卖单所需的 API 配额。
-- 新 Submit 写入前必须有 Schwab Preview。对当前权威订单快照中已确认仍在工作的既有订单，精确原生 `PUT /orders/{orderId}` Replace 不重复 Preview；程序仍会校验源订单处于工作状态、策略身份不变以及订单策略边界。所有最终 broker 写入都由单一写入闸门串行化；失败或缺少 broker `Location` 订单 ID 的写入会进入未知结果隔离，不会自动重发。
+- 新 Submit 写入前必须有 Schwab Preview。对当前权威订单快照中已确认仍在工作的既有订单，精确原生 `PUT /orders/{orderId}` Replace 不重复 Preview；程序仍会校验源订单处于工作状态、策略身份不变以及订单策略边界。所有最终 broker 写入都由单一写入闸门串行化；失败、POST/PUT 缺少 broker `Location` 订单 ID，或 DELETE 的网络/5xx 未知结果会进入隔离，不会自动重发；DELETE 任意成功的 2xx 响应均直接清除其写前日志。
+- 每个最终 `POST`、`PUT` 或 `DELETE` 都会在同一写入闸门内、发给 Schwab 前先以写前日志（WAL）原子保存到 `.state/unknown-writes.json`；POST/PUT 成功收到 `Location`、DELETE 任意成功的 `2xx` 响应或明确的 `4xx` 拒绝后清除。网络/超时、`5xx`、POST/PUT 缺少 `Location` 或进程崩溃留下的记录会跨重启恢复为 pending，阻断后续所有最终写入；只读完整订单快照仍会继续运行并对账。最终闸门还要求完整订单快照在 5 秒内完成且已成功对账；过期时先 fail-closed。只有明确的取消终态，或排除写入前基线、具备唯一指纹且 broker `enteredTime` 位于写入前 5 秒容差至写入后 60 秒保守窗口内的新订单，才会解除隔离；无法证明时保持 fail-closed，绝不由调度器自动重发。WAL 只保存脱敏路径、账户单向指纹和订单指纹，不保存 token 或原始 payload。
+- Replace 未知结果只有在源 `orderId`、`REPLACED` 终态及写入前记录的源订单指纹全部一致时，才允许继续检查唯一 successor；任何身份不一致都保持 pending 并要求人工处理。
 
 ## 安装
 

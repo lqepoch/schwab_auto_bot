@@ -193,7 +193,7 @@ async function probeStreamerSubscription(
     let subscriptionIssued = false;
     let latestResponse: StreamerCommandResponse | undefined;
 
-    const cleanup = () => {
+    const cleanup = async (): Promise<void> => {
       streamer.off('response', onResponse);
       streamer.off('data', onData);
       streamer.off('error', onStreamerError);
@@ -201,7 +201,7 @@ async function probeStreamerSubscription(
 
       if (subscriptionIssued && streamer.status !== 'disconnected') {
         try {
-          streamer.unsubscribe({
+          await streamer.unsubscribe({
             service: options.service,
             parameters: { keys: options.symbol },
           });
@@ -214,8 +214,13 @@ async function probeStreamerSubscription(
     const settle = (result: StreamerProbeResult) => {
       if (settled) return;
       settled = true;
-      cleanup();
-      resolve(result);
+      void cleanup().then(
+        () => resolve(result),
+        (error) => {
+          console.warn(`  -> 清理 ${options.service} 订阅时出现异常:`, error);
+          resolve(result);
+        },
+      );
     };
 
     const onResponse = (resp: StreamerCommandResponse) => {

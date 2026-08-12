@@ -1,8 +1,8 @@
-import { randomUUID } from 'node:crypto';
 import { HttpClient } from '../utils/httpClient.js';
 import { TokenManager } from '../auth/tokenManager.js';
 import { AuthorizedApiClient } from '../utils/apiClientBase.js';
 import { Logger, createConsoleLogger } from '../utils/logger.js';
+import { SchwabApiError, UnknownOutcomeError, type MutationOperation } from '../utils/errors.js';
 import { StreamerInfoSchema } from '../validation/traderSchemas.js';
 import {
   AccountNumberHash,
@@ -17,27 +17,20 @@ import {
   TransactionsQuery,
   UserPreference,
   PreviewOrderResponse,
+  MutationResult,
 } from '../types/trader.js';
-import type { RequestOptions, RetryConfig, RetryEvent } from '../utils/httpClient.js';
+import type { RequestOptions } from '../utils/httpClient.js';
 
 /**
- * 公共可选项：用于覆盖请求级重试、超时以及幂等键。
+ * Mutation requests may only override the physical request timeout. Automatic
+ * retries are intentionally not configurable because Schwab does not expose a
+ * documented idempotency contract for order mutations.
  */
 export interface MutationRequestOptions {
-  idempotencyKey?: string;
-  retryConfig?: RetryConfig;
-  maxRetries?: number;
   timeoutMs?: number;
-  onRetry?: (event: RetryEvent) => void;
 }
 
-/**
- * 下单接口专用选项。默认自动生成幂等键，可通过回调获知最终使用的值。
- */
-export interface PlaceOrderOptions extends MutationRequestOptions {
-  autoGenerateIdempotencyKey?: boolean;
-  onIdempotencyKey?: (key: string) => void;
-}
+export interface PlaceOrderOptions extends MutationRequestOptions {}
 
 export interface AccountsQuery {
   fields?: 'positions';
@@ -109,29 +102,21 @@ export class TraderApiClient extends AuthorizedApiClient {
   /**
    * `POST /accounts/{accountNumber}/orders`：提交新订单。
    * @param order 按官方 JSON 结构填写下单信息。
-   * @param options 可自定义幂等键、重试策略与超时时间；默认自动生成幂等键。
+   * @param options 仅支持覆盖单次物理请求的超时时间；写入结果必须由调用方对账。
    */
   async placeOrder(
     accountNumber: string,
     order: PlaceOrderRequest,
     options: PlaceOrderOptions = {},
-  ): Promise<void> {
+  ): Promise<MutationResult> {
     this.logger.info('调用 placeOrder', { accountNumber });
-    const idempotencyKey = this.resolveIdempotencyKey(options);
-    const overrides: MutationRequestOptions = {
-      idempotencyKey,
-      retryConfig: options.retryConfig,
-      maxRetries: options.maxRetries,
-      timeoutMs: options.timeoutMs,
-    };
-    const requestOptions = this.applyMutationOverrides<void>(
+    return this.requestMutation('PLACE_ORDER', `/accounts/${accountNumber}/orders`,
       {
         method: 'POST',
         body: order,
       },
-      overrides,
+      options,
     );
-    await this.request<void>(`/accounts/${accountNumber}/orders`, requestOptions);
   }
 
   /**
@@ -146,45 +131,43 @@ export class TraderApiClient extends AuthorizedApiClient {
   /**
    * `PUT /accounts/{accountNumber}/orders/{orderId}`：替换已存在订单。
    * @param order 需提供完整订单结构，Schwab 会覆盖原订单。
-   * @param options 支持重试、超时与自定义幂等键的覆盖。
+   * @param options 仅支持覆盖单次物理请求的超时时间。
    */
   async replaceOrder(
     accountNumber: string,
     orderId: number | string,
     order: ReplaceOrderRequest,
     options: MutationRequestOptions = {},
-  ): Promise<void> {
+  ): Promise<MutationResult> {
     this.logger.info('调用 replaceOrder', { accountNumber, orderId });
-    const requestOptions = this.applyMutationOverrides<void>(
+    return this.requestMutation('REPLACE_ORDER', `/accounts/${accountNumber}/orders/${orderId}`,
       {
         method: 'PUT',
         body: order,
       },
       options,
     );
-    await this.request<void>(`/accounts/${accountNumber}/orders/${orderId}`, requestOptions);
   }
 
   /**
    * `DELETE /accounts/{accountNumber}/orders/{orderId}`：取消订单。
    * @param requestBody 可选，提供原订单信息以满足额外验证。
-   * @param options 支持重试、超时与自定义幂等键的覆盖。
+   * @param options 仅支持覆盖单次物理请求的超时时间。
    */
   async cancelOrder(
     accountNumber: string,
     orderId: number | string,
     requestBody?: CancelOrderRequest,
     options: MutationRequestOptions = {},
-  ): Promise<void> {
+  ): Promise<MutationResult> {
     this.logger.info('调用 cancelOrder', { accountNumber, orderId });
-    const requestOptions = this.applyMutationOverrides<void>(
+    return this.requestMutation('CANCEL_ORDER', `/accounts/${accountNumber}/orders/${orderId}`,
       {
         method: 'DELETE',
         body: requestBody,
       },
       options,
     );
-    await this.request<void>(`/accounts/${accountNumber}/orders/${orderId}`, requestOptions);
   }
 
   /**
@@ -199,7 +182,7 @@ export class TraderApiClient extends AuthorizedApiClient {
   /**
    * `POST /accounts/{accountNumber}/previewOrder`：下单前预估资金占用。
    * @param order 与正式下单结构一致，会返回试算结果。
-   * @param options 支持重试与超时等高级配置。
+   * @param options 仅支持覆盖单次物理请求的超时时间。
    */
   async previewOrder(
     accountNumber: string,
@@ -293,45 +276,98 @@ export class TraderApiClient extends AuthorizedApiClient {
     }
   }
 
-  private resolveIdempotencyKey(options: PlaceOrderOptions): string | undefined {
-    if (options.idempotencyKey) {
-      options.onIdempotencyKey?.(options.idempotencyKey);
-      return options.idempotencyKey;
-    }
-
-    const shouldGenerate = options.autoGenerateIdempotencyKey ?? true;
-    if (!shouldGenerate) {
-      return undefined;
-    }
-
-    const generatedKey = typeof randomUUID === 'function'
-      ? randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    this.logger.debug('为 placeOrder 生成幂等键', { idempotencyKey: generatedKey });
-    options.onIdempotencyKey?.(generatedKey);
-    return generatedKey;
-  }
-
   private applyMutationOverrides<T>(
     base: RequestOptions<T>,
     overrides: MutationRequestOptions,
   ): RequestOptions<T> {
-    const requestOptions: RequestOptions<T> = { ...base };
-    if (overrides.idempotencyKey) {
-      requestOptions.idempotencyKey = overrides.idempotencyKey;
-    }
-    if (overrides.retryConfig) {
-      requestOptions.retryConfig = overrides.retryConfig;
-    }
-    if (overrides.maxRetries !== undefined) {
-      requestOptions.maxRetries = overrides.maxRetries;
-    }
+    const requestOptions: RequestOptions<T> = {
+      ...base,
+      // A mutation is always one physical broker attempt. An ambiguous result
+      // is surfaced to reconciliation instead of being sent again.
+      maxRetries: 0,
+      retryConfig: { maxRetries: 0 },
+    };
     if (overrides.timeoutMs !== undefined) {
       requestOptions.timeoutMs = overrides.timeoutMs;
     }
-    if (overrides.onRetry) {
-      requestOptions.onRetry = overrides.onRetry;
-    }
     return requestOptions;
+  }
+
+  private async requestMutation(
+    operation: MutationOperation,
+    path: string,
+    base: RequestOptions<undefined>,
+    options: MutationRequestOptions,
+  ): Promise<MutationResult> {
+    const requestOptions = this.applyMutationOverrides(base, options);
+    try {
+      const response = await this.requestWithResponse<undefined>(path, requestOptions);
+      const location = response.headers.get('location')?.trim() || null;
+      const orderId = parseOrderIdFromLocation(location);
+      const correlationId = response.headers.get('Schwab-Client-CorrelID')?.trim() || null;
+      if (operation !== 'CANCEL_ORDER' && (!location || !orderId)) {
+        throw new UnknownOutcomeError(
+          'Schwab accepted the order mutation without a valid Location header',
+          {
+            operation,
+            method: requestOptions.method ?? 'GET',
+            path,
+            status: response.status,
+            correlationId: correlationId ?? undefined,
+            location: location ?? undefined,
+          },
+        );
+      }
+      return {
+        status: response.status,
+        headers: response.headers,
+        body: response.body,
+        location,
+        orderId,
+        correlationId,
+      };
+    } catch (error) {
+      if (error instanceof UnknownOutcomeError) throw error;
+      if (error instanceof SchwabApiError && (error.isNetworkError || error.status >= 500 || error.status === 0)) {
+        throw new UnknownOutcomeError(
+          'The broker mutation outcome is unknown; reconcile orders before retrying',
+          {
+            operation,
+            method: base.method ?? 'GET',
+            path,
+            status: error.status || undefined,
+            requestId: error.requestId,
+            correlationId: correlationIdFromHeaders(error.headers),
+            location: headerFromHeaders(error.headers, 'location'),
+            cause: error,
+          },
+        );
+      }
+      // 4xx responses, including 401, are explicit rejections and are never
+      // hidden by a transparent retry or converted to UnknownOutcome.
+      throw error;
+    }
+  }
+}
+
+function correlationIdFromHeaders(headers: Record<string, string>): string | undefined {
+  return headerFromHeaders(headers, 'schwab-client-correlid');
+}
+
+function headerFromHeaders(headers: Record<string, string>, name: string): string | undefined {
+  const key = Object.keys(headers).find((headerName) => headerName.toLowerCase() === name);
+  return key ? headers[key]?.trim() || undefined : undefined;
+}
+
+function parseOrderIdFromLocation(location: string | null): string | null {
+  if (!location) return null;
+  try {
+    const url = new URL(location, 'https://api.schwabapi.com');
+    const segments = url.pathname.split('/').filter(Boolean);
+    const id = segments.at(-1);
+    const parent = segments.at(-2)?.toLowerCase();
+    return id && parent === 'orders' && /^\d+$/.test(id) ? id : null;
+  } catch {
+    return null;
   }
 }

@@ -21,6 +21,7 @@ import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer, fixedPric
 import { RefreshRoundLimit } from "./refresh_round_limit.ts";
 import { classifyPreviewRejection, previewRejectionCooldownFromError, previewRejectionDetails, previewRejectionSummary } from "./preview_rejection.ts";
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./activity_pacer.ts";
+import { FULL_SNAPSHOT_MAX_AGE_MS, isFullSnapshotFresh } from "./full_snapshot_freshness.ts";
 import {
   formatFixedPriceRebuy,
   formatFixedPriceReplace,
@@ -45,6 +46,13 @@ import {
   isRefreshSpreadEligible,
   refreshSpreadWidth,
 } from "./refresh_order_policy.ts";
+import {
+  fingerprintOrder,
+  safePath,
+  UnknownWriteReconciliation,
+  type UnknownWriteFailure,
+} from "./unknown_write_reconciliation.ts";
+
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
@@ -55,6 +63,7 @@ const exitTemplateStatePath = join(root, ".state", "exit-templates.json");
 const runtimeStatePath = join(root, ".state", "runtime", "active-run.json");
 const runtimeControlPath = join(root, ".state", "runtime", "control-request.json");
 const runtimeLockPath = join(root, ".state", "runtime", "active-run.lock");
+const unknownWriteStatePath = join(root, ".state", "unknown-writes.json");
 const runId = randomUUID();
 const runtimeStartedAt = Date.now();
 const PREVIEW_REJECTION_COOLDOWN_MS = 30_000;
@@ -257,7 +266,7 @@ async function api(
   path: string,
   init: RequestInit = {},
   priority: Priority = 0,
-): Promise<{ body: any; headers: Headers }> {
+): Promise<{ body: any; headers: Headers; status: number }> {
   await budget.admit(priority);
   const token = await tokens.get();
   try {
@@ -269,7 +278,7 @@ async function api(
       latestBrokerRateLimit = brokerRateLimitFromHeaders(error.headers);
       if (error.status === 429) budget.rateLimited(error.headers["retry-after"] ?? null);
       if (error.status === 401) void tokens.get(true);
-      throw new Error(`SCHWAB_HTTP_${error.status}`);
+      throw Object.assign(new Error(`SCHWAB_HTTP_${error.status}`), { status: error.status });
     }
     throw error;
   }
@@ -280,6 +289,7 @@ const finalWriteGate = new PriorityGate();
 let accountHash = "";
 let orders: Json[] = [];
 let polling = false;
+let fullSnapshotReconciled = false;
 const evaluatingExitStrategies = new Set<string>();
 let lastFullOrderPollAt = 0;
 let stopping = false;
@@ -300,11 +310,14 @@ const inventoryObservedAt = new Map<string, number>();
 const inventoryByStrategy = new Map<string, number>();
 const observedFillQuantities = new Map<string, number>();
 let inventoryFillBaselineEstablished = false;
-const unknownWrites = new Set<string>();
+const unknownWriteReconciliation = new UnknownWriteReconciliation(unknownWriteStatePath);
+let unknownWritePersistenceFault: unknown = null;
+const reportedUnknownPending = new Map<string, string>();
 const sellDue = new Map<string, number>();
 const sellSubmitDue = new Map<string, number>();
 const sellSubmitInFlight = new Set<string>();
 const cancelingSells = new Set<string>();
+await unknownWriteReconciliation.load();
 const exitGateStates = new Map<string, string>();
 const liquidityExitRefreshes = new Map<string, { sellAt: number; remainingRefreshes: number; nextAt: number }>();
 const exitWorkerTimers = new Map<string, { dueAt: number; timer: NodeJS.Timeout }>();
@@ -417,6 +430,191 @@ function payloadAuditData(payload: Json): Record<string, unknown> {
       quantity: leg.quantity ?? null,
     })) : [],
   };
+}
+
+function unknownOperation(method: "POST" | "PUT" | "DELETE"): UnknownWriteFailure["operation"] {
+  return method === "POST" ? "PLACE_ORDER" : method === "PUT" ? "REPLACE_ORDER" : "CANCEL_ORDER";
+}
+
+function statusFromWriteError(error: unknown): number | undefined {
+  const structured = error as { status?: unknown };
+  if (typeof structured.status === "number") return structured.status;
+  const match = String(error).match(/SCHWAB_HTTP_(\d+)/);
+  return match ? Number(match[1]) : undefined;
+}
+
+function baselineOrderIds(payload: Json, targetOrderId?: string): string[] {
+  const payloadFingerprint = fingerprintOrder(payload);
+  const ids = orders
+    .filter((order) => fingerprintOrder(order) === payloadFingerprint)
+    .map(orderId);
+  if (targetOrderId) ids.push(targetOrderId);
+  return [...new Set(ids)];
+}
+
+function assertBrokerWritesAllowed(key: string, method: "POST" | "PUT" | "DELETE", path: string): void {
+  if (!fullSnapshotReconciled) {
+    executionJournal.record("broker.write.blocked", {
+      key, method, path: safePath(path), reason: "full-snapshot-reconciliation-required",
+    });
+    throw new Error("FULL_SNAPSHOT_RECONCILIATION_REQUIRED");
+  }
+  if (!isFullSnapshotFresh(lastFullOrderPollAt)) {
+    executionJournal.record("broker.write.blocked", {
+      key,
+      method,
+      path: safePath(path),
+      reason: "full-snapshot-stale",
+      lastFullOrderPollAt,
+      maxAgeMs: FULL_SNAPSHOT_MAX_AGE_MS,
+    });
+    throw new Error("FULL_SNAPSHOT_RECONCILIATION_REQUIRED");
+  }
+  if (unknownWritePersistenceFault) {
+    executionJournal.record("broker.write.blocked", {
+      key,
+      method,
+      path: safePath(path),
+      reason: "unknown-write-state-persistence-fault",
+    });
+    throw new Error("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED");
+  }
+  if (!unknownWriteReconciliation.hasPending()) return;
+  executionJournal.record("broker.write.blocked", {
+    key,
+    method,
+    path: safePath(path),
+    reason: "unknown-write-pending-reconciliation",
+    pendingCount: unknownWriteReconciliation.pending().length,
+  });
+  throw new Error("UNKNOWN_WRITE_PENDING_RECONCILIATION");
+}
+
+function isUnknownWriteGuardError(error: unknown): boolean {
+  const message = String(error);
+  return message.includes("UNKNOWN_WRITE_PENDING_RECONCILIATION")
+    || message.includes("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED");
+}
+
+async function beginUnknownWrite(failure: UnknownWriteFailure) {
+  try {
+    const record = await unknownWriteReconciliation.beginWrite(failure);
+    executionJournal.record("broker.write.intent-persisted", {
+      id: record.id,
+      phase: record.phase,
+      operation: record.operation,
+      method: record.method,
+      key: record.key,
+      path: record.path,
+      pathFingerprint: record.pathFingerprint,
+      payloadFingerprint: record.payloadFingerprint,
+      baselineOrderIds: record.baselineOrderIds,
+      targetOrderId: record.targetOrderId,
+      targetFingerprint: record.targetFingerprint,
+      preSendAt: record.preSendAt,
+      createdAt: record.createdAt,
+    });
+    return record;
+  } catch (error) {
+    unknownWritePersistenceFault = error;
+    executionJournal.record("broker.write.unknown-persistence-failed", {
+      operation: failure.operation,
+      method: failure.method,
+    });
+    stamp("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED: all broker writes are now blocked");
+    throw new Error("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED");
+  }
+}
+
+
+async function completeUnknownWrite(id: string, operation: UnknownWriteFailure["operation"], key: string): Promise<void> {
+  try {
+    await unknownWriteReconciliation.completeWrite(id);
+    executionJournal.record("broker.write.ledger-cleared", { id, operation, key, outcome: "confirmed" });
+  } catch (error) {
+    unknownWritePersistenceFault = error;
+    executionJournal.record("broker.write.unknown-persistence-failed", { operation, key });
+    stamp("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED: all broker writes are now blocked");
+    throw new Error("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED");
+  }
+}
+
+async function settleUnknownWrite(
+  id: string,
+  operation: UnknownWriteFailure["operation"],
+  key: string,
+  outcome: Pick<UnknownWriteFailure, "status" | "reason">,
+): Promise<void> {
+  try {
+    const record = await unknownWriteReconciliation.settleWrite(id, outcome);
+    if (!record) {
+      executionJournal.record("broker.write.ledger-cleared", { id, operation, key, outcome: "explicit-4xx" });
+      return;
+    }
+    executionJournal.record("broker.write.unknown-persisted", {
+      id: record.id,
+      phase: record.phase,
+      operation: record.operation,
+      method: record.method,
+      key: record.key,
+      path: record.path,
+      pathFingerprint: record.pathFingerprint,
+      payloadFingerprint: record.payloadFingerprint,
+      baselineOrderIds: record.baselineOrderIds,
+      targetOrderId: record.targetOrderId,
+      targetFingerprint: record.targetFingerprint,
+      preSendAt: record.preSendAt,
+      createdAt: record.createdAt,
+      reason: record.reason,
+      status: record.status,
+    });
+    stamp("UNKNOWN_WRITE_PENDING operation=" + record.operation + " key=" + record.key + " id=" + record.id + " reason=" + record.reason);
+  } catch (error) {
+    unknownWritePersistenceFault = error;
+    executionJournal.record("broker.write.unknown-persistence-failed", { operation, key });
+    stamp("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED: all broker writes are now blocked");
+    throw new Error("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED");
+  }
+}
+
+async function reconcileUnknownWritesAfterFullSnapshot(): Promise<void> {
+  try {
+    const result = await unknownWriteReconciliation.reconcile(orders);
+  for (const record of result.resolved) {
+    reportedUnknownPending.delete(record.id);
+    executionJournal.record("broker.write.unknown-reconciled", {
+      id: record.id,
+      operation: record.operation,
+      method: record.method,
+      key: record.key,
+      path: record.path,
+      targetOrderId: record.targetOrderId,
+      reason: record.reason,
+    });
+    stamp(`UNKNOWN_WRITE_RECONCILED operation=${record.operation} key=${record.key} id=${record.id}`);
+  }
+  for (const item of result.pending) {
+    const signature = `${item.reason}:${item.matchingOrderCount}`;
+    if (reportedUnknownPending.get(item.record.id) === signature) continue;
+    reportedUnknownPending.set(item.record.id, signature);
+    executionJournal.record("broker.write.unknown-still-pending", {
+      id: item.record.id,
+      operation: item.record.operation,
+      method: item.record.method,
+      key: item.record.key,
+      path: item.record.path,
+      targetOrderId: item.record.targetOrderId,
+      reason: item.reason,
+      matchingOrderCount: item.matchingOrderCount,
+    });
+    stamp(`UNKNOWN_WRITE_PENDING operation=${item.record.operation} key=${item.record.key} id=${item.record.id} reconciliation=${item.reason}`);
+  }
+  } catch (error) {
+    unknownWritePersistenceFault = error;
+    executionJournal.record("broker.write.unknown-persistence-failed", { operation: "RECONCILIATION", method: "READ_ONLY" });
+    stamp("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED: all broker writes are now blocked");
+    throw error;
+  }
 }
 
 function recordOrderTransitions(source: "full" | "fills", values: readonly Json[]): void {
@@ -675,6 +873,7 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     executionJournal.record("broker.write.skipped", { key, reason: "read-only", method, path, order: payloadAuditData(payload) });
     return "READ_ONLY";
   }
+  assertBrokerWritesAllowed(key, method, path);
   if (policy.disableSellOrders && isClosingPayload(payload)) {
     executionJournal.record("exit.write.blocked", {
       key, method, path, reason: "cli-disable-sell-orders", order: payloadAuditData(payload),
@@ -756,33 +955,61 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     previewRejectedUntil.delete(previewFingerprint);
     executionJournal.record("broker.preview.accepted", { key, preflight, method, path, order: payloadAuditData(payload) });
   }
+  const replaceTargetOrderId = preflightDecision.replaceOrderId;
+  let baselineIds: string[] = [];
+  let ledgerId: string | null = null;
   await evidence(key, method, path, payload, preflight);
   await waitForReplenishmentWriteWindow(priority, key);
   try {
     executionJournal.record("broker.write.requested", { key, preflight, method, path, priority, order: payloadAuditData(payload) });
-    const result = await finalWriteGate.run(
+    const brokerOrderId = await finalWriteGate.run(
       priority,
       async () => {
         if (stopping) throw new Error("RUNTIME_STOPPING");
         await ensureWeeklyReauthorization();
         policy.requireExecutionWindow();
-        return api(path, { method, body: JSON.stringify(payload) }, 0);
+        assertBrokerWritesAllowed(key, method, path);
+        const preSendAt = new Date().toISOString();
+        baselineIds = baselineOrderIds(payload, replaceTargetOrderId ?? undefined);
+        const intent = await beginUnknownWrite({
+          operation: unknownOperation(method),
+          method,
+          key,
+          path,
+          payload,
+          baselineOrderIds: baselineIds,
+          targetOrderId: replaceTargetOrderId ?? undefined,
+          targetOrder: replaceTargetOrderId
+            ? orders.find((order) => orderId(order) === replaceTargetOrderId)
+            : undefined,
+          preSendAt,
+        });
+        ledgerId = intent.id;
+        const response = await api(path, { method, body: JSON.stringify(payload) }, 0);
+        const brokerId = response.headers.get("location")?.split("/").at(-1);
+        if (!brokerId) {
+          throw Object.assign(new Error("SCHWAB_WRITE_ACCEPTED_WITHOUT_LOCATION"), {
+            status: response.status,
+            unknownReason: "missing-location",
+          });
+        }
+        await completeUnknownWrite(intent.id, unknownOperation(method), key);
+        ledgerId = null;
+        return brokerId;
       },
     );
-    const brokerOrderId = result.headers.get("location")?.split("/").at(-1);
-    if (!brokerOrderId) {
-      unknownWrites.add(key);
-      executionJournal.record("broker.write.unknown", { key, preflight, method, path, reason: "missing-location", order: payloadAuditData(payload) });
-      throw new Error("SCHWAB_WRITE_ACCEPTED_WITHOUT_LOCATION");
-    }
     executionJournal.record("broker.write.accepted", { key, preflight, method, path, brokerOrderId, order: payloadAuditData(payload) });
     return brokerOrderId;
   } catch (error) {
     if (String(error) === "Error: RUNTIME_STOPPING") {
       executionJournal.record("broker.write.skipped", { key, reason: "runtime-stopping-before-final-write", method, path, order: payloadAuditData(payload) });
-    } else {
-      unknownWrites.add(key);
-      executionJournal.record("broker.write.unknown", { key, preflight, method, path, error: String(error), order: payloadAuditData(payload) });
+    } else if (ledgerId !== null && !isUnknownWriteGuardError(error)) {
+      const details = error as { status?: number; unknownReason?: string };
+      await settleUnknownWrite(ledgerId, unknownOperation(method), key, {
+        status: details.status ?? statusFromWriteError(error),
+        reason: details.unknownReason ?? String(error),
+      });
+      ledgerId = null;
     }
     throw error;
   }
@@ -804,17 +1031,35 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
     });
     throw new Error("SELL_ORDERS_DISABLED");
   }
+  const path = `/trader/v1/accounts/${accountHash}/orders/${orderIdValue}`;
+  assertBrokerWritesAllowed(key, "DELETE", path);
   await ensureWeeklyReauthorization();
   policy.requireExecutionWindow();
-  const path = `/trader/v1/accounts/${accountHash}/orders/${orderIdValue}`;
   await evidence(key, "DELETE", path, {}, "NOT_APPLICABLE");
+  let ledgerId: string | null = null;
   try {
     executionJournal.record("broker.cancel.requested", { key, orderId: orderIdValue, path });
     await finalWriteGate.run(priority, async () => {
       if (stopping) throw new Error("RUNTIME_STOPPING");
       await ensureWeeklyReauthorization();
       policy.requireExecutionWindow();
-      return api(path, { method: "DELETE" }, priority);
+      assertBrokerWritesAllowed(key, "DELETE", path);
+      const preSendAt = new Date().toISOString();
+      const intent = await beginUnknownWrite({
+        operation: "CANCEL_ORDER",
+        method: "DELETE",
+        key,
+        path,
+        baselineOrderIds: [orderIdValue],
+        targetOrderId: orderIdValue,
+        targetOrder: orders.find((order) => orderId(order) === orderIdValue),
+        preSendAt,
+      });
+      ledgerId = intent.id;
+      const response = await api(path, { method: "DELETE" }, priority);
+      await completeUnknownWrite(intent.id, "CANCEL_ORDER", key);
+      ledgerId = null;
+      return response;
     });
     const source = orders.find((order) => orderId(order) === orderIdValue);
     if (source) source.status = "CANCELED";
@@ -822,9 +1067,13 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
   } catch (error) {
     if (String(error) === "Error: RUNTIME_STOPPING") {
       executionJournal.record("broker.cancel.skipped", { key, orderId: orderIdValue, reason: "runtime-stopping-before-final-write" });
-    } else {
-      unknownWrites.add(key);
-      executionJournal.record("broker.cancel.unknown", { key, orderId: orderIdValue, path, error: String(error) });
+    } else if (ledgerId !== null && !isUnknownWriteGuardError(error)) {
+      const details = error as { status?: number; unknownReason?: string };
+      await settleUnknownWrite(ledgerId, "CANCEL_ORDER", key, {
+        status: details.status ?? statusFromWriteError(error),
+        reason: details.unknownReason ?? String(error),
+      });
+      ledgerId = null;
     }
     throw error;
   }
@@ -836,6 +1085,7 @@ async function bootstrap(): Promise<void> {
     throw new Error("需要且仅允许一个 Schwab linked account");
   }
   accountHash = linked.body[0].hashValue;
+  await unknownWriteReconciliation.bindAccount(accountHash);
 }
 
 async function loadActivityStreamContext(): Promise<{
@@ -875,6 +1125,7 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
   // refresh before a confirmed fill can replenish.
   if ((full && polling) || stopping) return false;
   if (full) polling = true;
+  if (full) fullSnapshotReconciled = false;
   try {
     const now = new Date();
     const lookbackMs = full ? 60 * 60_000 : 5 * 60_000;
@@ -890,9 +1141,12 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
     const incoming = flatten(response.body);
     if (full) {
       orders = incoming;
+      await reconcileUnknownWritesAfterFullSnapshot();
+      fullSnapshotReconciled = true;
       recordOrderTransitions("full", orders);
       lastFullOrderPollAt = Date.now();
       reportWorkingOrderPolicyViolations();
+
       reportWorkingRefreshSpreadSkips();
       if (!readOnly && policy.isExecutionWindowOpen()) detectExplorerFills();
       reconcileExplorerSnapshot();
@@ -2306,8 +2560,13 @@ if (policy.disableSellOrders) {
   stamp("SELL_ORDER_AUTOMATION_DISABLED: no sell Submit, Replace, or Cancel will be sent; existing working sells are left unchanged");
 }
 await bootstrap();
-await poll(true);
-if (!once) {
+const startupReady = await poll(true);
+if (!startupReady) {
+  executionJournal.record("run.start-blocked", { reason: "initial-full-order-reconciliation-failed" });
+  stamp("启动停止：初始完整订单快照或未知写入只读对账失败，未启动任何交易循环");
+  stop();
+}
+if (startupReady && !once) {
   activityStream = new SchwabActivityStream({
     loadContext: loadActivityStreamContext,
     onActivity: handleAccountActivity,
@@ -2316,7 +2575,7 @@ if (!once) {
   activityStream.start();
   if (!readOnly) void explorerRoundLoop();
 }
-if (!readOnly) {
+if (startupReady && !readOnly) {
   await reconcilePositions();
   stamp(policy.disableSellOrders
     ? "启动阶段：卖单自动化已禁用；仅执行买单与只读订单/持仓对账"
@@ -2326,7 +2585,7 @@ if (!readOnly) {
   await evaluateExits(true);
   if (!policy.disableSellOrders) stamp("启动卖出评估已调度；成交监听、每策略卖单维护与整体刷新并行运行");
 }
-if (once) {
+if (once || !startupReady) {
   stop();
 } else {
   runtimeIntervals.push(setInterval(() => {

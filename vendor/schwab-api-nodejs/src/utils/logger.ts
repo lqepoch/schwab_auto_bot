@@ -42,8 +42,9 @@ export interface ConsoleLoggerOptions {
  * 默认的控制台日志实现，会在输出中包含时间戳、作用域与元数据。
  */
 export class ConsoleLogger implements Logger {
-  private readonly scope?: string;
-  private readonly level: LogLevel;
+  /** Subclasses use these to preserve logger identity when creating children. */
+  protected readonly scope?: string;
+  protected readonly level: LogLevel;
   private readonly levelPriority: number;
 
   constructor(options: ConsoleLoggerOptions = {}) {
@@ -320,39 +321,52 @@ export function createDebugLogger(options: ConsoleLoggerOptions = {}): DebugLogg
  * 性能监控装饰器
  */
 export function logExecutionTime(logger: Logger, operationName?: string) {
-  return function <T extends (...args: any[]) => any>(target: any, propertyKey: string, descriptor: TypedPropertyDescriptor<T>) {
-    const originalMethod = descriptor.value!;
+  return function <This, Args extends unknown[], Result>(
+    target: object,
+    propertyKey: string | symbol,
+    descriptor: TypedPropertyDescriptor<(this: This, ...args: Args) => Result>,
+  ): TypedPropertyDescriptor<(this: This, ...args: Args) => Result> {
+    const originalMethod = descriptor.value;
+    if (!originalMethod) {
+      return descriptor;
+    }
     
-    descriptor.value = function (...args: any[]) {
+    descriptor.value = function (this: This, ...args: Args): Result {
       const startTime = performance.now();
-      const operation = operationName || `${target.constructor.name}.${propertyKey}`;
+      const operation = operationName || `${target.constructor.name}.${String(propertyKey)}`;
       
       try {
         const result = originalMethod.apply(this, args);
         
         // 处理 Promise
-        if (result && typeof result.then === 'function') {
-          return result.then((value: any) => {
-            const duration = performance.now() - startTime;
-            logger.debug(`操作完成: ${operation}`, withDuration(startTime));
-            return value;
-          }).catch((error: any) => {
-            const duration = performance.now() - startTime;
-            logger.error(`操作失败: ${operation}`, { ...withDuration(startTime), error });
-            throw error;
-          });
+        if (isPromiseLike(result)) {
+          return result.then(
+            (value) => {
+              logger.debug(`操作完成: ${operation}`, withDuration(startTime));
+              return value;
+            },
+            (error: unknown) => {
+              logger.error(`操作失败: ${operation}`, { ...withDuration(startTime), error });
+              throw error;
+            },
+          ) as Result;
         } else {
-          const duration = performance.now() - startTime;
           logger.debug(`操作完成: ${operation}`, withDuration(startTime));
           return result;
         }
       } catch (error) {
-        const duration = performance.now() - startTime;
         logger.error(`操作失败: ${operation}`, { ...withDuration(startTime), error });
         throw error;
       }
-    } as T;
+    };
     
     return descriptor;
   };
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
+    return false;
+  }
+  return typeof (value as { then?: unknown }).then === 'function';
 }

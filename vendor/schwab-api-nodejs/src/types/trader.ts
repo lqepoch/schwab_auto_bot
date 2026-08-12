@@ -381,6 +381,22 @@ export interface PreviewOrderResponse {
   validations?: unknown;
 }
 
+/**
+ * Metadata returned by a successful order mutation. Schwab returns an empty
+ * body for order creation/replacement and places the new order link in the
+ * `Location` response header instead.
+ */
+export interface MutationResult<T = undefined> {
+  status: number;
+  headers: Headers;
+  body: T | undefined;
+  location: string | null;
+  orderId: string | null;
+  correlationId: string | null;
+}
+
+export type OrderMutationResult<T = undefined> = MutationResult<T>;
+
 export interface OrderPreviewRequest {
   orderStrategyType: string;
   session?: Session;

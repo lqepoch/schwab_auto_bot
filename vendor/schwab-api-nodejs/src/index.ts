@@ -352,8 +352,31 @@ export type {
 };
 export { TokenManager, TokenStore, HttpClient, TraderApiClient, StreamerClient, MarketDataApiClient };
 export { MarketDataStreamClient };
+export type { TokenManagerOptions } from './auth/tokenManager.js';
+export type {
+  HttpClientConfig,
+  HttpResponse,
+  HttpMethod,
+  RequestOptions,
+  RetryConfig,
+  RetryEvent,
+} from './utils/httpClient.js';
 export type { StreamerClientOptions } from './streamer/streamerClient.js';
-export { SchwabApiError } from './utils/errors.js';
+export {
+  StreamerCommandError,
+  StreamerCommandTimeoutError,
+  StreamerCommandNotSentError,
+  StreamerConnectionError,
+} from './streamer/streamerErrors.js';
+export {
+  SchwabApiError,
+  UnknownOutcomeError,
+  ReauthRequiredError,
+  UNKNOWN_OUTCOME_CODE,
+  REAUTH_REQUIRED_CODE,
+} from './utils/errors.js';
+export type { MutationRequestOptions, PlaceOrderOptions } from './clients/trader.js';
+export type { MutationResult, OrderMutationResult } from './types/trader.js';
 
 // 日志和调试工具
 export { 

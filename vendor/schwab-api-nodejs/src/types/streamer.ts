@@ -7,7 +7,7 @@ const StreamerDataRowSchema = z
 
 export const StreamerCommandResponseSchema = z.object({
   service: z.string(),
-  requestid: z.string(),
+  requestid: z.union([z.string(), z.number()]).transform(String),
   command: z.string(),
   timestamp: z.coerce.number(),
   content: z.object({
