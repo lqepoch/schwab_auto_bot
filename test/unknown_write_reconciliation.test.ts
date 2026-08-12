@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -354,6 +354,35 @@ test("write-ahead intent survives restart and explicit settlement", async () => 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("failed WAL persistence removes its temporary file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "schwab-unknown-write-cleanup-"));
+  const statePath = join(directory, "unknown-writes.json");
+  const ledger = new UnknownWriteReconciliation(statePath, {
+    idFactory: (() => {
+      let index = 0;
+      return () => `cleanup-${++index}`;
+    })(),
+  });
+  await ledger.load();
+  await ledger.bindAccount("hash-cleanup");
+  await rm(statePath);
+  await mkdir(statePath);
+  await assert.rejects(
+    () => ledger.beginWrite({
+      operation: "PLACE_ORDER",
+      method: "POST",
+      key: "cleanup",
+      path: "/trader/v1/accounts/hash/orders",
+      payload: { orderType: "NET_DEBIT" },
+      preSendAt: "2026-08-12T00:00:00.000Z",
+    }),
+  );
+  const files = await readdir(directory);
+  assert.deepEqual(files.filter((file) => file.endsWith(".tmp")), []);
+  await access(directory);
+  await rm(directory, { recursive: true, force: true });
 });
 
 test("an explicit 4xx settles and removes an in-flight intent without recording unknown", async () => {

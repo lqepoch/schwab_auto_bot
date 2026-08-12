@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open as openFile, readFile, rename } from "node:fs/promises";
+import { mkdir, open as openFile, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export type UnknownWritePhase = "IN_FLIGHT" | "PENDING";
@@ -458,14 +458,19 @@ export class UnknownWriteReconciliation {
     await mkdir(dirname(this.statePath), { recursive: true, mode: 0o700 });
     const temporary = `${this.statePath}.${process.pid}.${this.idFactory()}.tmp`;
     const state: PersistedState = { schemaVersion: 1, accountFingerprint: this.accountFingerprint, pending };
-    const file = await openFile(temporary, "w", 0o600);
     try {
-      await file.writeFile(JSON.stringify(state, null, 2), "utf8");
-      await file.sync();
-    } finally {
-      await file.close();
+      const file = await openFile(temporary, "w", 0o600);
+      try {
+        await file.writeFile(JSON.stringify(state, null, 2), "utf8");
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+      await rename(temporary, this.statePath);
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      throw error;
     }
-    await rename(temporary, this.statePath);
     const directory = await openFile(dirname(this.statePath), "r");
     try {
       await directory.sync();
