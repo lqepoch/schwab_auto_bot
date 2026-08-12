@@ -84,90 +84,90 @@ export class MarketDataStreamClient {
   /**
    * 订阅 Level 1 股本（股票/ETF）行情。默认按 0-54 字段全量拉取，可通过 fields 定制。
    */
-  subscribeLevelOneEquities(options: LevelOneSubscriptionOptions): void {
+  async subscribeLevelOneEquities(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 LevelOneEquities', { options });
-    this.subscribeLevelOne('LEVELONE_EQUITIES', options, 'LevelOneEquities');
+    return this.subscribeLevelOne('LEVELONE_EQUITIES', options, 'LevelOneEquities');
   }
 
   /**
    * 订阅 Level 1 期权行情。
    */
-  subscribeLevelOneOptions(options: LevelOneSubscriptionOptions): void {
+  async subscribeLevelOneOptions(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 LevelOneOptions', { options });
-    this.subscribeLevelOne('LEVELONE_OPTIONS', options, 'LevelOneOptions');
+    return this.subscribeLevelOne('LEVELONE_OPTIONS', options, 'LevelOneOptions');
   }
 
   /**
    * 订阅 Level 1 期货行情。
    */
-  subscribeLevelOneFutures(options: LevelOneSubscriptionOptions): void {
+  async subscribeLevelOneFutures(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 LevelOneFutures', { options });
-    this.subscribeLevelOne('LEVELONE_FUTURES', options, 'LevelOneFutures');
+    return this.subscribeLevelOne('LEVELONE_FUTURES', options, 'LevelOneFutures');
   }
 
   /**
    * 订阅 Level 1 期货期权行情。
    */
-  subscribeLevelOneFuturesOptions(options: LevelOneSubscriptionOptions): void {
+  async subscribeLevelOneFuturesOptions(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 LevelOneFuturesOptions', { options });
-    this.subscribeLevelOne('LEVELONE_FUTURES_OPTIONS', options, 'LevelOneFuturesOptions');
+    return this.subscribeLevelOne('LEVELONE_FUTURES_OPTIONS', options, 'LevelOneFuturesOptions');
   }
 
   /**
    * 订阅 Level 1 外汇行情。
    */
-  subscribeLevelOneForex(options: LevelOneSubscriptionOptions): void {
+  async subscribeLevelOneForex(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 LevelOneForex', { options });
-    this.subscribeLevelOne('LEVELONE_FOREX', options, 'LevelOneForex');
+    return this.subscribeLevelOne('LEVELONE_FOREX', options, 'LevelOneForex');
   }
 
   /**
    * 订阅 NYSE Level II 买卖盘。
    */
-  subscribeNyseBook(options: LevelOneSubscriptionOptions): void {
+  async subscribeNyseBook(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 NYSE_BOOK', { options });
-    this.subscribeLevelOne('NYSE_BOOK', options, 'NYSE_BOOK');
+    return this.subscribeLevelOne('NYSE_BOOK', options, 'NYSE_BOOK');
   }
 
   /**
    * 订阅 NASDAQ Level II 买卖盘。
    */
-  subscribeNasdaqBook(options: LevelOneSubscriptionOptions): void {
+  async subscribeNasdaqBook(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 NASDAQ_BOOK', { options });
-    this.subscribeLevelOne('NASDAQ_BOOK', options, 'NASDAQ_BOOK');
+    return this.subscribeLevelOne('NASDAQ_BOOK', options, 'NASDAQ_BOOK');
   }
 
   /**
    * 订阅期权 Level II 买卖盘。
    */
-  subscribeOptionsBook(options: LevelOneSubscriptionOptions): void {
+  async subscribeOptionsBook(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 OPTIONS_BOOK', { options });
-    this.subscribeLevelOne('OPTIONS_BOOK', options, 'OPTIONS_BOOK');
+    return this.subscribeLevelOne('OPTIONS_BOOK', options, 'OPTIONS_BOOK');
   }
 
   /**
    * 订阅股票分时图（蜡烛图）数据。
    */
-  subscribeChartEquity(options: ChartSubscriptionOptions): void {
+  async subscribeChartEquity(options: ChartSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 CHART_EQUITY', { options });
-    this.subscribeChart('CHART_EQUITY', options, 'CHART_EQUITY');
+    return this.subscribeChart('CHART_EQUITY', options, 'CHART_EQUITY');
   }
 
   /**
    * 订阅期货分时图（蜡烛图）数据。
    */
-  subscribeChartFutures(options: ChartSubscriptionOptions): void {
+  async subscribeChartFutures(options: ChartSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 CHART_FUTURES', { options });
-    this.subscribeChart('CHART_FUTURES', options, 'CHART_FUTURES');
+    return this.subscribeChart('CHART_FUTURES', options, 'CHART_FUTURES');
   }
 
   /**
    * 订阅股票筛选器（涨跌幅榜等）数据。
    */
-  subscribeScreenerEquity(options: ScreenerSubscriptionOptions = {}): void {
+  async subscribeScreenerEquity(options: ScreenerSubscriptionOptions = {}): Promise<void> {
     this.logger.info('订阅 SCREENER_EQUITY', { options });
     this.assertConnected();
-    this.streamer.subscribe({
+    return this.streamer.subscribe({
       service: 'SCREENER_EQUITY',
       parameters: {
         keys: this.sanitizeKeys(options.keys),
@@ -178,10 +178,10 @@ export class MarketDataStreamClient {
   /**
    * 订阅期权筛选器数据。
    */
-  subscribeScreenerOption(options: ScreenerSubscriptionOptions = {}): void {
+  async subscribeScreenerOption(options: ScreenerSubscriptionOptions = {}): Promise<void> {
     this.logger.info('订阅 SCREENER_OPTION', { options });
     this.assertConnected();
-    this.streamer.subscribe({
+    return this.streamer.subscribe({
       service: 'SCREENER_OPTION',
       parameters: {
         keys: this.sanitizeKeys(options.keys),
@@ -192,10 +192,10 @@ export class MarketDataStreamClient {
   /**
    * 订阅账户活动推送，例如订单成交、资金变动等。
    */
-  subscribeAccountActivity(options: AccountActivitySubscriptionOptions = {}): void {
+  async subscribeAccountActivity(options: AccountActivitySubscriptionOptions = {}): Promise<void> {
     this.logger.info('订阅 ACCT_ACTIVITY', { options });
     this.assertConnected();
-    this.streamer.subscribe({
+    return this.streamer.subscribe({
       service: 'ACCT_ACTIVITY',
       parameters: {
         keys: this.sanitizeKeys(options.keys),
@@ -223,11 +223,11 @@ export class MarketDataStreamClient {
     service: string,
     options: LevelOneSubscriptionOptions,
     errorLabel: string,
-  ): void {
+  ): Promise<void> {
     this.assertConnected();
     const keys = this.requireKeys(options.keys, errorLabel);
     this.logger.info('下发 LevelOne 订阅命令', { service, keys, fields: options.fields });
-    this.streamer.subscribe({
+    return this.streamer.subscribe({
       service,
       parameters: {
         keys,
@@ -242,11 +242,11 @@ export class MarketDataStreamClient {
    * @param options 订阅参数，包含证券代码及频率设置。
    * @param errorLabel 发生错误时用于提示的中文标签。
    */
-  private subscribeChart(service: string, options: ChartSubscriptionOptions, errorLabel: string): void {
+  private subscribeChart(service: string, options: ChartSubscriptionOptions, errorLabel: string): Promise<void> {
     this.assertConnected();
     const keys = this.requireKeys(options.keys, errorLabel);
     this.logger.info('下发图表订阅命令', { service, keys, frequency: options.frequency, period: options.period });
-    this.streamer.subscribe({
+    return this.streamer.subscribe({
       service,
       parameters: {
         keys,

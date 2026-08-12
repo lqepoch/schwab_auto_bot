@@ -76,8 +76,6 @@ export interface HttpClientConfig {
   retryConfig?: RetryConfig;
   /** 全局重试事件回调 */
   onRetry?: (event: RetryEvent) => void;
-  /** Return response metadata for integrations that need the broker Location header. */
-  includeResponseMetadata?: boolean;
 }
 
 export type HttpResponse<T> = {
@@ -95,8 +93,6 @@ export interface RequestOptions<T = unknown> {
   query?: Record<string, string | number | boolean | undefined>;
   /** 请求体 */
   body?: unknown;
-  /** 用于 POST 请求的幂等键 */
-  idempotencyKey?: string;
   /** Bearer Token，会自动拼接 Authorization 头 */
   accessToken?: string;
   /** 外部传入的取消信号 */
@@ -111,6 +107,8 @@ export interface RequestOptions<T = unknown> {
   retryConfig?: RetryConfig;
   /** 请求级别的重试事件回调 */
   onRetry?: (event: RetryEvent) => void;
+  /** Return response metadata for callers that need broker response headers. */
+  includeResponseMetadata?: boolean;
 }
 
 interface AbortResources {
@@ -189,20 +187,11 @@ export class HttpClient {
     if (opts.accessToken) {
       headers.Authorization = `Bearer ${opts.accessToken}`;
     }
-    if (opts.idempotencyKey) {
-      headers['Idempotency-Key'] = opts.idempotencyKey;
-    }
-
-    // 生成最终的重试配置，POST+幂等键默认允许重试
+    // Resolve retry policy without inferring broker idempotency from a client
+    // supplied header. Mutating requests must opt into retrying explicitly at
+    // this low-level transport; TraderApiClient never does so.
     const mergedRetryConfig = this.mergeRetryConfig(this.retryConfig, opts.retryConfig);
-    const retryableMethods = new Set<HttpMethod>(mergedRetryConfig.retryableMethods);
-    if (opts.idempotencyKey && method === 'POST') {
-      retryableMethods.add('POST');
-    }
-    const requestRetryConfig: ResolvedRetryConfig = {
-      ...mergedRetryConfig,
-      retryableMethods: Array.from(retryableMethods),
-    };
+    const requestRetryConfig = mergedRetryConfig;
 
     const preparedBody = this.prepareBody(opts.body, headers);
 
@@ -450,10 +439,11 @@ export class HttpClient {
 
   /** Preserve response headers/status for callers needing the broker order ID. */
   async requestWithResponse<T>(path: string, options?: RequestOptions<T>): Promise<HttpResponse<T>> {
-    return await this.request<HttpResponse<T>>(path, {
+    const response = await this.request<T>(path, {
       ...(options ?? {}),
       includeResponseMetadata: true,
     });
+    return response as unknown as HttpResponse<T>;
   }
 
   private withMetadata<T>(body: T, response: Response, options: RequestOptions<unknown>): T {

@@ -1,0 +1,38 @@
+{
+  "name": "schwab-owokit",
+  "version": "1.0.0",
+  "description": "TypeScript client for the Charles Schwab Trader, Market Data, and Streamer APIs.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --experimental-strip-types --test test/marketData.test.mjs test/safety.test.ts test/streamerClient.test.ts test/subscriptionState.test.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "open": "^10.1.0",
+    "ws": "^8.18.0",
+    "zod": "^4.1.9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.2"
+  }
+}

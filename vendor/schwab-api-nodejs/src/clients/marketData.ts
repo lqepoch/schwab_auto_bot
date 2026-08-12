@@ -97,6 +97,8 @@ export class MarketDataApiClient extends AuthorizedApiClient {
   async getOptionChains(params: {
     symbol: string;
     contractType?: OptionContractType;
+    includeUnderlyingQuote?: boolean;
+    /** @deprecated Use `includeUnderlyingQuote`; this alias is translated to the official query key. */
     includeQuotes?: boolean;
     strategy?: OptionStrategy;
     interval?: number;
@@ -115,10 +117,11 @@ export class MarketDataApiClient extends AuthorizedApiClient {
   }): Promise<OptionChainResponse> {
     this.logger.info('调用 getOptionChains', { params });
     if (!params.symbol?.trim()) throw new Error('getOptionChains 需要提供 symbol');
+    const includeUnderlyingQuote = params.includeUnderlyingQuote ?? params.includeQuotes;
     const query = this.buildQuery({
       symbol: params.symbol,
       contractType: params.contractType,
-      includeQuotes: params.includeQuotes,
+      includeUnderlyingQuote,
       strategy: params.strategy,
       interval: params.interval,
       strikeCount: params.strikeCount,
