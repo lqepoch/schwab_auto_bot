@@ -198,6 +198,7 @@ test("execution fingerprints include stop price, special instructions, asset typ
   const base = order("payload");
   const variants = [
     { ...base, stopPrice: 0.8 },
+    { ...base, cancelTime: "2026-08-12T15:00:00.000Z" },
     { ...base, specialInstruction: "ALL_OR_NONE" },
     {
       ...base,

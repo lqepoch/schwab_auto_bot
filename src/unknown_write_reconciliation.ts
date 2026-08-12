@@ -98,7 +98,6 @@ const BROKER_METADATA_KEYS = new Set([
   "editable",
   "enteredTime",
   "closeTime",
-  "cancelTime",
   "orderActivityCollection",
   "accountNumber",
   "replacingOrderCollection",
