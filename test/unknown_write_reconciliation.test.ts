@@ -155,6 +155,82 @@ test("no match or ambiguous matches remain fail-closed", async () => {
   }
 });
 
+test("the same broker order cannot resolve two identical unknown write intents", async () => {
+  const { root, store } = await makeStore();
+  try {
+    const payload = order("payload");
+    await Promise.all([
+      store.recordFailure({
+        operation: "PLACE_ORDER",
+        method: "POST",
+        key: "submit:one",
+        path: "/trader/v1/accounts/hash/orders",
+        payload,
+        preSendAt: "2026-08-12T00:00:00.000Z",
+        status: 503,
+        reason: "server-error",
+      }),
+      store.recordFailure({
+        operation: "PLACE_ORDER",
+        method: "POST",
+        key: "submit:two",
+        path: "/trader/v1/accounts/hash/orders",
+        payload,
+        preSendAt: "2026-08-12T00:00:00.000Z",
+        status: 503,
+        reason: "server-error",
+      }),
+    ]);
+
+    const result = await store.reconcile([order("broker-order")]);
+
+    assert.equal(result.resolved.length, 0);
+    assert.equal(result.pending.length, 2);
+    assert.equal(result.pending.every((entry) => entry.matchingOrderCount === 1), true);
+    assert.equal(store.pending().length, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("execution fingerprints include stop price, special instructions, asset type, and child strategies", () => {
+  const base = order("payload");
+  const variants = [
+    { ...base, stopPrice: 0.8 },
+    { ...base, specialInstruction: "ALL_OR_NONE" },
+    {
+      ...base,
+      orderLegCollection: base.orderLegCollection.map((leg) => ({
+        ...leg,
+        instrument: { ...leg.instrument, assetType: "EQUITY" },
+      })),
+    },
+    {
+      ...base,
+      childOrderStrategies: [{ orderStrategyType: "TRIGGER", orderType: "LIMIT", price: "0.10" }],
+    },
+  ];
+
+  for (const variant of variants) {
+    assert.notEqual(fingerprintPayload(base), fingerprintPayload(variant));
+  }
+});
+
+test("execution fingerprints normalize numeric representations without dropping unknown execution fields", () => {
+  const left = {
+    ...order("left", "WORKING", "0.90"),
+    stopPrice: "0.800",
+    childOrderStrategies: [{ orderType: "LIMIT", price: "0.100" }],
+  };
+  const right = {
+    ...order("right", "FILLED", "0.900"),
+    stopPrice: 0.8,
+    childOrderStrategies: [{ price: 0.1, orderType: "LIMIT" }],
+  };
+
+  assert.equal(fingerprintPayload(left), fingerprintPayload(right));
+});
+
 test("reconciliation never resends or mutates broker state", async () => {
   const { root, store } = await makeStore();
   try {
