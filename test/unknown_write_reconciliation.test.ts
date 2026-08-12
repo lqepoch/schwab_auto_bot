@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   UnknownWriteReconciliation,
   fingerprintPayload,
+  fingerprintOrder,
   safePath,
 } from "../src/unknown_write_reconciliation.ts";
 
@@ -229,6 +230,38 @@ test("execution fingerprints normalize numeric representations without dropping 
   };
 
   assert.equal(fingerprintPayload(left), fingerprintPayload(right));
+});
+
+test("broker response metadata does not make a request and its order snapshot differ", () => {
+  const request = order("request");
+  const response = {
+    ...request,
+    orderId: 123,
+    status: "WORKING",
+    statusDescription: "Working",
+    filledQuantity: 0,
+    remainingQuantity: 1,
+    cancelable: true,
+    editable: true,
+    enteredTime: "2026-08-12T00:00:01.000Z",
+    accountNumber: "hashed-account",
+    replacingOrderCollection: ["old-order"],
+    orderActivityCollection: [],
+    orderLegCollection: request.orderLegCollection.map((leg) => ({
+      ...leg,
+      legId: 1,
+      instrument: {
+        ...leg.instrument,
+        cusip: "broker-cusip",
+        description: "broker description",
+        instrumentId: 42,
+        netChange: 0,
+        type: "OPTION",
+      },
+    })),
+  };
+
+  assert.equal(fingerprintOrder(request), fingerprintOrder(response));
 });
 
 test("reconciliation never resends or mutates broker state", async () => {
