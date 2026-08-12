@@ -18,10 +18,11 @@
 ```bash
 npm --prefix vendor/schwab-api-nodejs install
 npm --prefix vendor/schwab-api-nodejs run typecheck
+npm --prefix vendor/schwab-api-nodejs run typecheck:test
 npm --prefix vendor/schwab-api-nodejs run build
 npm --prefix vendor/schwab-api-nodejs test
 ```
-该 SDK 尚未发布到 npm registry，因此不要使用 `npm install schwab-owokit`。`dist/` 和 `node_modules/` 是本地构建产物，不应提交。
+`npm test` 会先检查测试代码类型，再构建并自动发现 `test/*.test.ts` 与 `test/*.test.mjs`。该 SDK 尚未发布到 npm registry，因此不要使用 `npm install schwab-owokit`。`dist/` 和 `node_modules/` 是本地构建产物，不应提交。
 
 ### 2. 初始化 SDK
 
@@ -175,7 +176,7 @@ await sdk.marketDataStream.subscribeNasdaqBook({ keys: 'AAPL', fields: '0,1,2' }
 `StreamerClient` 会在断线后自动重新登录并恢复已记录的订阅，同时监控 Schwab 的心跳包，在检测到“僵尸连接”时会主动关闭
 socket 并触发重连。
 
-`subscribe()` / `unsubscribe()` 返回的 Promise 只在对应 Streamer ACK 的 `content.code === 0` 后 resolve；拒绝响应、连接断开和 ACK 超时都会 reject。非零 ACK 是明确拒绝，会回滚该次 canonical mutation；连接断开或 ACK 超时是未知结果，会保留期望的 canonical state 并受控重连，以完整 `SUBS` 对账后才再次报告 ready。底层 `sdk.streamer.send()` 仍是原始发送接口，不提供 ACK 语义。重连恢复会等待每个 service 的完整 `SUBS` ACK 后才报告 ready，不代表已经收到新行情。
+`subscribe()` / `unsubscribe()` 返回的 Promise 会按命令校验 Streamer ACK：兼容通用成功码 `0`，并接受 Schwab 文档规定的 `SUBS=26`、`UNSUBS=27`、`ADD=28`、`VIEW=29`；`LOGIN` 只接受 `0`。拒绝响应、命令/服务不匹配、连接断开和 ACK 超时都会 reject。非零且不匹配的 ACK 是明确拒绝，会回滚该次 canonical mutation；连接断开或 ACK 超时是未知结果，会保留期望的 canonical state 并受控重连，以完整 `SUBS` 对账后才再次报告 ready。底层 `sdk.streamer.send()` 仍是原始发送接口，不提供 ACK 语义。重连恢复会等待每个 service 的完整 `SUBS` ACK 后才报告 ready，不代表已经收到新行情。
 
 可从 package root 按 ACK 结果类型捕获：`import { StreamerCommandError, StreamerCommandTimeoutError, StreamerCommandNotSentError } from './vendor/schwab-api-nodejs/dist/index.js';`
 
