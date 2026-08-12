@@ -3,12 +3,13 @@ import test from 'node:test';
 import { z } from 'zod';
 import { HttpClient } from '../dist/utils/httpClient.js';
 import { SchwabApiError } from '../dist/utils/errors.js';
+import type { RetryConfig } from '../dist/utils/httpClient.js';
 
 const logger = {
   debug() {}, info() {}, warn() {}, error() {}, child() { return this; },
 };
 
-function retryConfig(maxRetries = 2) {
+function retryConfig(maxRetries = 2): RetryConfig {
   return {
     maxRetries,
     initialDelayMs: 0,
