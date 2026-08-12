@@ -1,11 +1,11 @@
 # schwab-owokit
 
-一个面向 Charles Schwab Trader / Market Data REST / Streamer API 的 TypeScript SDK，适配 Node.js ≥ 18（已在 Node.js 22 环境下测试构建）。
+一个面向 Charles Schwab Trader / Market Data REST / Streamer API 的 TypeScript SDK，适配 Node.js ≥ 24。SDK 当前作为仓库内的私有本地 package 维护，构建产物位于 `dist/`。
 
 ## 功能概览
 
 - ✅ OAuth2 授权码流程：生成授权 URL、换取令牌、自动刷新、落盘缓存
-- ✅ REST 调用自动处理 401：令牌过期会透明刷新后重试
+- ✅ REST 只读调用自动处理 401：令牌过期会透明刷新后重试；交易写入不会透明重发
 - ✅ Trader REST API：账户、订单、交易记录、偏好设置等全部端点
 - ✅ Market Data REST API：报价、期权链、历史行情、市场时间、标的信息
 - ✅ Streamer WebSocket：Level One/Book/Chart/筛选器/账户活动实时推送
@@ -13,27 +13,22 @@
 
 ## 快速开始
 
-### 1. 安装
+### 1. 安装、构建和测试
 
 ```bash
-npm install schwab-owokit
+npm --prefix vendor/schwab-api-nodejs install
+npm --prefix vendor/schwab-api-nodejs run typecheck
+npm --prefix vendor/schwab-api-nodejs run build
+npm --prefix vendor/schwab-api-nodejs test
 ```
+该 SDK 尚未发布到 npm registry，因此不要使用 `npm install schwab-owokit`。`dist/` 和 `node_modules/` 是本地构建产物，不应提交。
 
 ### 2. 初始化 SDK
 
-推荐先运行内置向导生成 `.env`：
-
-```bash
-npm run setup
-```
-
-该命令会交互式询问 `SCHWAB_CLIENT_ID`、`SCHWAB_CLIENT_SECRET`、`SCHWAB_REDIRECT_URI` 等必填信息，
-并自动写入项目根目录的 `.env`。如需修改配置，可随时重新运行命令覆盖旧值。
-
-然后可以直接从环境变量创建 SDK，并开启日志输出：
+先按部署环境配置 `SCHWAB_CLIENT_ID`、`SCHWAB_CLIENT_SECRET`、`SCHWAB_REDIRECT_URI` 等环境变量。构建后从本地 package 的入口导入：
 
 ```ts
-import { SchwabOwokit, createConsoleLogger } from 'schwab-owokit';
+import { SchwabOwokit, createConsoleLogger } from './vendor/schwab-api-nodejs/dist/index.js';
 
 const sdk = SchwabOwokit.fromEnvironment({
   logLevel: 'info',
@@ -59,11 +54,7 @@ console.log('请在浏览器打开：', url);
 await sdk.exchangeCodeForToken(receivedCode);
 ```
 
-如果希望由脚本自动打开授权链接，可调用 `await sdk.openAuthorizeUrl()`，或在示例脚本中追加 `--open` 参数：
-
-```bash
-npm run example:authorize -- --open
-```
+如果希望由脚本自动打开授权链接，可调用 `await sdk.openAuthorizeUrl()`。`examples/` 下的文件是源码参考，核心 package 没有声明 `example:*` npm scripts。
 
 之后 SDK 会把令牌保存到 `.schwab_tokens.json`，后续启动直接调用 `sdk.getAccessToken()` 会自动刷新。
 
@@ -97,8 +88,8 @@ const preview = await sdk.trader.previewOrder(accountHash, {
   ],
 });
 
-// 下单
-await sdk.trader.placeOrder(accountHash, {
+// 下单；成功结果包含 201、Location、orderId 与 Schwab correlation id
+const placed = await sdk.trader.placeOrder(accountHash, {
   orderStrategyType: 'SINGLE',
   session: 'NORMAL',
   duration: 'DAY',
@@ -112,6 +103,7 @@ await sdk.trader.placeOrder(accountHash, {
     },
   ],
 });
+console.log(placed.orderId, placed.location, placed.correlationId);
 
 // 查询交易流水
 const transactions = await sdk.trader.getTransactions(accountHash, {
@@ -134,8 +126,9 @@ const optionChain = await sdk.marketData.getOptionChains({
   symbol: 'AAPL',
   strategy: 'SINGLE',
   strikeCount: 2,
-  includeQuotes: true,
+  includeUnderlyingQuote: true,
 });
+
 
 // 获取历史 K 线
 const history = await sdk.marketData.getPriceHistory({
@@ -146,12 +139,15 @@ const history = await sdk.marketData.getPriceHistory({
   frequency: 1,
 });
 
+
 // 查询市场开闭市时间
 const hours = await sdk.marketData.getMarkets({ markets: ['equity', 'option'], date: '2024-05-20' });
 
 // 检索标的
 const instruments = await sdk.marketData.searchInstruments({ symbol: 'AAPL,BAC', projection: 'symbol-search' });
 ```
+
+请求会发送 Schwab 官方的 `includeUnderlyingQuote` query key；旧的 `includeQuotes` 仅作为 deprecated alias 接受，绝不会发送到服务端。
 
 Market Data REST 数据结构定义在 `src/types/marketData.ts`，涵盖官方示例中的所有字段。
 
@@ -166,44 +162,43 @@ sdk.streamer.on('data', (payload) => {
 });
 
 // 订阅 QQQ Level 1 行情（默认字段）
-sdk.marketDataStream.subscribeLevelOneEquities({ keys: 'QQQ' });
+await sdk.marketDataStream.subscribeLevelOneEquities({ keys: 'QQQ' });
 
 // 订阅股票分时图，1 分钟频率，回溯 1 天
-sdk.marketDataStream.subscribeChartEquity({ keys: 'QQQ', frequency: '1', period: '1' });
+await sdk.marketDataStream.subscribeChartEquity({ keys: 'QQQ', frequency: '1', period: '1' });
 
 // 订阅 NASDAQ Level II 深度
-sdk.marketDataStream.subscribeNasdaqBook({ keys: 'AAPL', fields: '0,1,2' });
+await sdk.marketDataStream.subscribeNasdaqBook({ keys: 'AAPL', fields: '0,1,2' });
 ```
 
 如需取消订阅，可直接使用 `sdk.streamer.send({ requests: [...] })` 发送 `UNSUBS` 命令，或调用 `sdk.disconnectStreamer()` 断开当前连接。
 `StreamerClient` 会在断线后自动重新登录并恢复已记录的订阅，同时监控 Schwab 的心跳包，在检测到“僵尸连接”时会主动关闭
 socket 并触发重连。
 
+`subscribe()` / `unsubscribe()` 返回的 Promise 只在对应 Streamer ACK 的 `content.code === 0` 后 resolve；拒绝响应、连接断开和 ACK 超时都会 reject。非零 ACK 是明确拒绝，会回滚该次 canonical mutation；连接断开或 ACK 超时是未知结果，会保留期望的 canonical state 并受控重连，以完整 `SUBS` 对账后才再次报告 ready。底层 `sdk.streamer.send()` 仍是原始发送接口，不提供 ACK 语义。重连恢复会等待每个 service 的完整 `SUBS` ACK 后才报告 ready，不代表已经收到新行情。
+
+可从 package root 按 ACK 结果类型捕获：`import { StreamerCommandError, StreamerCommandTimeoutError, StreamerCommandNotSentError } from './vendor/schwab-api-nodejs/dist/index.js';`
+
 ## 错误处理
 
 - REST API：统一抛出 `SchwabApiError`，包含状态码、请求 URL、响应头以及解析后的错误详情（自动提取 `errors[].detail` / `message` 字段）。
-- OAuth：刷新失败时 `TokenManager` 会打印警告并继续使用旧令牌，或在缓存缺失时抛出错误提示开发者重新授权。
+- OAuth：刷新失败时只有仍未过期的访问令牌可以短暂 fallback；过期令牌或 `invalid_grant` 会抛出 `ReauthRequiredError`（`SCHWAB_REAUTH_REQUIRED`），必须重新授权。
+- Trader 写入：`placeOrder`、`replaceOrder`、`cancelOrder` 与 `previewOrder` 都只发送一次物理请求，不生成或推断客户端幂等键。`placeOrder`、`replaceOrder`、`cancelOrder` 遇到网络错误或 5xx，或创建/替换响应缺少有效 `Location`，会抛出 `UnknownOutcomeError`（`SCHWAB_UNKNOWN_OUTCOME`）；`previewOrder` 保持单次请求并按普通 REST 错误返回。调用方必须先对账再决定下一步。
 - Streamer：`StreamerClient` 提供 `error`、`close` 事件；`autoReconnect` 为 true 时会自动重连。
 - 日志：默认的 `ConsoleLogger` 会记录每一步操作，可通过 `logLevel` 控制详略，或注入自定义实现（如写入文件/集中式日志）。
 
 ## 示例脚本
 
-`examples/` 目录提供常见场景脚本（首次授权、行情查询、Streamer 订阅）。配置好环境变量后：
-
-```bash
-npm run example:authorize -- --open
-npm run example:quotes -- AAPL,QQQ
-npm run example:history -- TSLA 20
-npm run example:stream -- QQQ
-npm run example:account-stream
-```
-
-其中 `--open` 标记会尝试自动打开浏览器完成授权，若在服务器环境下可移除该参数。
-脚本内部均引用 `SchwabOwokit` 并包含必要注释，可直接复制为自己的项目入口。
+`examples/` 目录提供首次授权、行情查询和 Streamer 订阅的源码参考，不是核心 package scripts；核心 package 没有声明 `example:*` npm scripts。请在调用方选择并配置 TypeScript runner 后再运行这些文件。
 
 ## 文件结构
 
 ```
+package.json        本地 package 元数据与 build/typecheck/test scripts
+package-lock.json   npm 依赖锁定
+tsconfig.json       NodeNext ESM strict declaration build 配置
+test/               Node test 契约测试
+dist/               build 生成目录（不提交）
 src/
   auth/              OAuth 相关逻辑
   clients/           Trader & Market Data REST 客户端
