@@ -1,6 +1,6 @@
 import WebSocket, { type RawData } from "ws";
 
-type StreamContext = {
+export type StreamContext = {
   accessToken: string;
   socketUrl: string;
   customerId: string;
@@ -9,10 +9,18 @@ type StreamContext = {
   functionId: string;
 };
 
-type ActivityStreamOptions = {
+export type ActivityStreamOptions = {
   loadContext: () => Promise<StreamContext>;
   onActivity: (batch: ActivityBatch) => void;
   onState: (message: string) => void;
+  createWebSocket?: (url: string, options: {
+    handshakeTimeout: number;
+    perMessageDeflate: boolean;
+  }) => WebSocket;
+  openTimeoutMs?: number;
+  ackTimeoutMs?: number;
+  activityDebounceMs?: number;
+  reconnectDelayMs?: number;
 };
 
 export type ActivityHint = {
@@ -44,6 +52,7 @@ export class SchwabActivityStream {
   private activityQueued = false;
   private queuedHints: ActivityHint[] = [];
   private queuedComplete = true;
+  private activityTimer: NodeJS.Timeout | null = null;
   ready = false;
 
   constructor(options: ActivityStreamOptions) {
@@ -57,6 +66,11 @@ export class SchwabActivityStream {
   async stop(): Promise<void> {
     this.stopping = true;
     this.ready = false;
+    if (this.activityTimer) clearTimeout(this.activityTimer);
+    this.activityTimer = null;
+    this.activityQueued = false;
+    this.queuedHints = [];
+    this.queuedComplete = true;
     this.rejectPending("STREAM_STOPPED");
     this.socket?.close(1000, "shutdown");
     await this.loop;
@@ -71,7 +85,7 @@ export class SchwabActivityStream {
       } catch (error) {
         if (!this.stopping) {
           this.options.onState(`ACCT_ACTIVITY订阅断开 error=${safeError(error)} reconnectInMs=${backoffMs}`);
-          await delay(backoffMs);
+          await delay(this.options.reconnectDelayMs ?? backoffMs);
           backoffMs = Math.min(30_000, backoffMs * 2);
         }
       }
@@ -80,50 +94,53 @@ export class SchwabActivityStream {
 
   private async connectOnce(): Promise<void> {
     const context = await this.options.loadContext();
-    const socket = new WebSocket(context.socketUrl, {
+    const socket = (this.options.createWebSocket ?? ((url, options) => new WebSocket(url, options)))
+      (context.socketUrl, {
       handshakeTimeout: 15_000,
       perMessageDeflate: false,
     });
     this.socket = socket;
     socket.on("message", (data) => this.onMessage(data));
 
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("STREAM_OPEN_TIMEOUT")), 15_000);
-      socket.once("open", () => {
-        clearTimeout(timer);
-        resolve();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("STREAM_OPEN_TIMEOUT")), this.options.openTimeoutMs ?? 15_000);
+        socket.once("open", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        socket.once("error", (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
       });
-      socket.once("error", (error) => {
-        clearTimeout(timer);
-        reject(error);
+
+      await this.request(context, "ADMIN", "LOGIN", {
+        Authorization: context.accessToken,
+        SchwabClientChannel: context.channel,
+        SchwabClientFunctionId: context.functionId,
       });
-    });
-
-    await this.request(context, "ADMIN", "LOGIN", {
-      Authorization: context.accessToken,
-      SchwabClientChannel: context.channel,
-      SchwabClientFunctionId: context.functionId,
-    });
-    await this.request(context, "ACCT_ACTIVITY", "SUBS", {
-      keys: "Account Activity",
-      fields: "0,1,2,3",
-    });
-
-    this.ready = true;
-    this.options.onState("ACCT_ACTIVITY WebSocket订阅已建立；账户活动将立即唤醒一次REST订单确认");
-
-    await new Promise<void>((resolve, reject) => {
-      socket.once("close", (code) => {
-        if (this.stopping || code === 1000) resolve();
-        else reject(new Error(`STREAM_CLOSED_${code}`));
+      await this.request(context, "ACCT_ACTIVITY", "SUBS", {
+        keys: "Account Activity",
+        fields: "0,1,2,3",
       });
-      socket.once("error", reject);
-    }).finally(() => {
+
+      this.ready = true;
+      this.options.onState("ACCT_ACTIVITY WebSocket订阅已建立；账户活动将立即唤醒一次REST订单确认");
+
+      await new Promise<void>((resolve, reject) => {
+        socket.once("close", (code) => {
+          if (this.stopping || code === 1000) resolve();
+          else reject(new Error(`STREAM_CLOSED_${code}`));
+        });
+        socket.once("error", reject);
+      });
+    } finally {
       this.ready = false;
-      this.rejectPending("STREAM_CONNECTION_LOST");
+      this.rejectPending(this.stopping ? "STREAM_STOPPED" : "STREAM_CONNECTION_LOST");
       if (this.socket === socket) this.socket = null;
       if (socket.readyState === WebSocket.OPEN) socket.close();
-    });
+    }
   }
 
   private async request(
@@ -147,10 +164,19 @@ export class SchwabActivityStream {
       const timer = setTimeout(() => {
         this.pending.delete(requestid);
         reject(new Error(`STREAM_ACK_TIMEOUT_${service}`));
-      }, 15_000);
+      }, this.options.ackTimeoutMs ?? 15_000);
       this.pending.set(requestid, { resolve, reject, timer });
     });
-    this.socket!.send(JSON.stringify(frame));
+    try {
+      this.socket!.send(JSON.stringify(frame));
+    } catch (error) {
+      const pending = this.pending.get(requestid);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pending.delete(requestid);
+        pending.reject(new Error(`STREAM_SEND_FAILED_${service}_${safeError(error)}`));
+      }
+    }
     await acknowledgement;
   }
 
@@ -167,9 +193,9 @@ export class SchwabActivityStream {
       if (!pending) continue;
       clearTimeout(pending.timer);
       this.pending.delete(requestid);
-      const code = Number(response?.content?.code);
-      if (acceptedResponseCodes.has(code)) pending.resolve();
-      else pending.reject(new Error(`STREAM_RESPONSE_${String(response?.service ?? "UNKNOWN")}_${code}`));
+      const code = responseCode(response?.content?.code);
+      if (code !== null && acceptedResponseCodes.has(code)) pending.resolve();
+      else pending.reject(new Error(`STREAM_RESPONSE_${String(response?.service ?? "UNKNOWN")}_${code ?? "INVALID_CODE"}`));
     }
     const accountActivities = (Array.isArray(frame?.data) ? frame.data : [])
       .filter((entry: any) => entry?.service === "ACCT_ACTIVITY");
@@ -179,7 +205,8 @@ export class SchwabActivityStream {
       this.queuedComplete = this.queuedComplete && batch.complete;
       if (this.activityQueued) return;
       this.activityQueued = true;
-      setTimeout(() => {
+      this.activityTimer = setTimeout(() => {
+        this.activityTimer = null;
         this.activityQueued = false;
         const queued = {
           hints: this.queuedHints.splice(0),
@@ -187,7 +214,7 @@ export class SchwabActivityStream {
         };
         this.queuedComplete = true;
         if (!this.stopping) this.options.onActivity(queued);
-      }, 50);
+      }, this.options.activityDebounceMs ?? 50);
     }
   }
 
@@ -198,6 +225,17 @@ export class SchwabActivityStream {
     }
     this.pending.clear();
   }
+}
+
+function responseCode(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    const parsed = Number(value.trim());
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function delay(ms: number): Promise<void> {
