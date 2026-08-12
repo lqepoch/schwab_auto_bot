@@ -98,6 +98,30 @@ test('network mutation failures become UnknownOutcomeError without retry', async
   assert.equal(calls, 1);
 });
 
+test('a response body read failure after a successful mutation becomes UnknownOutcomeError', async () => {
+  let calls = 0;
+  const client = traderWithFetch(async () => {
+    calls += 1;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('response socket reset'));
+      },
+    });
+    return new Response(body, {
+      status: 201,
+      headers: { Location: '/trader/v1/accounts/hash/orders/12345' },
+    });
+  });
+
+  await assert.rejects(
+    () => client.placeOrder('hash', order),
+    (error: unknown) => error instanceof UnknownOutcomeError
+      && error.code === 'SCHWAB_UNKNOWN_OUTCOME'
+      && error.status === 201,
+  );
+  assert.equal(calls, 1);
+});
+
 test('successful placeOrder without a valid Location is still UnknownOutcome', async () => {
   const client = traderWithFetch(async () => new Response(null, { status: 201 }));
 

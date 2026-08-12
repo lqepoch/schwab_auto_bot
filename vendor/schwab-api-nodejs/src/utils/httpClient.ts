@@ -178,14 +178,11 @@ export class HttpClient {
     const url = this.buildUrl(path, opts.query);
 
     // 合并请求头，调用方覆盖默认值
-    const headers: Record<string, string> = {
-      ...this.defaultHeaders,
-      ...opts.headers,
-    };
+    const headers = mergeHeaders(this.defaultHeaders, opts.headers);
 
     // 根据配置自动附加认证信息
     if (opts.accessToken) {
-      headers.Authorization = `Bearer ${opts.accessToken}`;
+      setHeader(headers, 'Authorization', `Bearer ${opts.accessToken}`);
     }
     // Resolve retry policy without inferring broker idempotency from a client
     // supplied header. Mutating requests must opt into retrying explicitly at
@@ -300,7 +297,39 @@ export class HttpClient {
           });
         }
 
-        const rawText = await response.text();
+        let rawText: string;
+        try {
+          rawText = await response.text();
+        } catch (error) {
+          // The broker may have accepted a mutation before the response body
+          // stream failed. Preserve the HTTP response context and classify the
+          // read failure as network-ambiguous so TraderApiClient can route it
+          // to UnknownOutcome reconciliation instead of exposing a raw Error.
+          const originalError = error instanceof Error ? error : new Error(String(error));
+          const isAbortError = originalError.name === 'AbortError';
+          this.logger.error('HTTP 响应正文读取失败', {
+            requestId,
+            method,
+            url,
+            status: response.status,
+            attempt: attemptNumber,
+            error: originalError.message,
+          });
+          throw new SchwabApiError(
+            `Schwab API response body read failed: ${originalError.message}`,
+            {
+              status: response.status,
+              statusText: isAbortError ? 'ABORTED' : 'RESPONSE_BODY_READ_ERROR',
+              url,
+              headers: redactHeaders(headersToObject(response.headers)),
+              isNetworkError: true,
+              requestId,
+              method,
+              attempt: attemptNumber,
+              cause: originalError,
+            },
+          );
+        }
         const parsedBody = rawText ? parseResponseBody(rawText) : undefined;
 
         if (!response.ok) {
@@ -611,7 +640,9 @@ export class HttpClient {
     }
 
     // 非 BodyInit 类型默认视为 JSON
-    headers['Content-Type'] = headers['Content-Type'] ?? 'application/json';
+    if (!hasHeader(headers, 'Content-Type')) {
+      headers['Content-Type'] = 'application/json';
+    }
     const payload = JSON.stringify(body);
     return {
       canRetry: true,
@@ -915,6 +946,30 @@ function headersToObject(headers: Headers): Record<string, string> {
     result[key] = value;
   });
   return result;
+}
+
+function mergeHeaders(
+  defaults: Record<string, string>,
+  overrides?: Record<string, string>,
+): Record<string, string> {
+  const result: Record<string, string> = { ...defaults };
+  for (const [name, value] of Object.entries(overrides ?? {})) {
+    setHeader(result, name, value);
+  }
+  return result;
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  const normalized = name.toLowerCase();
+  return Object.keys(headers).some((key) => key.toLowerCase() === normalized);
+}
+
+function setHeader(headers: Record<string, string>, name: string, value: string): void {
+  const normalized = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === normalized) delete headers[key];
+  }
+  headers[name] = value;
 }
 
 function isReadableStream(value: unknown): value is ReadableStream {

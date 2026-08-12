@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   UnknownWriteReconciliation,
   fingerprintPayload,
+  fingerprintOrder,
   safePath,
 } from "../src/unknown_write_reconciliation.ts";
 
@@ -155,6 +156,115 @@ test("no match or ambiguous matches remain fail-closed", async () => {
   }
 });
 
+test("the same broker order cannot resolve two identical unknown write intents", async () => {
+  const { root, store } = await makeStore();
+  try {
+    const payload = order("payload");
+    await Promise.all([
+      store.recordFailure({
+        operation: "PLACE_ORDER",
+        method: "POST",
+        key: "submit:one",
+        path: "/trader/v1/accounts/hash/orders",
+        payload,
+        preSendAt: "2026-08-12T00:00:00.000Z",
+        status: 503,
+        reason: "server-error",
+      }),
+      store.recordFailure({
+        operation: "PLACE_ORDER",
+        method: "POST",
+        key: "submit:two",
+        path: "/trader/v1/accounts/hash/orders",
+        payload,
+        preSendAt: "2026-08-12T00:00:00.000Z",
+        status: 503,
+        reason: "server-error",
+      }),
+    ]);
+
+    const result = await store.reconcile([order("broker-order")]);
+
+    assert.equal(result.resolved.length, 0);
+    assert.equal(result.pending.length, 2);
+    assert.equal(result.pending.every((entry) => entry.matchingOrderCount === 1), true);
+    assert.equal(store.pending().length, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("execution fingerprints include stop price, special instructions, asset type, and child strategies", () => {
+  const base = order("payload");
+  const variants = [
+    { ...base, stopPrice: 0.8 },
+    { ...base, cancelTime: "2026-08-12T15:00:00.000Z" },
+    { ...base, specialInstruction: "ALL_OR_NONE" },
+    {
+      ...base,
+      orderLegCollection: base.orderLegCollection.map((leg) => ({
+        ...leg,
+        instrument: { ...leg.instrument, assetType: "EQUITY" },
+      })),
+    },
+    {
+      ...base,
+      childOrderStrategies: [{ orderStrategyType: "TRIGGER", orderType: "LIMIT", price: "0.10" }],
+    },
+  ];
+
+  for (const variant of variants) {
+    assert.notEqual(fingerprintPayload(base), fingerprintPayload(variant));
+  }
+});
+
+test("execution fingerprints normalize numeric representations without dropping unknown execution fields", () => {
+  const left = {
+    ...order("left", "WORKING", "0.90"),
+    stopPrice: "0.800",
+    childOrderStrategies: [{ orderType: "LIMIT", price: "0.100" }],
+  };
+  const right = {
+    ...order("right", "FILLED", "0.900"),
+    stopPrice: 0.8,
+    childOrderStrategies: [{ price: 0.1, orderType: "LIMIT" }],
+  };
+
+  assert.equal(fingerprintPayload(left), fingerprintPayload(right));
+});
+
+test("broker response metadata does not make a request and its order snapshot differ", () => {
+  const request = order("request");
+  const response = {
+    ...request,
+    orderId: 123,
+    status: "WORKING",
+    statusDescription: "Working",
+    filledQuantity: 0,
+    remainingQuantity: 1,
+    cancelable: true,
+    editable: true,
+    enteredTime: "2026-08-12T00:00:01.000Z",
+    accountNumber: "hashed-account",
+    replacingOrderCollection: ["old-order"],
+    orderActivityCollection: [],
+    orderLegCollection: request.orderLegCollection.map((leg) => ({
+      ...leg,
+      legId: 1,
+      instrument: {
+        ...leg.instrument,
+        cusip: "broker-cusip",
+        description: "broker description",
+        instrumentId: 42,
+        netChange: 0,
+        type: "OPTION",
+      },
+    })),
+  };
+
+  assert.equal(fingerprintOrder(request), fingerprintOrder(response));
+});
+
 test("reconciliation never resends or mutates broker state", async () => {
   const { root, store } = await makeStore();
   try {
@@ -244,6 +354,35 @@ test("write-ahead intent survives restart and explicit settlement", async () => 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("failed WAL persistence removes its temporary file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "schwab-unknown-write-cleanup-"));
+  const statePath = join(directory, "unknown-writes.json");
+  const ledger = new UnknownWriteReconciliation(statePath, {
+    idFactory: (() => {
+      let index = 0;
+      return () => `cleanup-${++index}`;
+    })(),
+  });
+  await ledger.load();
+  await ledger.bindAccount("hash-cleanup");
+  await rm(statePath);
+  await mkdir(statePath);
+  await assert.rejects(
+    () => ledger.beginWrite({
+      operation: "PLACE_ORDER",
+      method: "POST",
+      key: "cleanup",
+      path: "/trader/v1/accounts/hash/orders",
+      payload: { orderType: "NET_DEBIT" },
+      preSendAt: "2026-08-12T00:00:00.000Z",
+    }),
+  );
+  const files = await readdir(directory);
+  assert.deepEqual(files.filter((file) => file.endsWith(".tmp")), []);
+  await access(directory);
+  await rm(directory, { recursive: true, force: true });
 });
 
 test("an explicit 4xx settles and removes an in-flight intent without recording unknown", async () => {

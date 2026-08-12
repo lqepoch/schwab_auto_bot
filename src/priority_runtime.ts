@@ -13,6 +13,7 @@ export class PriorityWriter {
   private keys = new Set<string>();
   private active = 0;
   private activeByPriority = [0, 0, 0, 0];
+  private consecutiveHighPriority = 0;
   private readonly maxActive = 8;
   private readonly maxFollowupActive = 2;
   private readonly maxNonCriticalActive = 4;
@@ -48,16 +49,27 @@ export class PriorityWriter {
   private drain(): void {
     while (this.active < this.maxActive) {
       const nonCriticalActive = this.activeByPriority[2] + this.activeByPriority[3];
-      const job = this.queues[0].shift()
-        ?? (this.activeByPriority[1] < this.maxFollowupActive ? this.queues[1].shift() : undefined)
-        ?? (nonCriticalActive < this.maxNonCriticalActive ? this.queues[2].shift() : undefined)
-        ?? (
-          nonCriticalActive < this.maxNonCriticalActive
-          && this.activeByPriority[3] < this.maxRefreshActive
-            ? this.queues[3].shift()
-            : undefined
-        );
+      const lowerPriorityPending = this.queues[1].length > 0
+        || this.queues[2].length > 0
+        || this.queues[3].length > 0;
+      const shouldAgeLowerPriority = lowerPriorityPending && this.consecutiveHighPriority >= 4;
+      const takeFollowup = (): Job | undefined => (
+        this.activeByPriority[1] < this.maxFollowupActive ? this.queues[1].shift() : undefined
+      );
+      const takeNonCritical = (): Job | undefined => (
+        nonCriticalActive < this.maxNonCriticalActive ? this.queues[2].shift() : undefined
+      );
+      const takeRefresh = (): Job | undefined => (
+        nonCriticalActive < this.maxNonCriticalActive
+        && this.activeByPriority[3] < this.maxRefreshActive
+          ? this.queues[3].shift()
+          : undefined
+      );
+      const job = shouldAgeLowerPriority
+        ? (takeFollowup() ?? takeNonCritical() ?? takeRefresh() ?? this.queues[0].shift())
+        : (this.queues[0].shift() ?? takeFollowup() ?? takeNonCritical() ?? takeRefresh());
       if (!job) return;
+      this.consecutiveHighPriority = job.priority <= 1 ? this.consecutiveHighPriority + 1 : 0;
       this.active += 1;
       this.activeByPriority[job.priority] += 1;
       void this.run(job);
@@ -87,6 +99,7 @@ export class PriorityWriter {
 
 export class PriorityGate {
   private queues: Array<Array<{
+    priority: Priority;
     operation: () => Promise<any>;
     resolve: (value: any) => void;
     reject: (error: unknown) => void;
@@ -95,7 +108,7 @@ export class PriorityGate {
 
   run<T>(priority: Priority, operation: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.queues[priority].push({ operation, resolve, reject });
+      this.queues[priority].push({ priority, operation, resolve, reject });
       this.drain();
     });
   }

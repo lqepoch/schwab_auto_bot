@@ -28,6 +28,7 @@ class MockWebSocket extends EventEmitter {
   readonly sent: Array<Record<string, unknown>> = [];
   readyState = MockWebSocket.CONNECTING;
   deferTerminate = false;
+  failNextSend = false;
 
   constructor(url: string) {
     super();
@@ -35,6 +36,10 @@ class MockWebSocket extends EventEmitter {
   }
 
   send(payload: string): void {
+    if (this.failNextSend) {
+      this.failNextSend = false;
+      throw new Error('socket send failed synchronously');
+    }
     this.sent.push(JSON.parse(payload) as Record<string, unknown>);
   }
 
@@ -346,4 +351,21 @@ test('rejects pending command on socket close and does not become ready on login
   await assert.rejects(ready, /invalid credentials/);
   assert.equal(loginClient.status, 'disconnected');
   loginClient.disconnect();
+});
+
+test('wraps synchronous socket.send failures as NotSent and rolls back canonical state', async () => {
+  const { client, sockets } = await connected({ timeoutMs: 40, autoReconnect: false });
+  const socket = sockets[0]!;
+  socket.failNextSend = true;
+
+  const pending = client.subscribe({ service: 'LEVELONE_OPTIONS', parameters: { keys: 'NOT_SENT' } });
+  await assert.rejects(pending, (error: unknown) => error instanceof StreamerCommandNotSentError);
+
+  const states = (client as unknown as {
+    subscriptionStates: Map<string, { keys: Set<string> }>;
+  }).subscriptionStates;
+  assert.equal(states.has('LEVELONE_OPTIONS'), false);
+  assert.equal(socket.sent.flatMap((frame) => frame.requests as Array<Record<string, unknown>>)
+    .some((request) => request.command === 'SUBS' && (request.parameters as Record<string, unknown>)?.keys === 'NOT_SENT'), false);
+  client.disconnect();
 });

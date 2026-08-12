@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,6 +37,10 @@ function requiredString(value: unknown, code: string): string {
   return value.trim();
 }
 
+function validTimestamp(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && Number.isFinite(Date.parse(value));
+}
+
 function boundedSeconds(value: unknown, fallback: number, code: string): number {
   if (value === undefined || value === null) return fallback;
   if (!Number.isInteger(value) || (value as number) <= 0 || (value as number) > 31 * 24 * 60 * 60) {
@@ -66,31 +70,38 @@ function fromResponse(response: TokenResponse, prior?: Token): Token {
 async function load(): Promise<AuthFile | null> {
   try {
     const value = JSON.parse(await readFile(statePath, "utf8")) as Partial<AuthFile>;
+    const token = value.token as Partial<Token> | undefined;
     if (
       value.version !== 1 ||
-      typeof value.clientId !== "string" ||
-      typeof value.clientSecret !== "string" ||
-      typeof value.redirectUri !== "string" ||
-      !value.token ||
-      typeof value.token.accessToken !== "string" ||
-      typeof value.token.refreshToken !== "string" ||
-      typeof value.token.accessExpiresAt !== "string" ||
-      typeof value.token.refreshExpiresAt !== "string"
+      !value.clientId?.trim() ||
+      !value.clientSecret?.trim() ||
+      !value.redirectUri?.trim() ||
+      !token ||
+      !token.accessToken?.trim() ||
+      !token.refreshToken?.trim() ||
+      !validTimestamp(token.accessExpiresAt) ||
+      !validTimestamp(token.refreshExpiresAt)
     ) throw new Error("AUTH_FILE_INVALID");
     if (value.reauthorizedAt !== undefined && typeof value.reauthorizedAt !== "string") throw new Error("AUTH_FILE_INVALID");
     if (value.reauthorizationWeek !== undefined && typeof value.reauthorizationWeek !== "string") throw new Error("AUTH_FILE_INVALID");
     return value as AuthFile;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
+    if (error instanceof Error && error.message === "AUTH_FILE_INVALID") throw error;
+    throw new Error("AUTH_FILE_INVALID", { cause: error });
   }
 }
 
 async function save(value: AuthFile): Promise<void> {
-  await mkdir(dirname(statePath), { recursive: true });
+  await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
   const temporary = `${statePath}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(value, null, 2), "utf8");
-  await rename(temporary, statePath);
+  try {
+    await writeFile(temporary, JSON.stringify(value, null, 2), { encoding: "utf8", mode: 0o600 });
+    await rename(temporary, statePath);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function requestToken(
@@ -108,7 +119,14 @@ async function requestToken(
     signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok) throw new Error(`AUTH_HTTP_${response.status}`);
-  return await response.json() as TokenResponse;
+  try {
+    const value = await response.json();
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("AUTH_TOKEN_RESPONSE_INVALID");
+    return value as TokenResponse;
+  } catch (error) {
+    if (error instanceof Error && error.message === "AUTH_TOKEN_RESPONSE_INVALID") throw error;
+    throw new Error("AUTH_TOKEN_RESPONSE_INVALID", { cause: error });
+  }
 }
 
 function environmentCredentials(): Pick<AuthFile, "clientId" | "clientSecret" | "redirectUri"> {
@@ -132,6 +150,7 @@ export type AuthStatus = {
 export class SchwabTokenProvider {
   private cached: AuthFile | null = null;
   private pending: Promise<string> | null = null;
+  private pendingForce = false;
   private readonly report: (message: string) => void;
 
   constructor(report: (message: string) => void) {
@@ -139,7 +158,19 @@ export class SchwabTokenProvider {
   }
 
   async get(force = false): Promise<string> {
-    if (!this.pending) this.pending = this.resolve(force).finally(() => { this.pending = null; });
+    if (this.pending) {
+      if (!force || this.pendingForce) return this.pending;
+      await this.pending;
+      return this.get(true);
+    }
+    this.pendingForce = force;
+    const pending = this.resolve(force).finally(() => {
+      if (this.pending === pending) {
+        this.pending = null;
+        this.pendingForce = false;
+      }
+    });
+    this.pending = pending;
     return this.pending;
   }
 
@@ -182,8 +213,18 @@ export async function requireWeeklyReauthorization(now = new Date()): Promise<vo
 
 export async function login(callbackUrl: string, state: string): Promise<void> {
   const credentials = environmentCredentials();
-  const callback = new URL(callbackUrl);
-  if (callback.origin !== new URL(credentials.redirectUri).origin || callback.searchParams.get("state") !== state) {
+  const redirect = new URL(credentials.redirectUri);
+  let callback: URL;
+  try {
+    callback = new URL(callbackUrl);
+  } catch (error) {
+    throw new Error("AUTH_CALLBACK_INVALID", { cause: error });
+  }
+  if (
+    callback.origin !== redirect.origin
+    || callback.pathname !== redirect.pathname
+    || callback.searchParams.get("state") !== state
+  ) {
     throw new Error("AUTH_CALLBACK_INVALID");
   }
   const code = requiredString(callback.searchParams.get("code"), "AUTH_CALLBACK_INVALID");

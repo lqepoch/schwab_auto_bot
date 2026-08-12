@@ -26,7 +26,12 @@ export class ExecutionJournal {
   }
 
   record(event: string, data: Record<string, unknown> = {}): void {
-    const line = `${JSON.stringify({ at: new Date().toISOString(), runId: this.runId, event, data } satisfies ExecutionEvent)}\n`;
+    const line = `${JSON.stringify({
+      at: new Date().toISOString(),
+      runId: this.runId,
+      event,
+      data: sanitizeJournalValue(data, "", new WeakSet<object>()) as Record<string, unknown>,
+    } satisfies ExecutionEvent)}\n`;
     const write = this.tail.then(async () => {
       await mkdir(dirname(this.path), { recursive: true });
       await appendFile(this.path, line, "utf8");
@@ -39,4 +44,33 @@ export class ExecutionJournal {
   async flush(): Promise<void> {
     await this.tail;
   }
+}
+
+const sensitiveKeyPattern = /(?:access|refresh)?token|secret|authorization|account(?:hash|number)/i;
+
+function sanitizeJournalValue(value: unknown, key: string, seen: WeakSet<object>): unknown {
+  if (sensitiveKeyPattern.test(key) && (typeof value === "string" || (value && typeof value === "object"))) {
+    return "[REDACTED]";
+  }
+  if (typeof value === "string") return sanitizeJournalText(value);
+  if (typeof value === "bigint") return `${value}n`;
+  if (!value || typeof value !== "object") return value;
+  if (value instanceof Date) return value.toISOString();
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) return value.map((entry) => sanitizeJournalValue(entry, "", seen));
+    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+      childKey,
+      sanitizeJournalValue(childValue, childKey, seen),
+    ]));
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function sanitizeJournalText(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [REDACTED]")
+    .replace(/\b(access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]");
 }

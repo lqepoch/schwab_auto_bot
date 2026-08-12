@@ -23,3 +23,84 @@ test("writes ordered JSONL records into a per-run state directory", async () => 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("serializes concurrent records into complete, parseable JSONL lines", async () => {
+  const root = await mkdtemp(join(tmpdir(), "schwab-journal-"));
+  try {
+    const failures: unknown[] = [];
+    const journal = new ExecutionJournal(root, "run-concurrent", (error) => failures.push(error));
+    for (let index = 0; index < 250; index += 1) {
+      journal.record("event", { index, payload: "x".repeat(80) });
+    }
+    await journal.flush();
+    const lines = (await readFile(journal.path, "utf8")).trim().split("\n");
+    assert.equal(lines.length, 250);
+    assert.deepEqual(lines.map((line) => JSON.parse(line).data.index), Array.from({ length: 250 }, (_, index) => index));
+    assert.deepEqual(failures, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("redacts token, authorization, secret, and account identifiers at the journal boundary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "schwab-journal-"));
+  try {
+    const journal = new ExecutionJournal(root, "run-redaction", () => undefined);
+    journal.record("sensitive", {
+      accessToken: "access-secret",
+      refreshToken: "refresh-secret",
+      clientSecret: "client-secret",
+      accountHash: "account-hash",
+      tokenPresent: true,
+      message: "Authorization: Bearer abcdefghijklmnop",
+      nested: { authorization: "Bearer nested-secret" },
+    });
+    await journal.flush();
+    const value = JSON.parse(await readFile(journal.path, "utf8"));
+    assert.equal(value.data.accessToken, "[REDACTED]");
+    assert.equal(value.data.refreshToken, "[REDACTED]");
+    assert.equal(value.data.clientSecret, "[REDACTED]");
+    assert.equal(value.data.accountHash, "[REDACTED]");
+    assert.equal(value.data.tokenPresent, true);
+    assert.equal(value.data.nested.authorization, "[REDACTED]");
+    assert.match(value.data.message, /\[REDACTED\]/);
+    const raw = await readFile(journal.path, "utf8");
+    assert.equal(raw.includes("access-secret"), false);
+    assert.equal(raw.includes("account-hash"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reports mkdir or append failures through onFailure while flush remains observable and non-throwing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "schwab-journal-"));
+  try {
+    await (await import("node:fs/promises")).writeFile(join(root, ".state"), "not-a-directory", "utf8");
+    const failures: unknown[] = [];
+    const journal = new ExecutionJournal(root, "run-failure", (error) => failures.push(error));
+    journal.record("will-fail", { value: 1 });
+    await journal.flush();
+    assert.equal(failures.length, 1);
+    assert.ok(failures[0] instanceof Error);
+    await journal.flush();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("handles circular, bigint, and Date payloads without breaking the audit stream", async () => {
+  const root = await mkdtemp(join(tmpdir(), "schwab-journal-"));
+  try {
+    const journal = new ExecutionJournal(root, "run-values", () => undefined);
+    const circular: Record<string, unknown> = { amount: 2n, at: new Date("2026-08-13T00:00:00.000Z") };
+    circular.self = circular;
+    journal.record("values", circular);
+    await journal.flush();
+    const value = JSON.parse(await readFile(journal.path, "utf8"));
+    assert.equal(value.data.amount, "2n");
+    assert.equal(value.data.at, "2026-08-13T00:00:00.000Z");
+    assert.equal(value.data.self, "[Circular]");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

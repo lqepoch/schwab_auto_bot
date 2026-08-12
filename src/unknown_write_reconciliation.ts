@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open as openFile, readFile, rename } from "node:fs/promises";
+import { mkdir, open as openFile, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export type UnknownWritePhase = "IN_FLIGHT" | "PENDING";
@@ -81,28 +81,69 @@ function canonical(value: unknown): string {
   return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`).join(",")}}`;
 }
 
+/**
+ * Broker responses contain execution metadata beside the order intent. The
+ * metadata must not participate in reconciliation fingerprints because it is
+ * assigned or changed by Schwab after the mutation. All other fields are
+ * retained, including future execution fields, so a newly introduced broker
+ * field cannot silently collapse two different order intents into one.
+ */
+const BROKER_METADATA_KEYS = new Set([
+  "orderId",
+  "status",
+  "statusDescription",
+  "filledQuantity",
+  "remainingQuantity",
+  "cancelable",
+  "editable",
+  "enteredTime",
+  "closeTime",
+  "orderActivityCollection",
+  "accountNumber",
+  "replacingOrderCollection",
+  "legId",
+  "cusip",
+  "description",
+  "instrumentId",
+  "netChange",
+  "type",
+  "replacingOrder",
+  "replacedBy",
+]);
+
+const NUMERIC_EXECUTION_KEYS = new Set([
+  "price",
+  "quantity",
+  "stopPrice",
+  "activationPrice",
+  "stopPriceOffset",
+  "orderValue",
+  "taxLotQuantity",
+]);
+
+function normalizeExecutionValue(value: unknown, key?: string): unknown {
+  if (Array.isArray(value)) return value.map((entry) => normalizeExecutionValue(entry));
+  if (value && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(object)
+        .filter(([entryKey, entryValue]) => !BROKER_METADATA_KEYS.has(entryKey) && entryValue !== undefined)
+        .map(([entryKey, entryValue]) => [entryKey, normalizeExecutionValue(entryValue, entryKey)]),
+    );
+  }
+  if (typeof value === "string" && key && NUMERIC_EXECUTION_KEYS.has(key)) {
+    const trimmed = value.trim();
+    if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(trimmed)) {
+      const number = Number(trimmed);
+      if (Number.isFinite(number)) return number;
+    }
+  }
+  return value;
+}
+
 function normalizedOrder(value: unknown): Record<string, unknown> {
-  const numeric = (entry: unknown): number | string => {
-    const number = Number(entry);
-    return Number.isFinite(number) ? number : String(entry);
-  };
-  if (!value || typeof value !== "object") return {};
-  const source = value as Record<string, any>;
-  const result: Record<string, unknown> = {};
-  for (const key of [
-    "session", "duration", "orderType", "price", "quantity", "orderStrategyType", "complexOrderStrategyType",
-  ]) {
-    if (source[key] !== undefined) result[key] = key === "price" || key === "quantity" ? numeric(source[key]) : String(source[key]);
-  }
-  if (Array.isArray(source.orderLegCollection)) {
-    result.orderLegCollection = source.orderLegCollection.map((leg: Record<string, any>) => ({
-      instruction: leg.instruction === undefined ? undefined : String(leg.instruction),
-      positionEffect: leg.positionEffect === undefined ? undefined : String(leg.positionEffect),
-      quantity: leg.quantity === undefined ? undefined : numeric(leg.quantity),
-      instrument: leg.instrument?.symbol === undefined ? undefined : { symbol: String(leg.instrument.symbol) },
-    }));
-  }
-  return result;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return normalizeExecutionValue(value) as Record<string, unknown>;
 }
 
 export function safePath(path: string): string {
@@ -310,44 +351,78 @@ export class UnknownWriteReconciliation {
       reason: "no-unique-match" | "target-not-canceled";
       matchingOrderCount: number;
     }> = [];
+    // Build all candidate sets before resolving anything. A broker order is a
+    // single piece of evidence and may prove at most one unknown write. The
+    // conservative rule below deliberately leaves every record pending when a
+    // candidate is shared; guessing an assignment would permit a duplicate
+    // mutation after a process restart.
+    const candidates = new Map<string, readonly BrokerOrderSnapshot[]>();
+    const pendingReason = new Map<string, "no-unique-match" | "target-not-canceled">();
     for (const record of this.pendingRecords) {
       if (record.phase === "IN_FLIGHT") continue;
       if (record.operation === "CANCEL_ORDER") {
-        const target = orders.find((order) => String(order.orderId ?? "") === record.targetOrderId);
-        if (target && TERMINAL_CANCEL_STATUSES.has(String(target.status ?? "").toUpperCase())) {
-          resolved.push(record);
+        const targetMatches = orders.filter((order) => String(order.orderId ?? "") === record.targetOrderId);
+        const canceled = targetMatches.filter((order) => TERMINAL_CANCEL_STATUSES.has(String(order.status ?? "").toUpperCase()));
+        if (targetMatches.length === 1 && canceled.length === 1) {
+          candidates.set(record.id, canceled);
         } else {
-          pending.push({ record, reason: "target-not-canceled", matchingOrderCount: target ? 1 : 0 });
+          candidates.set(record.id, []);
+          pendingReason.set(record.id, "target-not-canceled");
         }
         continue;
       }
       if (record.operation === "REPLACE_ORDER") {
-        const source = orders.find((order) => String(order.orderId ?? "") === record.targetOrderId);
+        const sourceMatches = orders.filter((order) => String(order.orderId ?? "") === record.targetOrderId);
+        const source = sourceMatches.length === 1 ? sourceMatches[0] : undefined;
         const sourceStatus = String(source?.status ?? "").toUpperCase();
         if (!source || !REPLACE_SOURCE_TERMINAL_STATUSES.has(sourceStatus) || record.targetFingerprint === null || fingerprintOrder(source) !== record.targetFingerprint) {
-          pending.push({ record, reason: "no-unique-match", matchingOrderCount: 0 });
+          candidates.set(record.id, []);
+          pendingReason.set(record.id, "no-unique-match");
           continue;
         }
       }
       const matches = orders.filter((order) => {
-        if (record.payloadFingerprint === null || fingerprintOrder(order) !== record.payloadFingerprint) return false;
-        if (record.baselineOrderIds.includes(String(order.orderId ?? ""))) return false;
-        if (record.operation === "REPLACE_ORDER" && String(order.orderId ?? "") === record.targetOrderId) return false;
+        const orderId = String(order.orderId ?? "");
+        if (!orderId || record.payloadFingerprint === null || fingerprintOrder(order) !== record.payloadFingerprint) return false;
+        if (record.baselineOrderIds.includes(orderId)) return false;
+        if (record.operation === "REPLACE_ORDER" && orderId === record.targetOrderId) return false;
         const preSendAt = parseBrokerTimestamp(record.preSendAt);
         const enteredTime = parseBrokerTimestamp(order.enteredTime);
         // Schwab's broker clock may lag the client slightly; a small lower bound
         // allowance is safe only together with baseline exclusion, uniqueness,
         // and a short post-send window that prevents old manual orders from
         // resolving a later unknown write.
-        if (
-          preSendAt === null || enteredTime === null
-          || enteredTime < preSendAt - BROKER_CLOCK_SKEW_MS
-          || enteredTime > preSendAt + BROKER_MATCH_WINDOW_MS
-        ) return false;
-        return true;
+        return preSendAt !== null && enteredTime !== null
+          && enteredTime >= preSendAt - BROKER_CLOCK_SKEW_MS
+          && enteredTime <= preSendAt + BROKER_MATCH_WINDOW_MS;
       });
-      if (matches.length === 1) resolved.push(record);
-      else pending.push({ record, reason: "no-unique-match", matchingOrderCount: matches.length });
+      candidates.set(record.id, matches);
+    }
+
+    const owners = new Map<string, string[]>();
+    for (const [recordId, matches] of candidates) {
+      for (const order of matches) {
+        const orderId = String(order.orderId ?? "");
+        const recordOwners = owners.get(orderId) ?? [];
+        recordOwners.push(recordId);
+        owners.set(orderId, recordOwners);
+      }
+    }
+
+    for (const record of this.pendingRecords) {
+      const matches = candidates.get(record.id);
+      if (!matches) continue;
+      const uniqueIds = new Set(matches.map((order) => String(order.orderId ?? "")));
+      const hasSharedCandidate = [...uniqueIds].some((orderId) => (owners.get(orderId)?.length ?? 0) > 1);
+      if (matches.length === 1 && uniqueIds.size === 1 && !hasSharedCandidate) {
+        resolved.push(record);
+      } else {
+        pending.push({
+          record,
+          reason: pendingReason.get(record.id) ?? "no-unique-match",
+          matchingOrderCount: matches.length,
+        });
+      }
     }
     if (resolved.length > 0) {
       const resolvedIds = new Set(resolved.map((record) => record.id));
@@ -383,14 +458,19 @@ export class UnknownWriteReconciliation {
     await mkdir(dirname(this.statePath), { recursive: true, mode: 0o700 });
     const temporary = `${this.statePath}.${process.pid}.${this.idFactory()}.tmp`;
     const state: PersistedState = { schemaVersion: 1, accountFingerprint: this.accountFingerprint, pending };
-    const file = await openFile(temporary, "w", 0o600);
     try {
-      await file.writeFile(JSON.stringify(state, null, 2), "utf8");
-      await file.sync();
-    } finally {
-      await file.close();
+      const file = await openFile(temporary, "w", 0o600);
+      try {
+        await file.writeFile(JSON.stringify(state, null, 2), "utf8");
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+      await rename(temporary, this.statePath);
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      throw error;
     }
-    await rename(temporary, this.statePath);
     const directory = await openFile(dirname(this.statePath), "r");
     try {
       await directory.sync();

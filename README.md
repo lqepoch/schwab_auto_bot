@@ -215,4 +215,4 @@ npm run check
 npm test
 ```
 
-测试覆盖 SDK 传输整合的关键边界：保留 Schwab 写入响应的 `Location` 订单 ID、失败请求绝不由 SDK 隐式重试、执行窗口与周重登录边界。
+根项目的 `npm test` 由 Node test runner 自动发现 `test/*.test.ts` 与 `test/*.test.mjs`，覆盖 SDK 传输整合、WAL 未知结果账本、`BrokerWriteCoordinator` 最终写入闸门、`OrderSnapshotCoordinator` 快照新鲜度屏障、OAuth、运行锁、活动流和执行审计日志。测试 transport、WebSocket 与时钟均为本地 fake；默认测试不连接 Schwab，也不会发出真实 broker 写入。

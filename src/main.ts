@@ -46,6 +46,8 @@ import {
   isRefreshSpreadEligible,
   refreshSpreadWidth,
 } from "./refresh_order_policy.ts";
+import { BrokerWriteCoordinator } from "./broker_write_coordinator.ts";
+import { OrderSnapshotCoordinator, RuntimeStartupCoordinator } from "./order_snapshot_coordinator.ts";
 import {
   fingerprintOrder,
   safePath,
@@ -278,7 +280,16 @@ async function api(
       latestBrokerRateLimit = brokerRateLimitFromHeaders(error.headers);
       if (error.status === 429) budget.rateLimited(error.headers["retry-after"] ?? null);
       if (error.status === 401) void tokens.get(true);
-      throw Object.assign(new Error(`SCHWAB_HTTP_${error.status}`), { status: error.status });
+      throw Object.assign(new Error(`SCHWAB_HTTP_${error.status}`), {
+        status: error.status,
+        statusText: error.statusText,
+        headers: { ...error.headers },
+        requestId: error.requestId,
+        method: error.method ?? init.method ?? "GET",
+        path,
+        isNetworkError: error.isNetworkError === true,
+        cause: error,
+      });
     }
     throw error;
   }
@@ -436,13 +447,6 @@ function unknownOperation(method: "POST" | "PUT" | "DELETE"): UnknownWriteFailur
   return method === "POST" ? "PLACE_ORDER" : method === "PUT" ? "REPLACE_ORDER" : "CANCEL_ORDER";
 }
 
-function statusFromWriteError(error: unknown): number | undefined {
-  const structured = error as { status?: unknown };
-  if (typeof structured.status === "number") return structured.status;
-  const match = String(error).match(/SCHWAB_HTTP_(\d+)/);
-  return match ? Number(match[1]) : undefined;
-}
-
 function baselineOrderIds(payload: Json, targetOrderId?: string): string[] {
   const payloadFingerprint = fingerprintOrder(payload);
   const ids = orders
@@ -488,12 +492,6 @@ function assertBrokerWritesAllowed(key: string, method: "POST" | "PUT" | "DELETE
     pendingCount: unknownWriteReconciliation.pending().length,
   });
   throw new Error("UNKNOWN_WRITE_PENDING_RECONCILIATION");
-}
-
-function isUnknownWriteGuardError(error: unknown): boolean {
-  const message = String(error);
-  return message.includes("UNKNOWN_WRITE_PENDING_RECONCILIATION")
-    || message.includes("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED");
 }
 
 async function beginUnknownWrite(failure: UnknownWriteFailure) {
@@ -544,12 +542,12 @@ async function settleUnknownWrite(
   operation: UnknownWriteFailure["operation"],
   key: string,
   outcome: Pick<UnknownWriteFailure, "status" | "reason">,
-): Promise<void> {
+): Promise<Awaited<ReturnType<UnknownWriteReconciliation["settleWrite"]>>> {
   try {
     const record = await unknownWriteReconciliation.settleWrite(id, outcome);
     if (!record) {
       executionJournal.record("broker.write.ledger-cleared", { id, operation, key, outcome: "explicit-4xx" });
-      return;
+      return null;
     }
     executionJournal.record("broker.write.unknown-persisted", {
       id: record.id,
@@ -569,6 +567,7 @@ async function settleUnknownWrite(
       status: record.status,
     });
     stamp("UNKNOWN_WRITE_PENDING operation=" + record.operation + " key=" + record.key + " id=" + record.id + " reason=" + record.reason);
+    return record;
   } catch (error) {
     unknownWritePersistenceFault = error;
     executionJournal.record("broker.write.unknown-persistence-failed", { operation, key });
@@ -616,6 +615,99 @@ async function reconcileUnknownWritesAfterFullSnapshot(): Promise<void> {
     throw error;
   }
 }
+
+const coordinatorIntentMetadata = new Map<string, { operation: UnknownWriteFailure["operation"]; key: string }>();
+const brokerWriteCoordinator = new BrokerWriteCoordinator({
+  ledger: {
+    beginWrite: async (failure) => {
+      const record = await beginUnknownWrite(failure);
+      coordinatorIntentMetadata.set(record.id, { operation: failure.operation, key: failure.key });
+      return record;
+    },
+    completeWrite: async (id) => {
+      const metadata = coordinatorIntentMetadata.get(id);
+      await completeUnknownWrite(id, metadata?.operation ?? "PLACE_ORDER", metadata?.key ?? "coordinator");
+      coordinatorIntentMetadata.delete(id);
+    },
+    settleWrite: async (id, outcome) => {
+      const metadata = coordinatorIntentMetadata.get(id);
+      const record = await settleUnknownWrite(id, metadata?.operation ?? "PLACE_ORDER", metadata?.key ?? "coordinator", outcome);
+      if (!record) coordinatorIntentMetadata.delete(id);
+      return record;
+    },
+  },
+  transport: {
+    send: async (request) => {
+      const body = request.payload === undefined ? undefined : JSON.stringify(request.payload);
+      const response = await api(request.path, {
+        method: request.method,
+        ...(body === undefined ? {} : { body }),
+      }, request.transportPriority ?? 0);
+      return { status: response.status, headers: response.headers };
+    },
+  },
+  guards: {
+    beforeFinalWrite: async () => {
+      await ensureWeeklyReauthorization();
+      policy.requireExecutionWindow();
+    },
+    assertReady: (request) => assertBrokerWritesAllowed(request.key, request.method, request.path),
+    isStopping: () => stopping,
+    isReadOnly: () => readOnly,
+    onPersistenceFault: (error) => { unknownWritePersistenceFault = error; },
+  },
+  gate: finalWriteGate,
+  emit: (event) => executionJournal.record(`broker.write.coordinator.${event.event}`, {
+    key: event.request.key,
+    operation: event.request.operation,
+    method: event.request.method,
+    path: safePath(event.request.path),
+    status: event.status ?? null,
+    ledgerId: event.ledgerId ?? null,
+    reason: event.reason ?? null,
+  }),
+});
+
+const orderSnapshotCoordinator = new OrderSnapshotCoordinator<Json>({
+  fetch: async (scope, priority) => {
+    const now = new Date();
+    const lookbackMs = scope === "full" ? 60 * 60_000 : 5 * 60_000;
+    const from = new Date(now.getTime() - lookbackMs);
+    const query = new URLSearchParams({
+      fromEnteredTime: from.toISOString(),
+      toEnteredTime: now.toISOString(),
+      maxResults: "3000",
+    });
+    if (scope === "fills") query.set("status", "FILLED");
+    const response = await api(`/trader/v1/accounts/${accountHash}/orders?${query}`, {}, priority);
+    if (!Array.isArray(response.body)) throw new Error("订单快照不是数组");
+    return flatten(response.body);
+  },
+  reconcileUnknownWrites: async () => reconcileUnknownWritesAfterFullSnapshot(),
+  onAuthoritativeReplaced: async (incoming) => {
+    orders = [...incoming];
+  },
+  onFullReconciled: async (incoming) => {
+    recordOrderTransitions("full", incoming);
+    reportWorkingOrderPolicyViolations();
+    reportWorkingRefreshSpreadSkips();
+    reconcileExplorerSnapshot();
+    executionJournal.record("orders.snapshot.synced", { scope: "full", orders: incoming.length });
+  },
+  onFillsMerged: async (incoming, state) => {
+    orders = [...state.authoritative] as Json[];
+    recordOrderTransitions("fills", incoming);
+    executionJournal.record("orders.snapshot.synced", { scope: "fills", fills: incoming.length });
+  },
+  onFailure: (scope, error) => {
+    if (scope === "full") fullSnapshotReconciled = false;
+    if (!String(error).includes("REFRESH_QUOTA_HEADROOM")) {
+      stamp(`订单快照失败 full=${scope === "full"} error=${String(error)}`);
+    }
+  },
+  isStopping: () => stopping,
+  mergeKey: (order) => orderId(order),
+});
 
 function recordOrderTransitions(source: "full" | "fills", values: readonly Json[]): void {
   let inventoryMayHaveChanged = false;
@@ -956,63 +1048,27 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     executionJournal.record("broker.preview.accepted", { key, preflight, method, path, order: payloadAuditData(payload) });
   }
   const replaceTargetOrderId = preflightDecision.replaceOrderId;
-  let baselineIds: string[] = [];
-  let ledgerId: string | null = null;
   await evidence(key, method, path, payload, preflight);
   await waitForReplenishmentWriteWindow(priority, key);
-  try {
-    executionJournal.record("broker.write.requested", { key, preflight, method, path, priority, order: payloadAuditData(payload) });
-    const brokerOrderId = await finalWriteGate.run(
-      priority,
-      async () => {
-        if (stopping) throw new Error("RUNTIME_STOPPING");
-        await ensureWeeklyReauthorization();
-        policy.requireExecutionWindow();
-        assertBrokerWritesAllowed(key, method, path);
-        const preSendAt = new Date().toISOString();
-        baselineIds = baselineOrderIds(payload, replaceTargetOrderId ?? undefined);
-        const intent = await beginUnknownWrite({
-          operation: unknownOperation(method),
-          method,
-          key,
-          path,
-          payload,
-          baselineOrderIds: baselineIds,
-          targetOrderId: replaceTargetOrderId ?? undefined,
-          targetOrder: replaceTargetOrderId
-            ? orders.find((order) => orderId(order) === replaceTargetOrderId)
-            : undefined,
-          preSendAt,
-        });
-        ledgerId = intent.id;
-        const response = await api(path, { method, body: JSON.stringify(payload) }, 0);
-        const brokerId = response.headers.get("location")?.split("/").at(-1);
-        if (!brokerId) {
-          throw Object.assign(new Error("SCHWAB_WRITE_ACCEPTED_WITHOUT_LOCATION"), {
-            status: response.status,
-            unknownReason: "missing-location",
-          });
-        }
-        await completeUnknownWrite(intent.id, unknownOperation(method), key);
-        ledgerId = null;
-        return brokerId;
-      },
-    );
-    executionJournal.record("broker.write.accepted", { key, preflight, method, path, brokerOrderId, order: payloadAuditData(payload) });
-    return brokerOrderId;
-  } catch (error) {
-    if (String(error) === "Error: RUNTIME_STOPPING") {
-      executionJournal.record("broker.write.skipped", { key, reason: "runtime-stopping-before-final-write", method, path, order: payloadAuditData(payload) });
-    } else if (ledgerId !== null && !isUnknownWriteGuardError(error)) {
-      const details = error as { status?: number; unknownReason?: string };
-      await settleUnknownWrite(ledgerId, unknownOperation(method), key, {
-        status: details.status ?? statusFromWriteError(error),
-        reason: details.unknownReason ?? String(error),
-      });
-      ledgerId = null;
-    }
-    throw error;
-  }
+  executionJournal.record("broker.write.requested", { key, preflight, method, path, priority, order: payloadAuditData(payload) });
+  const result = await brokerWriteCoordinator.execute({
+    key,
+    method,
+    operation: unknownOperation(method),
+    path,
+    payload,
+    baselineOrderIds: () => baselineOrderIds(payload, replaceTargetOrderId ?? undefined),
+    targetOrderId: replaceTargetOrderId ?? undefined,
+    targetOrder: replaceTargetOrderId
+      ? () => orders.find((order) => orderId(order) === replaceTargetOrderId)
+      : undefined,
+    priority,
+    transportPriority: 0,
+  });
+  const brokerOrderId = result.orderId;
+  if (!brokerOrderId) throw new Error("BROKER_ORDER_ID_MISSING");
+  executionJournal.record("broker.write.accepted", { key, preflight, method, path, brokerOrderId, order: payloadAuditData(payload) });
+  return brokerOrderId;
 }
 
 async function cancelOrder(key: string, orderIdValue: string, priority: Priority = 2): Promise<void> {
@@ -1025,6 +1081,7 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
     return;
   }
   const source = orders.find((order) => orderId(order) === orderIdValue);
+  assertCancelableTarget(source, key, orderIdValue);
   if (policy.disableSellOrders && (info(source ?? {})?.closing || key.startsWith("sell-") || key.startsWith("stale-recreate"))) {
     executionJournal.record("exit.cancel.blocked", {
       key, orderId: orderIdValue, reason: "cli-disable-sell-orders",
@@ -1036,46 +1093,42 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
   await ensureWeeklyReauthorization();
   policy.requireExecutionWindow();
   await evidence(key, "DELETE", path, {}, "NOT_APPLICABLE");
-  let ledgerId: string | null = null;
-  try {
-    executionJournal.record("broker.cancel.requested", { key, orderId: orderIdValue, path });
-    await finalWriteGate.run(priority, async () => {
-      if (stopping) throw new Error("RUNTIME_STOPPING");
-      await ensureWeeklyReauthorization();
-      policy.requireExecutionWindow();
-      assertBrokerWritesAllowed(key, "DELETE", path);
-      const preSendAt = new Date().toISOString();
-      const intent = await beginUnknownWrite({
-        operation: "CANCEL_ORDER",
-        method: "DELETE",
-        key,
-        path,
-        baselineOrderIds: [orderIdValue],
-        targetOrderId: orderIdValue,
-        targetOrder: orders.find((order) => orderId(order) === orderIdValue),
-        preSendAt,
-      });
-      ledgerId = intent.id;
-      const response = await api(path, { method: "DELETE" }, priority);
-      await completeUnknownWrite(intent.id, "CANCEL_ORDER", key);
-      ledgerId = null;
-      return response;
+  executionJournal.record("broker.cancel.requested", { key, orderId: orderIdValue, path });
+  await brokerWriteCoordinator.execute({
+    key,
+    method: "DELETE",
+    operation: "CANCEL_ORDER",
+    path,
+    baselineOrderIds: [orderIdValue],
+    targetOrderId: orderIdValue,
+    targetOrder: () => orders.find((order) => orderId(order) === orderIdValue),
+    validateFinal: () => {
+      const currentTarget = orders.find((order) => orderId(order) === orderIdValue);
+      assertCancelableTarget(currentTarget, key, orderIdValue);
+    },
+    priority,
+    transportPriority: priority,
+  });
+  const current = orders.find((order) => orderId(order) === orderIdValue);
+  if (current) current.status = "CANCELED";
+  executionJournal.record("broker.cancel.accepted", { key, orderId: orderIdValue, path });
+}
+
+function assertCancelableTarget(source: Json | undefined, key: string, orderIdValue: string): void {
+  if (!source) {
+    executionJournal.record("broker.cancel.blocked", {
+      key, orderId: orderIdValue, reason: "target-order-not-in-authoritative-snapshot",
     });
-    const source = orders.find((order) => orderId(order) === orderIdValue);
-    if (source) source.status = "CANCELED";
-    executionJournal.record("broker.cancel.accepted", { key, orderId: orderIdValue, path });
-  } catch (error) {
-    if (String(error) === "Error: RUNTIME_STOPPING") {
-      executionJournal.record("broker.cancel.skipped", { key, orderId: orderIdValue, reason: "runtime-stopping-before-final-write" });
-    } else if (ledgerId !== null && !isUnknownWriteGuardError(error)) {
-      const details = error as { status?: number; unknownReason?: string };
-      await settleUnknownWrite(ledgerId, "CANCEL_ORDER", key, {
-        status: details.status ?? statusFromWriteError(error),
-        reason: details.unknownReason ?? String(error),
-      });
-      ledgerId = null;
-    }
-    throw error;
+    throw new Error("CANCEL_TARGET_NOT_IN_AUTHORITATIVE_SNAPSHOT");
+  }
+  if (!working.has(String(source.status ?? ""))) {
+    executionJournal.record("broker.cancel.blocked", {
+      key,
+      orderId: orderIdValue,
+      reason: "target-order-not-working",
+      status: source.status ?? null,
+    });
+    throw new Error("CANCEL_TARGET_NOT_WORKING");
   }
 }
 
@@ -1119,44 +1172,26 @@ async function loadActivityStreamContext(): Promise<{
 }
 
 async function poll(full = false, priority: Priority = 0): Promise<boolean> {
-  // A complete snapshot replaces the shared working-order view, so only one
-  // may run at a time.  A fill-only snapshot only merges terminal orders and
-  // is safe to run beside it; ACCT_ACTIVITY must not wait behind a slow full
-  // refresh before a confirmed fill can replenish.
-  if ((full && polling) || stopping) return false;
-  if (full) polling = true;
-  if (full) fullSnapshotReconciled = false;
+  // A full poll owns the authoritative snapshot and reconciliation barrier.
+  // Fill/activity polls may merge read-only hints while it is running, but the
+  // broker-write coordinator rechecks fullSnapshotReconciled at its final gate.
+  if (stopping) return false;
+  if (full) {
+    if (polling) return false;
+    polling = true;
+    fullSnapshotReconciled = false;
+  }
   try {
-    const now = new Date();
-    const lookbackMs = full ? 60 * 60_000 : 5 * 60_000;
-    const from = new Date(now.getTime() - lookbackMs);
-    const query = new URLSearchParams({
-      fromEnteredTime: from.toISOString(),
-      toEnteredTime: now.toISOString(),
-      maxResults: "3000",
-    });
-    if (!full) query.set("status", "FILLED");
-    const response = await api(`/trader/v1/accounts/${accountHash}/orders?${query}`, {}, priority);
-    if (!Array.isArray(response.body)) throw new Error("订单快照不是数组");
-    const incoming = flatten(response.body);
+    const successful = full
+      ? await orderSnapshotCoordinator.pollFull(priority)
+      : await orderSnapshotCoordinator.pollFills(priority);
+    if (!successful) return false;
     if (full) {
-      orders = incoming;
-      await reconcileUnknownWritesAfterFullSnapshot();
-      fullSnapshotReconciled = true;
-      recordOrderTransitions("full", orders);
-      lastFullOrderPollAt = Date.now();
-      reportWorkingOrderPolicyViolations();
-
-      reportWorkingRefreshSpreadSkips();
-      if (!readOnly && policy.isExecutionWindowOpen()) detectExplorerFills();
-      reconcileExplorerSnapshot();
-      executionJournal.record("orders.snapshot.synced", { scope: "full", orders: orders.length });
-    } else {
-      const merged = new Map(orders.map((order) => [orderId(order), order]));
-      for (const order of incoming) merged.set(orderId(order), order);
-      orders = [...merged.values()];
-      recordOrderTransitions("fills", incoming);
-      executionJournal.record("orders.snapshot.synced", { scope: "fills", fills: incoming.length });
+      // The snapshot coordinator only reports success after its consumer
+      // callback has completed.  Copy readiness after that await so the final
+      // write gate cannot open during transition/explorer side effects.
+      fullSnapshotReconciled = orderSnapshotCoordinator.fullSnapshotReconciled;
+      lastFullOrderPollAt = orderSnapshotCoordinator.lastFullSnapshotAt;
     }
     if (!readOnly) {
       trackInventoryFillDeltas();
@@ -1167,11 +1202,6 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
     }
     lastFillPollAt = Date.now();
     return true;
-  } catch (error) {
-    if (!String(error).includes("REFRESH_QUOTA_HEADROOM")) {
-      stamp(`订单快照失败 full=${full} error=${String(error)}`);
-    }
-    return false;
   } finally {
     if (full) polling = false;
   }
@@ -2559,22 +2589,34 @@ if (policy.disableSellOrders) {
   recordSellOrderAutomationDisabled();
   stamp("SELL_ORDER_AUTOMATION_DISABLED: no sell Submit, Replace, or Cancel will be sent; existing working sells are left unchanged");
 }
-await bootstrap();
-const startupReady = await poll(true);
-if (!startupReady) {
-  executionJournal.record("run.start-blocked", { reason: "initial-full-order-reconciliation-failed" });
-  stamp("启动停止：初始完整订单快照或未知写入只读对账失败，未启动任何交易循环");
-  stop();
-}
-if (startupReady && !once) {
-  activityStream = new SchwabActivityStream({
-    loadContext: loadActivityStreamContext,
-    onActivity: handleAccountActivity,
-    onState: stamp,
-  });
-  activityStream.start();
-  if (!readOnly) void explorerRoundLoop();
-}
+const startupCoordinator = new RuntimeStartupCoordinator({
+  bootstrap,
+  fullSnapshot: () => poll(true),
+  onBlocked: async (reason, error) => {
+    const startupReason = reason === "bootstrap-failed"
+      ? "account-bootstrap-failed"
+      : "initial-full-order-reconciliation-failed";
+    executionJournal.record("run.start-blocked", {
+      reason: startupReason,
+      error: error === undefined ? null : String(error),
+    });
+    stamp(reason === "bootstrap-failed"
+      ? `启动停止：账户 bootstrap 失败 error=${String(error)}`
+      : "启动停止：初始完整订单快照或未知写入只读对账失败，未启动任何交易循环");
+    stop();
+  },
+  startActivityStream: async () => {
+    if (once) return;
+    activityStream = new SchwabActivityStream({
+      loadContext: loadActivityStreamContext,
+      onActivity: handleAccountActivity,
+      onState: stamp,
+    });
+    activityStream.start();
+    if (!readOnly) void explorerRoundLoop();
+  },
+});
+const startupReady = await startupCoordinator.start();
 if (startupReady && !readOnly) {
   await reconcilePositions();
   stamp(policy.disableSellOrders
