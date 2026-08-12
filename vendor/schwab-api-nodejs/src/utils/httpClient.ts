@@ -300,7 +300,39 @@ export class HttpClient {
           });
         }
 
-        const rawText = await response.text();
+        let rawText: string;
+        try {
+          rawText = await response.text();
+        } catch (error) {
+          // The broker may have accepted a mutation before the response body
+          // stream failed. Preserve the HTTP response context and classify the
+          // read failure as network-ambiguous so TraderApiClient can route it
+          // to UnknownOutcome reconciliation instead of exposing a raw Error.
+          const originalError = error instanceof Error ? error : new Error(String(error));
+          const isAbortError = originalError.name === 'AbortError';
+          this.logger.error('HTTP 响应正文读取失败', {
+            requestId,
+            method,
+            url,
+            status: response.status,
+            attempt: attemptNumber,
+            error: originalError.message,
+          });
+          throw new SchwabApiError(
+            `Schwab API response body read failed: ${originalError.message}`,
+            {
+              status: response.status,
+              statusText: isAbortError ? 'ABORTED' : 'RESPONSE_BODY_READ_ERROR',
+              url,
+              headers: redactHeaders(headersToObject(response.headers)),
+              isNetworkError: true,
+              requestId,
+              method,
+              attempt: attemptNumber,
+              cause: originalError,
+            },
+          );
+        }
         const parsedBody = rawText ? parseResponseBody(rawText) : undefined;
 
         if (!response.ok) {
