@@ -25,6 +25,7 @@ interface LockMetadata {
   pid: number;
   hostname: string;
   createdAt: number;
+  ownerId: string;
 }
 
 /**
@@ -38,6 +39,7 @@ export class TokenStore {
   private readonly lockRetryDelayMs: number;
   private readonly lockAcquireTimeoutMs: number;
   private readonly staleLockThresholdMs: number;
+  private readonly lockOwners = new WeakMap<FileHandle, string>();
 
   constructor(options: TokenStoreOptions = {}) {
     this.filePath = options.filePath ?? path.join(process.cwd(), DEFAULT_FILENAME);
@@ -106,8 +108,20 @@ export class TokenStore {
     let lockHandle: FileHandle | null = null;
     try {
       lockHandle = await this.acquireLock();
-      await fs.writeFile(tempPath, payload, { encoding: 'utf-8', mode: 0o600 });
+      const temporaryHandle = await fs.open(tempPath, 'w', 0o600);
+      try {
+        await temporaryHandle.writeFile(payload, 'utf-8');
+        await temporaryHandle.sync();
+      } finally {
+        await temporaryHandle.close();
+      }
       await fs.rename(tempPath, this.filePath);
+      const directoryHandle = await fs.open(path.dirname(this.filePath), 'r');
+      try {
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
       this.logger.info('令牌写入完成', { expiresAt: token.expires_at });
     } catch (error) {
       this.logger.error('令牌写入失败', {
@@ -145,8 +159,10 @@ export class TokenStore {
     while (true) {
       try {
         const handle = await fs.open(this.lockPath, 'wx');
-        await handle.writeFile(JSON.stringify(this.createLockMetadata()), { encoding: 'utf-8' });
+        const metadata = this.createLockMetadata();
+        await handle.writeFile(JSON.stringify(metadata), { encoding: 'utf-8' });
         await handle.datasync().catch(() => undefined);
+        this.lockOwners.set(handle, metadata.ownerId);
         this.logger.debug('成功获取令牌存储锁', { lockPath: this.lockPath, pid: process.pid });
         return handle;
       } catch (error) {
@@ -174,6 +190,8 @@ export class TokenStore {
   }
 
   private async releaseLock(handle: FileHandle): Promise<void> {
+    const ownerId = this.lockOwners.get(handle);
+    this.lockOwners.delete(handle);
     try {
       await handle.close();
     } catch (error) {
@@ -181,6 +199,9 @@ export class TokenStore {
         path: this.lockPath,
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+    if (!ownerId || !(await this.lockBelongsTo(ownerId))) {
+      return;
     }
     try {
       await fs.unlink(this.lockPath);
@@ -209,7 +230,7 @@ export class TokenStore {
           path: this.lockPath,
           error: err instanceof Error ? err.message : String(err),
         });
-        return true;
+        return false;
       }
 
       if (await this.tryReclaimStaleLock()) {
@@ -232,6 +253,7 @@ export class TokenStore {
       pid: process.pid,
       hostname: os.hostname(),
       createdAt: Date.now(),
+      ownerId: randomUUID(),
     };
   }
 
@@ -257,10 +279,15 @@ export class TokenStore {
 
     if (!metadata) {
       reasons.push('锁文件内容无效');
-    } else {
-      if (!this.isProcessAlive(metadata.pid)) {
-        reasons.push(`PID ${metadata.pid} 不存在`);
+    } else if (metadata.hostname === os.hostname()) {
+      // A local PID protects a live owner even when its lease is old.
+      if (this.isProcessAlive(metadata.pid)) {
+        return false;
       }
+      reasons.push(`PID ${metadata.pid} 不存在`);
+    } else {
+      // A PID is meaningful only on its originating host; foreign locks use
+      // the lease timestamp and never probe the local process table.
       const age = now - metadata.createdAt;
       if (!Number.isFinite(age) || age < 0) {
         reasons.push('锁文件时间戳异常');
@@ -274,6 +301,11 @@ export class TokenStore {
     }
 
     try {
+      const currentRaw = await fs.readFile(this.lockPath, 'utf-8');
+      const current = this.parseLockMetadata(currentRaw);
+      if (!metadata || !current || current.ownerId !== metadata.ownerId) {
+        return false;
+      }
       await fs.unlink(this.lockPath);
       this.logger.warn('检测到陈旧的令牌锁文件，已清理', {
         path: this.lockPath,
@@ -295,6 +327,22 @@ export class TokenStore {
     }
   }
 
+  private async lockBelongsTo(ownerId: string): Promise<boolean> {
+    try {
+      const raw = await fs.readFile(this.lockPath, 'utf-8');
+      return this.parseLockMetadata(raw)?.ownerId === ownerId;
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err?.code !== 'ENOENT') {
+        this.logger.warn('验证令牌锁所有权失败，保留锁文件', {
+          path: this.lockPath,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return false;
+    }
+  }
+
   private parseLockMetadata(raw: string): LockMetadata | null {
     try {
       const parsed = JSON.parse(raw) as Partial<LockMetadata>;
@@ -304,12 +352,15 @@ export class TokenStore {
         parsed.pid > 0 &&
         typeof parsed.createdAt === 'number' &&
         Number.isFinite(parsed.createdAt) &&
-        typeof parsed.hostname === 'string'
+        typeof parsed.hostname === 'string' &&
+        typeof parsed.ownerId === 'string' &&
+        parsed.ownerId.length > 0
       ) {
         return {
           pid: parsed.pid,
           createdAt: parsed.createdAt,
           hostname: parsed.hostname,
+          ownerId: parsed.ownerId,
         };
       }
       return null;
