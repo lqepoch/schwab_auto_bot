@@ -11,12 +11,30 @@ export const StreamerCommandResponseSchema = z.object({
   command: z.string(),
   timestamp: z.coerce.number(),
   content: z.object({
-    code: z.coerce.number(),
+    // Do not coerce null into zero. Schwab's success codes are protocol
+    // values, and an absent/malformed code must never acknowledge a command.
+    code: z.number().int().finite(),
     msg: z.string(),
   }),
 });
 
 export type StreamerCommandResponse = z.infer<typeof StreamerCommandResponseSchema>;
+
+/**
+ * Streamer uses command-specific success codes in addition to the generic
+ * zero-success response used by some environments and older fixtures.
+ */
+export function isSuccessfulStreamerCommand(service: string, command: string, code: number): boolean {
+  if (!Number.isInteger(code) || !Number.isFinite(code)) return false;
+  if (code === 0) return true;
+  switch (command) {
+    case 'SUBS': return code === 26;
+    case 'UNSUBS': return code === 27;
+    case 'ADD': return code === 28;
+    case 'VIEW': return code === 29;
+    default: return false;
+  }
+}
 
 export const StreamerDataPayloadSchema = z.object({
   service: z.string(),

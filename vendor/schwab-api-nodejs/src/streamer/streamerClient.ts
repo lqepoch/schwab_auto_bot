@@ -10,6 +10,7 @@ import {
   StreamerNotifyPayload,
   StreamerRequestEnvelope,
   StreamerServiceRequest,
+  isSuccessfulStreamerCommand,
 } from '../types/streamer.js';
 import {
   applySubscriptionMutation,
@@ -418,7 +419,8 @@ export class StreamerClient extends EventEmitter {
     if (!handled || response.service !== 'ADMIN' || response.command !== 'LOGIN') {
       return;
     }
-    if (response.content.code === 0 && generation === this.socketGeneration && this.socket) {
+    if (isSuccessfulStreamerCommand(response.service, response.command, response.content.code)
+      && generation === this.socketGeneration && this.socket) {
       this.logger.info('Streamer 登录成功');
       this.isLoggedIn = true;
       this.reconnectAttempts = 0;
@@ -732,7 +734,10 @@ export class StreamerClient extends EventEmitter {
     try {
       this.sendOnSocket(socket, { requests: [request] });
     } catch (error) {
-      this.commandTracker.cancel(requestid, toError(error));
+      const notSent = error instanceof StreamerCommandNotSentError
+        ? error
+        : new StreamerCommandNotSentError(`Streamer command was not sent: ${toError(error).message}`);
+      this.commandTracker.cancel(requestid, notSent);
     }
     return acknowledgement.then(() => undefined);
   }

@@ -1,4 +1,4 @@
-import type { StreamerCommandResponse } from '../types/streamer.js';
+import { isSuccessfulStreamerCommand, type StreamerCommandResponse } from '../types/streamer.js';
 import { StreamerCommandError, StreamerCommandTimeoutError } from './streamerErrors.js';
 
 type PendingCommand = {
@@ -74,7 +74,7 @@ export class StreamerCommandTracker {
 
     clearTimeout(pending.timer);
     this.pending.delete(requestid);
-    if (response.content.code === 0) {
+    if (isSuccessfulStreamerCommand(response.service, response.command, response.content.code)) {
       pending.resolve(response);
     } else {
       pending.reject(new StreamerCommandError(response));
