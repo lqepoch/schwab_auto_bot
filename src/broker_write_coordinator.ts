@@ -21,6 +21,7 @@ export type BrokerWriteRequest = Readonly<{
   baselineOrderIds?: readonly string[] | (() => readonly string[]);
   targetOrderId?: string;
   targetOrder?: Record<string, unknown> | (() => Record<string, unknown> | undefined);
+  validateFinal?: () => void | Promise<void>;
   priority?: BrokerWritePriority;
   /** Optional request-budget priority; final mutation writes may use a
    * different priority from the local gate queue. */
@@ -209,6 +210,7 @@ export class BrokerWriteCoordinator {
     }
     try {
       await this.guards.beforeFinalWrite?.(request);
+      await request.validateFinal?.();
       await this.guards.assertReady(request);
     } catch (error) {
       this.emitEvent({ event: "blocked", request, reason: String(error) });

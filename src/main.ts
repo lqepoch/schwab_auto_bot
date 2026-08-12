@@ -47,7 +47,7 @@ import {
   refreshSpreadWidth,
 } from "./refresh_order_policy.ts";
 import { BrokerWriteCoordinator } from "./broker_write_coordinator.ts";
-import { OrderSnapshotCoordinator } from "./order_snapshot_coordinator.ts";
+import { OrderSnapshotCoordinator, RuntimeStartupCoordinator } from "./order_snapshot_coordinator.ts";
 import {
   fingerprintOrder,
   safePath,
@@ -688,8 +688,6 @@ const orderSnapshotCoordinator = new OrderSnapshotCoordinator<Json>({
     orders = [...incoming];
   },
   onFullReconciled: async (incoming) => {
-    fullSnapshotReconciled = true;
-    lastFullOrderPollAt = Date.now();
     recordOrderTransitions("full", incoming);
     reportWorkingOrderPolicyViolations();
     reportWorkingRefreshSpreadSkips();
@@ -1083,6 +1081,7 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
     return;
   }
   const source = orders.find((order) => orderId(order) === orderIdValue);
+  assertCancelableTarget(source, key, orderIdValue);
   if (policy.disableSellOrders && (info(source ?? {})?.closing || key.startsWith("sell-") || key.startsWith("stale-recreate"))) {
     executionJournal.record("exit.cancel.blocked", {
       key, orderId: orderIdValue, reason: "cli-disable-sell-orders",
@@ -1103,12 +1102,34 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
     baselineOrderIds: [orderIdValue],
     targetOrderId: orderIdValue,
     targetOrder: () => orders.find((order) => orderId(order) === orderIdValue),
+    validateFinal: () => {
+      const currentTarget = orders.find((order) => orderId(order) === orderIdValue);
+      assertCancelableTarget(currentTarget, key, orderIdValue);
+    },
     priority,
     transportPriority: priority,
   });
   const current = orders.find((order) => orderId(order) === orderIdValue);
   if (current) current.status = "CANCELED";
   executionJournal.record("broker.cancel.accepted", { key, orderId: orderIdValue, path });
+}
+
+function assertCancelableTarget(source: Json | undefined, key: string, orderIdValue: string): void {
+  if (!source) {
+    executionJournal.record("broker.cancel.blocked", {
+      key, orderId: orderIdValue, reason: "target-order-not-in-authoritative-snapshot",
+    });
+    throw new Error("CANCEL_TARGET_NOT_IN_AUTHORITATIVE_SNAPSHOT");
+  }
+  if (!working.has(String(source.status ?? ""))) {
+    executionJournal.record("broker.cancel.blocked", {
+      key,
+      orderId: orderIdValue,
+      reason: "target-order-not-working",
+      status: source.status ?? null,
+    });
+    throw new Error("CANCEL_TARGET_NOT_WORKING");
+  }
 }
 
 async function bootstrap(): Promise<void> {
@@ -1165,6 +1186,13 @@ async function poll(full = false, priority: Priority = 0): Promise<boolean> {
       ? await orderSnapshotCoordinator.pollFull(priority)
       : await orderSnapshotCoordinator.pollFills(priority);
     if (!successful) return false;
+    if (full) {
+      // The snapshot coordinator only reports success after its consumer
+      // callback has completed.  Copy readiness after that await so the final
+      // write gate cannot open during transition/explorer side effects.
+      fullSnapshotReconciled = orderSnapshotCoordinator.fullSnapshotReconciled;
+      lastFullOrderPollAt = orderSnapshotCoordinator.lastFullSnapshotAt;
+    }
     if (!readOnly) {
       trackInventoryFillDeltas();
       if (policy.isExecutionWindowOpen()) {
@@ -2561,22 +2589,34 @@ if (policy.disableSellOrders) {
   recordSellOrderAutomationDisabled();
   stamp("SELL_ORDER_AUTOMATION_DISABLED: no sell Submit, Replace, or Cancel will be sent; existing working sells are left unchanged");
 }
-await bootstrap();
-const startupReady = await poll(true);
-if (!startupReady) {
-  executionJournal.record("run.start-blocked", { reason: "initial-full-order-reconciliation-failed" });
-  stamp("启动停止：初始完整订单快照或未知写入只读对账失败，未启动任何交易循环");
-  stop();
-}
-if (startupReady && !once) {
-  activityStream = new SchwabActivityStream({
-    loadContext: loadActivityStreamContext,
-    onActivity: handleAccountActivity,
-    onState: stamp,
-  });
-  activityStream.start();
-  if (!readOnly) void explorerRoundLoop();
-}
+const startupCoordinator = new RuntimeStartupCoordinator({
+  bootstrap,
+  fullSnapshot: () => poll(true),
+  onBlocked: async (reason, error) => {
+    const startupReason = reason === "bootstrap-failed"
+      ? "account-bootstrap-failed"
+      : "initial-full-order-reconciliation-failed";
+    executionJournal.record("run.start-blocked", {
+      reason: startupReason,
+      error: error === undefined ? null : String(error),
+    });
+    stamp(reason === "bootstrap-failed"
+      ? `启动停止：账户 bootstrap 失败 error=${String(error)}`
+      : "启动停止：初始完整订单快照或未知写入只读对账失败，未启动任何交易循环");
+    stop();
+  },
+  startActivityStream: async () => {
+    if (once) return;
+    activityStream = new SchwabActivityStream({
+      loadContext: loadActivityStreamContext,
+      onActivity: handleAccountActivity,
+      onState: stamp,
+    });
+    activityStream.start();
+    if (!readOnly) void explorerRoundLoop();
+  },
+});
+const startupReady = await startupCoordinator.start();
 if (startupReady && !readOnly) {
   await reconcilePositions();
   stamp(policy.disableSellOrders

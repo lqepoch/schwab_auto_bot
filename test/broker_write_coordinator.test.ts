@@ -375,6 +375,31 @@ test("final gate blocks stale snapshots and stopping state before WAL or transpo
   assert.equal(ledger.records.size, 0);
 });
 
+test("request-specific final validation blocks a changed cancel target before WAL", async () => {
+  const ledger = new FakeLedger();
+  const transport = new FakeTransport();
+  const state = { working: true };
+  const request = baseRequest({
+    key: "cancel-target",
+    method: "DELETE",
+    operation: "CANCEL_ORDER",
+    path: "/trader/v1/accounts/hash/orders/12345",
+    payload: undefined,
+    targetOrderId: "12345",
+    targetOrder: { orderId: "12345", status: "WORKING" },
+    validateFinal: () => {
+      if (!state.working) throw new Error("CANCEL_TARGET_NOT_WORKING");
+    },
+  });
+  state.working = false;
+  await assert.rejects(
+    () => makeCoordinator(ledger, transport).execute(request),
+    /CANCEL_TARGET_NOT_WORKING/,
+  );
+  assert.equal(ledger.records.size, 0);
+  assert.equal(transport.attempts, 0);
+});
+
 test("Location must identify a numeric order resource, not an arbitrary final path segment", async () => {
   const cases = [
     "/trader/v1/accounts/hash/orders/not-a-number",

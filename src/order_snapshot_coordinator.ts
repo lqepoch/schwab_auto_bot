@@ -116,11 +116,14 @@ export class OrderSnapshotCoordinator<T> {
         for (const order of this.fillsDuringFull.values()) merged.set(this.mergeKey(order), order);
         this.authoritativeOrders = [...merged.values()];
       }
-      this.fullSnapshotReconciledValue = true;
-      this.lastFullSnapshotAtValue = this.clock.now();
-      this.fullReconciliationInProgressValue = false;
       const state = this.snapshotState();
-      await this.onFullReconciled?.(incoming, state);
+      await this.onFullReconciled?.(this.authoritativeOrders, state);
+      // Keep the barrier closed until all consumer side effects (transition
+      // recording, explorer reconciliation, and scheduling) have completed.
+      // A final broker-write gate can run concurrently with this callback.
+      this.lastFullSnapshotAtValue = this.clock.now();
+      this.fullSnapshotReconciledValue = true;
+      this.fullReconciliationInProgressValue = false;
       return true;
     } catch (error) {
       this.fullSnapshotReconciledValue = false;

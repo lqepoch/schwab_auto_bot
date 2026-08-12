@@ -56,6 +56,32 @@ test("full reconciliation failure keeps write readiness false and reports failur
   assert.match(String(failures[0]?.[1]), /WAL_RECONCILIATION_FAILED/);
 });
 
+test("full snapshot stays blocked while consumer callback side effects are pending", async () => {
+  const callback = deferred<void>();
+  let callbackStarted = false;
+  const coordinator = new OrderSnapshotCoordinator<Order>({
+    fetch: async () => [{ orderId: "1", status: "WORKING" }],
+    reconcileUnknownWrites: async () => undefined,
+    onFullReconciled: async () => {
+      callbackStarted = true;
+      await callback.promise;
+    },
+    clock: { now: () => 10_000 },
+  });
+
+  const full = coordinator.pollFull();
+  while (!callbackStarted) await Promise.resolve();
+  assert.equal(coordinator.fullSnapshotReconciled, false);
+  assert.equal(coordinator.fullReconciliationInProgress, true);
+  assert.equal(coordinator.isFresh(5_000, 10_000), false);
+
+  callback.resolve();
+  assert.equal(await full, true);
+  assert.equal(coordinator.fullSnapshotReconciled, true);
+  assert.equal(coordinator.fullReconciliationInProgress, false);
+  assert.equal(coordinator.isFresh(5_000, 10_000), true);
+});
+
 test("fill poll can finish during a slow full reconciliation but cannot open the full write barrier", async () => {
   const reconcile = deferred<void>();
   const fillFetch = deferred<readonly Order[]>();
