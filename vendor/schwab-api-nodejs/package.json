@@ -25,6 +25,14 @@
     "./normalized-quotes": {
       "types": "./dist/types/normalizedQuotes.d.ts",
       "import": "./dist/types/normalizedQuotes.js"
+    },
+    "./streamer-fields": {
+      "types": "./dist/types/levelOneFields.d.ts",
+      "import": "./dist/types/levelOneFields.js"
+    },
+    "./streamer-market-data": {
+      "types": "./dist/streamer/marketDataClient.d.ts",
+      "import": "./dist/streamer/marketDataClient.js"
     }
   },
   "files": [
