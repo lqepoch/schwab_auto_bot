@@ -40,12 +40,9 @@ jobs:
       - name: Typecheck SDK tests
         run: npm run typecheck:test --prefix vendor/schwab-api-nodejs
 
-      - name: Build SDK
-        run: npm run clean-build --prefix vendor/schwab-api-nodejs
-
       - name: Run SDK contract tests
         working-directory: vendor/schwab-api-nodejs
-        run: node --test test/*.test.mjs
+        run: node --experimental-strip-types --test test/*.test.ts test/*.test.mjs
 
       - name: Typecheck root integration
         run: npm run type-check
