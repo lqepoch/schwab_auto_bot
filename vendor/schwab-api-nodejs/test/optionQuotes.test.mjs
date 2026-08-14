@@ -14,6 +14,22 @@ function makeClient(payload) {
       if (path === '/quotes') return payload;
       throw new Error(`Unexpected path: ${path}`);
     },
+    async requestWithResponse(path, options) {
+      calls.push({ path, options });
+      if (path === '/quotes') {
+        return {
+          body: payload,
+          headers: new Headers(),
+          status: 200,
+          requestId: 'fixture',
+          method: 'GET',
+          url: `https://fixture.invalid${path}`,
+          correlationId: null,
+          rateLimit: { headers: {} },
+        };
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    },
   };
   const tokens = {
     async requireAccessToken() { return { access_token: 'token', refresh_token: 'refresh' }; },

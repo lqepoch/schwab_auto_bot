@@ -13,6 +13,19 @@ function makeClient(result = {}) {
       calls.push({ path, options });
       return result;
     },
+    async requestWithResponse(path, options) {
+      calls.push({ path, options });
+      return {
+        body: result,
+        headers: new Headers(),
+        status: 200,
+        requestId: 'fixture',
+        method: 'GET',
+        url: `https://fixture.invalid${path}`,
+        correlationId: null,
+        rateLimit: { headers: {} },
+      };
+    },
   };
   const tokens = { async requireAccessToken() { return { access_token: 'test-token' }; } };
   return { client: new MarketDataApiClient(http, tokens, logger), calls };

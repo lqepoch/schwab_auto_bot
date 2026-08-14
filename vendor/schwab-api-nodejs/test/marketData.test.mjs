@@ -20,6 +20,19 @@ function makeClient() {
       calls.push({ path, options });
       return {};
     },
+    async requestWithResponse(path, options) {
+      calls.push({ path, options });
+      return {
+        body: {},
+        headers: new Headers(),
+        status: 200,
+        requestId: 'fixture',
+        method: 'GET',
+        url: `https://fixture.invalid${path}`,
+        correlationId: null,
+        rateLimit: { headers: {} },
+      };
+    },
   };
   const tokens = {
     async requireAccessToken() {
