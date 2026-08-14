@@ -31,6 +31,10 @@ export interface AccountActivitySubscriptionOptions {
   keys?: SubscriptionKeysInput;
 }
 
+export interface UnsubscribeKeysOptions {
+  keys: SubscriptionKeysInput;
+}
+
 /**
  * 市场数据订阅客户端，封装了 Schwab Streamer API 中的各类服务订阅请求构造。
  * 在调用任何订阅方法前应确保已经执行 `connect()` 建立 WebSocket 登录。
@@ -89,12 +93,34 @@ export class MarketDataStreamClient {
     return this.subscribeLevelOne('LEVELONE_EQUITIES', options, 'LevelOneEquities');
   }
 
+  /** 在现有股票 Level 1 订阅上增量添加代码。 */
+  async addLevelOneEquities(options: LevelOneSubscriptionOptions): Promise<void> {
+    this.logger.info('增量订阅 LevelOneEquities', { options });
+    return this.subscribeLevelOne('LEVELONE_EQUITIES', options, 'LevelOneEquities', 'ADD');
+  }
+
+  /** 取消指定股票 Level 1 代码。 */
+  async unsubscribeLevelOneEquities(options: UnsubscribeKeysOptions): Promise<void> {
+    return this.unsubscribeByKeys('LEVELONE_EQUITIES', options, 'LevelOneEquities');
+  }
+
   /**
    * 订阅 Level 1 期权行情。
    */
   async subscribeLevelOneOptions(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 LevelOneOptions', { options });
     return this.subscribeLevelOne('LEVELONE_OPTIONS', options, 'LevelOneOptions');
+  }
+
+  /** 在现有期权 Level 1 订阅上增量添加合约。 */
+  async addLevelOneOptions(options: LevelOneSubscriptionOptions): Promise<void> {
+    this.logger.info('增量订阅 LevelOneOptions', { options });
+    return this.subscribeLevelOne('LEVELONE_OPTIONS', options, 'LevelOneOptions', 'ADD');
+  }
+
+  /** 取消指定期权 Level 1 合约。 */
+  async unsubscribeLevelOneOptions(options: UnsubscribeKeysOptions): Promise<void> {
+    return this.unsubscribeByKeys('LEVELONE_OPTIONS', options, 'LevelOneOptions');
   }
 
   /**
@@ -105,12 +131,28 @@ export class MarketDataStreamClient {
     return this.subscribeLevelOne('LEVELONE_FUTURES', options, 'LevelOneFutures');
   }
 
+  async addLevelOneFutures(options: LevelOneSubscriptionOptions): Promise<void> {
+    return this.subscribeLevelOne('LEVELONE_FUTURES', options, 'LevelOneFutures', 'ADD');
+  }
+
+  async unsubscribeLevelOneFutures(options: UnsubscribeKeysOptions): Promise<void> {
+    return this.unsubscribeByKeys('LEVELONE_FUTURES', options, 'LevelOneFutures');
+  }
+
   /**
    * 订阅 Level 1 期货期权行情。
    */
   async subscribeLevelOneFuturesOptions(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 LevelOneFuturesOptions', { options });
     return this.subscribeLevelOne('LEVELONE_FUTURES_OPTIONS', options, 'LevelOneFuturesOptions');
+  }
+
+  async addLevelOneFuturesOptions(options: LevelOneSubscriptionOptions): Promise<void> {
+    return this.subscribeLevelOne('LEVELONE_FUTURES_OPTIONS', options, 'LevelOneFuturesOptions', 'ADD');
+  }
+
+  async unsubscribeLevelOneFuturesOptions(options: UnsubscribeKeysOptions): Promise<void> {
+    return this.unsubscribeByKeys('LEVELONE_FUTURES_OPTIONS', options, 'LevelOneFuturesOptions');
   }
 
   /**
@@ -121,12 +163,24 @@ export class MarketDataStreamClient {
     return this.subscribeLevelOne('LEVELONE_FOREX', options, 'LevelOneForex');
   }
 
+  async addLevelOneForex(options: LevelOneSubscriptionOptions): Promise<void> {
+    return this.subscribeLevelOne('LEVELONE_FOREX', options, 'LevelOneForex', 'ADD');
+  }
+
+  async unsubscribeLevelOneForex(options: UnsubscribeKeysOptions): Promise<void> {
+    return this.unsubscribeByKeys('LEVELONE_FOREX', options, 'LevelOneForex');
+  }
+
   /**
    * 订阅 NYSE Level II 买卖盘。
    */
   async subscribeNyseBook(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 NYSE_BOOK', { options });
     return this.subscribeLevelOne('NYSE_BOOK', options, 'NYSE_BOOK');
+  }
+
+  async unsubscribeNyseBook(options: UnsubscribeKeysOptions): Promise<void> {
+    return this.unsubscribeByKeys('NYSE_BOOK', options, 'NYSE_BOOK');
   }
 
   /**
@@ -137,12 +191,20 @@ export class MarketDataStreamClient {
     return this.subscribeLevelOne('NASDAQ_BOOK', options, 'NASDAQ_BOOK');
   }
 
+  async unsubscribeNasdaqBook(options: UnsubscribeKeysOptions): Promise<void> {
+    return this.unsubscribeByKeys('NASDAQ_BOOK', options, 'NASDAQ_BOOK');
+  }
+
   /**
    * 订阅期权 Level II 买卖盘。
    */
   async subscribeOptionsBook(options: LevelOneSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 OPTIONS_BOOK', { options });
     return this.subscribeLevelOne('OPTIONS_BOOK', options, 'OPTIONS_BOOK');
+  }
+
+  async unsubscribeOptionsBook(options: UnsubscribeKeysOptions): Promise<void> {
+    return this.unsubscribeByKeys('OPTIONS_BOOK', options, 'OPTIONS_BOOK');
   }
 
   /**
@@ -153,12 +215,20 @@ export class MarketDataStreamClient {
     return this.subscribeChart('CHART_EQUITY', options, 'CHART_EQUITY');
   }
 
+  async unsubscribeChartEquity(options: UnsubscribeKeysOptions): Promise<void> {
+    return this.unsubscribeByKeys('CHART_EQUITY', options, 'CHART_EQUITY');
+  }
+
   /**
    * 订阅期货分时图（蜡烛图）数据。
    */
   async subscribeChartFutures(options: ChartSubscriptionOptions): Promise<void> {
     this.logger.info('订阅 CHART_FUTURES', { options });
     return this.subscribeChart('CHART_FUTURES', options, 'CHART_FUTURES');
+  }
+
+  async unsubscribeChartFutures(options: UnsubscribeKeysOptions): Promise<void> {
+    return this.unsubscribeByKeys('CHART_FUTURES', options, 'CHART_FUTURES');
   }
 
   /**
@@ -175,6 +245,10 @@ export class MarketDataStreamClient {
     });
   }
 
+  async unsubscribeScreenerEquity(options: ScreenerSubscriptionOptions = {}): Promise<void> {
+    return this.unsubscribeOptionalKeys('SCREENER_EQUITY', options.keys);
+  }
+
   /**
    * 订阅期权筛选器数据。
    */
@@ -189,6 +263,10 @@ export class MarketDataStreamClient {
     });
   }
 
+  async unsubscribeScreenerOption(options: ScreenerSubscriptionOptions = {}): Promise<void> {
+    return this.unsubscribeOptionalKeys('SCREENER_OPTION', options.keys);
+  }
+
   /**
    * 订阅账户活动推送，例如订单成交、资金变动等。
    */
@@ -201,6 +279,10 @@ export class MarketDataStreamClient {
         keys: this.sanitizeKeys(options.keys),
       },
     });
+  }
+
+  async unsubscribeAccountActivity(options: AccountActivitySubscriptionOptions = {}): Promise<void> {
+    return this.unsubscribeOptionalKeys('ACCT_ACTIVITY', options.keys);
   }
 
   /**
@@ -223,12 +305,14 @@ export class MarketDataStreamClient {
     service: string,
     options: LevelOneSubscriptionOptions,
     errorLabel: string,
+    command: 'SUBS' | 'ADD' = 'SUBS',
   ): Promise<void> {
     this.assertConnected();
     const keys = this.requireKeys(options.keys, errorLabel);
-    this.logger.info('下发 LevelOne 订阅命令', { service, keys, fields: options.fields });
+    this.logger.info('下发 LevelOne 订阅命令', { service, command, keys, fields: options.fields });
     return this.streamer.subscribe({
       service,
+      command,
       parameters: {
         keys,
         fields: options.fields ?? undefined,
@@ -253,6 +337,27 @@ export class MarketDataStreamClient {
         frequency: options.frequency,
         period: options.period,
       },
+    });
+  }
+
+  private unsubscribeByKeys(
+    service: string,
+    options: UnsubscribeKeysOptions,
+    errorLabel: string,
+  ): Promise<void> {
+    this.assertConnected();
+    const keys = this.requireKeys(options.keys, errorLabel);
+    this.logger.info('下发取消订阅命令', { service, keys });
+    return this.streamer.unsubscribe({ service, parameters: { keys } });
+  }
+
+  private unsubscribeOptionalKeys(service: string, keys?: SubscriptionKeysInput): Promise<void> {
+    this.assertConnected();
+    const sanitized = this.sanitizeKeys(keys);
+    this.logger.info('下发取消订阅命令', { service, keys: sanitized });
+    return this.streamer.unsubscribe({
+      service,
+      parameters: sanitized ? { keys: sanitized } : undefined,
     });
   }
 
