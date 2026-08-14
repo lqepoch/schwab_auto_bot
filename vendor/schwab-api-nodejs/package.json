@@ -7,12 +7,12 @@
   "engines": {
     "node": ">=24"
   },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/public.js",
+  "types": "./dist/public.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/public.d.ts",
+      "import": "./dist/public.js"
     },
     "./accounts": {
       "types": "./dist/accounts/accountHashResolver.d.ts",
