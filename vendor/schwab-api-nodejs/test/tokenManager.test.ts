@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { TokenManager } from '../dist/auth/tokenManager.js';
-import type { TokenStore } from '../dist/auth/tokenStore.js';
+import type { TokenStore, TokenStoreAdapter } from '../dist/auth/tokenStore.js';
 import type { PersistedToken } from '../dist/types/auth.js';
 import { ReauthRequiredError } from '../dist/utils/errors.js';
+import { SchwabOwokit } from '../dist/index.js';
+import { createNullLogger } from '../dist/utils/logger.js';
 
 const config = {
   clientId: 'client-id',
@@ -159,4 +161,63 @@ test('token schema and token-store failures propagate without returning a partia
     fetch: async () => new Response(JSON.stringify(tokenResponse()), { status: 200 }),
   });
   await assert.rejects(() => saveFailure.exchangeCodeForToken('code'), /disk full/);
+});
+
+test('custom token-store adapters are used without weakening fail-closed reads', async () => {
+  let stored: PersistedToken | null = null;
+  const adapter: TokenStoreAdapter = {
+    load: async () => stored,
+    save: async (value) => { stored = value; },
+  };
+  const manager = new TokenManager(config, adapter);
+
+  await assert.rejects(() => manager.requireAccessToken(), /No cached Schwab token found/);
+  const persisted = await manager.persist(tokenResponse('adapter-access', 'adapter-refresh'));
+  const saved = stored as PersistedToken | null;
+  assert.equal(saved?.access_token, 'adapter-access');
+  assert.equal((await manager.requireAccessToken()).access_token, persisted.access_token);
+});
+
+test('custom token-store load and save errors propagate instead of returning partial credentials', async () => {
+  const loadFailure: TokenStoreAdapter = {
+    load: async () => { throw new Error('secure load failed'); },
+    save: async () => {},
+  };
+  await assert.rejects(
+    () => new TokenManager(config, loadFailure).getValidToken(),
+    /secure load failed/,
+  );
+
+  const saveFailure: TokenStoreAdapter = {
+    load: async () => null,
+    save: async () => { throw new Error('secure save failed'); },
+  };
+  await assert.rejects(
+    () => new TokenManager(config, saveFailure).persist(tokenResponse()),
+    /secure save failed/,
+  );
+});
+
+test('malformed custom token-store values are rejected at the TokenManager boundary', async () => {
+  const malformed: TokenStoreAdapter = {
+    load: async () => ({ access_token: 'partial-only', expires_at: Date.now() + 60_000 }),
+    save: async () => {},
+  };
+  const manager = new TokenManager(config, malformed);
+  assert.equal(await manager.getValidToken(), null);
+  await assert.rejects(
+    () => manager.requireAccessToken(),
+    /No cached Schwab token found/,
+  );
+});
+
+test('top-level SDK wires a custom token-store adapter while keeping the default file store optional', async () => {
+  let saves = 0;
+  const adapter: TokenStoreAdapter = {
+    load: async () => null,
+    save: async () => { saves += 1; },
+  };
+  const sdk = new SchwabOwokit(config, { tokenStore: adapter, logger: createNullLogger() });
+  await sdk.tokenManager.persist(tokenResponse());
+  assert.equal(saves, 1);
 });

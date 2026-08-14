@@ -75,6 +75,13 @@ export class TraderApiClient extends AuthorizedApiClient {
     });
   }
 
+  async getAccountNumbersWithResponse(): Promise<HttpResponse<AccountNumberHash[]>> {
+    this.logger.info('调用 getAccountNumbersWithResponse');
+    return this.requestWithResponse<AccountNumberHash[]>('/accounts/accountNumbers', {
+      schema: AccountNumberHashesSchema,
+    });
+  }
+
   /** `GET /accounts`：查询关联账户余额与持仓。 */
   async getAccounts(params: AccountsQuery = {}): Promise<AccountResponse[]> {
     return (await this.getAccountsWithResponse(params)).body;
@@ -206,6 +213,14 @@ export class TraderApiClient extends AuthorizedApiClient {
     });
   }
 
+  async getOrdersAcrossAccountsWithResponse(params: OrdersQuery): Promise<HttpResponse<Order[]>> {
+    this.logger.info('调用 getOrdersAcrossAccountsWithResponse', { params });
+    return this.requestWithResponse<Order[]>('/orders', {
+      query: this.buildQuery(params),
+      schema: OrdersResponseSchema,
+    });
+  }
+
   /** `POST /accounts/{accountNumber}/previewOrder`：下单前预估资金占用与校验。 */
   async previewOrder(
     accountNumber: string,
@@ -236,6 +251,17 @@ export class TraderApiClient extends AuthorizedApiClient {
     });
   }
 
+  async getTransactionsWithResponse(
+    accountNumber: string,
+    params: TransactionsParams,
+  ): Promise<HttpResponse<Transaction[]>> {
+    this.logger.info('调用 getTransactionsWithResponse', { accountNumber, params });
+    return this.requestWithResponse<Transaction[]>(`/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/transactions`, {
+      query: this.buildQuery(params),
+      schema: TransactionsResponseSchema,
+    });
+  }
+
   /** `GET /accounts/{accountNumber}/transactions/{transactionId}`：读取单笔交易明细。 */
   async getTransaction(accountNumber: string, transactionId: number | string): Promise<Transaction> {
     this.logger.info('调用 getTransaction', { accountNumber, transactionId });
@@ -253,10 +279,28 @@ export class TraderApiClient extends AuthorizedApiClient {
     return data;
   }
 
+  async getTransactionWithResponse(
+    accountNumber: string,
+    transactionId: number | string,
+  ): Promise<HttpResponse<Transaction | Transaction[]>> {
+    this.logger.info('调用 getTransactionWithResponse', { accountNumber, transactionId });
+    return this.requestWithResponse<Transaction | Transaction[]>(
+      `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/transactions/${encodeNumericIdentifier(transactionId, 'transactionId')}`,
+      { schema: TransactionOrArraySchema },
+    );
+  }
+
   /** `GET /userPreference`：拉取用户偏好设定与 Streamer 登录参数。 */
   async getUserPreferences(): Promise<UserPreference[] | UserPreference> {
     this.logger.info('调用 getUserPreferences');
     return this.request<UserPreference[] | UserPreference>('/userPreference', {
+      schema: UserPreferencesResponseSchema,
+    });
+  }
+
+  async getUserPreferencesWithResponse(): Promise<HttpResponse<UserPreference[] | UserPreference>> {
+    this.logger.info('调用 getUserPreferencesWithResponse');
+    return this.requestWithResponse<UserPreference[] | UserPreference>('/userPreference', {
       schema: UserPreferencesResponseSchema,
     });
   }

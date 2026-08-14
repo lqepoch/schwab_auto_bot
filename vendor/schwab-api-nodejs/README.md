@@ -116,6 +116,18 @@ const transactions = await sdk.trader.getTransactions(accountHash, {
 
 所有 Trader REST 方法的中文注释均位于 `src/clients/trader.ts`，可对照官方文档理解每个字段含义。
 
+## 新增 SDK 完整性边界
+
+### 只读 Gateway 与响应 metadata
+
+`sdk.gateway` 是明确的只读 facade：账户号会先通过 `GET /accounts/accountNumbers` 解析为 Schwab 所需 hash，当前已覆盖并返回 `{ data, metadata }` 的端点为：Trader 的 `GET /accounts`、`GET /accounts/{accountNumber}`、`GET /accounts/{accountNumber}/orders`、`GET /accounts/{accountNumber}/orders/{orderId}`，以及 Market Data 的 `GET /quotes`、`GET /{symbol}/quotes`。`metadata` 保留原始 `Headers`、status、requestId、method、完整 URL、correlation id 和 allow-list rate-limit 解析值。
+
+Gateway 当前不宣称覆盖全部 REST 只读端点。跨账户订单、transactions、user preferences、option chains/expiration、price history、movers、market hours、instruments 及标准化/派生期权报价仍直接使用 `sdk.trader` / `sdk.marketData`；这些 documented raw REST GET 均提供对应的 `get*WithResponse` metadata variant，标准化/派生方法仍只返回 body。Gateway 没有 `previewOrder`、`placeOrder`、`replaceOrder` 或 `cancelOrder`，不会接入或改变根项目的 Preview、WAL、写入闸门、UnknownOutcome 和单次物理写入路径。
+
+默认 TokenStore 仍是 owner-only 文件实现；可通过 `SchwabOwokitOptions.tokenStore` 注入 `TokenStoreAdapter`（仅 `load`/`save`），SDK 不模拟 KMS/keychain。adapter 读取失败、保存失败或无法证明令牌完整时必须返回 null/抛错并 fail-closed。
+
+HttpResponse 和 SchwabApiError 统一保留 requestId、method、URL、status、原始 Headers、correlation id 与 rate-limit 解析结果；敏感头不会进入错误 JSON。`GET` 的 401 refresh 语义保留，mutation 不透明自动重试。
+
 ## Market Data REST API 示例
 
 ```ts
@@ -178,6 +190,10 @@ socket 并触发重连。
 
 `subscribe()` / `unsubscribe()` 返回的 Promise 会按命令校验 Streamer ACK：兼容通用成功码 `0`，并接受 Schwab 文档规定的 `SUBS=26`、`UNSUBS=27`、`ADD=28`、`VIEW=29`；`LOGIN` 只接受 `0`。拒绝响应、命令/服务不匹配、连接断开和 ACK 超时都会 reject。非零且不匹配的 ACK 是明确拒绝，会回滚该次 canonical mutation；连接断开或 ACK 超时是未知结果，会保留期望的 canonical state 并受控重连，以完整 `SUBS` 对账后才再次报告 ready。底层 `sdk.streamer.send()` 仍是原始发送接口，不提供 ACK 语义。重连恢复会等待每个 service 的完整 `SUBS` ACK 后才报告 ready，不代表已经收到新行情。
 
+随附 Schwab Data API 文档明确所有市场服务支持 `VIEW`，`ACCT_ACTIVITY` 例外只支持 `SUBS`/`UNSUBS`；因此 `MarketDataStreamClient` 暴露各市场服务的 typed `view*` wrapper，但不提供 `viewAccountActivity`。`LEVELONE_EQUITIES` 继续保留 `streamer-fields` 的 canonical exports，同时通过 `streamer-contracts` 纳入统一 service map；本地 manifest 中的 field id 都在发包前校验，未知 additive payload fields 仍 passthrough。
+
+`streamer-snapshot` 提供 opt-in、可取消的 async iterator 和 bounded queue，不宣称原生 complex option book 或交易执行报价。缓存只接受文档顺序证据：CHART_EQUITY/ACCT_ACTIVITY 使用 documented sequence；CHART_FUTURES 虽标为 All Sequence 但没有独立 sequence 字段，只使用字段 `1` Chart Time，缺失时 fail-closed，不伪造连续序列。socket generation 切换会隔离旧代数据。
+
 可从 package root 按 ACK 结果类型捕获：`import { StreamerCommandError, StreamerCommandTimeoutError, StreamerCommandNotSentError } from './vendor/schwab-api-nodejs/dist/public.js';`
 
 ## 错误处理
@@ -202,11 +218,15 @@ test/               Node test 契约测试
 dist/               build 生成目录（不提交）
 src/
   auth/              OAuth 相关逻辑
+  gateway/           只读账户/订单/行情 facade（不含写操作）
   clients/           Trader & Market Data REST 客户端
   streamer/          WebSocket 客户端与实时市场数据封装
-  types/             官方文档映射的 TypeScript 类型
+  types/             官方文档映射的 TypeScript 类型与全服务 field contracts
+  contracts/         本地 endpoint/service/schema parity manifest
   utils/             公共工具，如 HttpClient
 ```
+
+稳定的 root/subpath 导入包括 `schwab-owokit/streamer-contracts`、`schwab-owokit/streamer-snapshot`、`schwab-owokit/gateway`、`schwab-owokit/token-store` 和 `schwab-owokit/contract-manifest`。`npm run typecheck`、`npm run typecheck:test` 与 `npm test` 会在本地 fixture 上执行；parity manifest 锁定 client method、runtime schema 和 Streamer service/field contract，但不替代真实 Schwab entitlement、权限或 live API 验证。默认测试不会连接 Schwab，也不会发送 broker 请求。
 
 ## 许可
 

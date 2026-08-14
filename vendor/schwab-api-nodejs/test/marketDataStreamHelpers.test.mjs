@@ -182,6 +182,28 @@ test('VIEW wrappers cover documented market services and exclude ACCT_ACTIVITY',
   assert.equal(typeof client.viewAccountActivity, 'undefined');
 });
 
+test('documented chart and screener ADD wrappers use typed service serializers', async () => {
+  const { client, calls } = makeClient();
+  await client.connect();
+  await client.addChartEquity({ keys: 'QQQ', fields: ['0', '7'] });
+  await client.addChartFutures({ keys: '/ESZ5', fields: ['0', '1'] });
+  await client.addScreenerEquity({ keys: 'INDEX_ALL_VOLUME_0', fields: ['0', '4'] });
+  await client.addScreenerOption({ keys: 'OPTION_ALL_VOLUME_0', fields: ['0', '4'] });
+  assert.deepEqual(
+    calls.filter((call) => call.kind === 'subscribe').map((call) => ({
+      service: call.options.service,
+      command: call.options.command,
+      fields: call.options.parameters?.fields,
+    })),
+    [
+      { service: 'CHART_EQUITY', command: 'ADD', fields: '0,7' },
+      { service: 'CHART_FUTURES', command: 'ADD', fields: '0,1' },
+      { service: 'SCREENER_EQUITY', command: 'ADD', fields: '0,4' },
+      { service: 'SCREENER_OPTION', command: 'ADD', fields: '0,4' },
+    ],
+  );
+});
+
 test('book helpers support incremental ADD without falling back to raw streamer.send', async () => {
   const { client, calls } = makeClient();
   await client.connect();

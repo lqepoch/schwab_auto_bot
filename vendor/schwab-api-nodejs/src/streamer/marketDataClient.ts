@@ -263,6 +263,10 @@ export class MarketDataStreamClient {
     return this.subscribeChart('CHART_EQUITY', options, 'CHART_EQUITY');
   }
 
+  async addChartEquity(options: ChartEquitySubscriptionOptions): Promise<void> {
+    return this.subscribeChart('CHART_EQUITY', options, 'CHART_EQUITY', 'ADD');
+  }
+
   async viewChartEquity(options: ChartEquitySubscriptionOptions): Promise<void> {
     return this.subscribeChart('CHART_EQUITY', options, 'CHART_EQUITY', 'VIEW');
   }
@@ -273,6 +277,10 @@ export class MarketDataStreamClient {
 
   async subscribeChartFutures(options: ChartFuturesSubscriptionOptions): Promise<void> {
     return this.subscribeChart('CHART_FUTURES', options, 'CHART_FUTURES');
+  }
+
+  async addChartFutures(options: ChartFuturesSubscriptionOptions): Promise<void> {
+    return this.subscribeChart('CHART_FUTURES', options, 'CHART_FUTURES', 'ADD');
   }
 
   async viewChartFutures(options: ChartFuturesSubscriptionOptions): Promise<void> {
@@ -287,6 +295,10 @@ export class MarketDataStreamClient {
     return this.subscribeScreener('SCREENER_EQUITY', options, 'SUBS');
   }
 
+  async addScreenerEquity(options: ScreenerEquitySubscriptionOptions = {}): Promise<void> {
+    return this.subscribeScreener('SCREENER_EQUITY', options, 'ADD');
+  }
+
   async viewScreenerEquity(options: ScreenerEquitySubscriptionOptions = {}): Promise<void> {
     return this.subscribeScreener('SCREENER_EQUITY', options, 'VIEW');
   }
@@ -297,6 +309,10 @@ export class MarketDataStreamClient {
 
   async subscribeScreenerOption(options: ScreenerOptionSubscriptionOptions = {}): Promise<void> {
     return this.subscribeScreener('SCREENER_OPTION', options, 'SUBS');
+  }
+
+  async addScreenerOption(options: ScreenerOptionSubscriptionOptions = {}): Promise<void> {
+    return this.subscribeScreener('SCREENER_OPTION', options, 'ADD');
   }
 
   async viewScreenerOption(options: ScreenerOptionSubscriptionOptions = {}): Promise<void> {
@@ -352,7 +368,7 @@ export class MarketDataStreamClient {
     service: 'CHART_EQUITY' | 'CHART_FUTURES',
     options: ChartSubscriptionOptions,
     errorLabel: string,
-    command: 'SUBS' | 'VIEW' = 'SUBS',
+    command: 'SUBS' | 'ADD' | 'VIEW' = 'SUBS',
   ): Promise<void> {
     this.assertConnected();
     const keys = this.requireKeys(options.keys, errorLabel);
@@ -372,7 +388,7 @@ export class MarketDataStreamClient {
   private subscribeScreener<S extends 'SCREENER_EQUITY' | 'SCREENER_OPTION'>(
     service: S,
     options: S extends 'SCREENER_EQUITY' ? ScreenerEquitySubscriptionOptions : ScreenerOptionSubscriptionOptions,
-    command: 'SUBS' | 'VIEW',
+    command: 'SUBS' | 'ADD' | 'VIEW',
   ): Promise<void> {
     this.assertConnected();
     const typedOptions = options as ScreenerSubscriptionOptions;

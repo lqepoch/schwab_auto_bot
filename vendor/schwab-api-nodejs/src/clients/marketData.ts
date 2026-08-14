@@ -231,6 +231,33 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     return this.request<OptionChainResponse>('/chains', { query, schema: OptionChainResponseSchema });
   }
 
+  async getOptionChainsWithResponse(params: {
+    symbol: string;
+    contractType?: OptionContractType;
+    includeUnderlyingQuote?: boolean;
+    includeQuotes?: boolean;
+    strategy?: OptionStrategy;
+    interval?: number;
+    strikeCount?: number;
+    strike?: number;
+    range?: OptionRange;
+    fromDate?: string;
+    toDate?: string;
+    volatility?: number;
+    underlyingPrice?: number;
+    interestRate?: number;
+    daysToExpiration?: number;
+    expMonth?: OptionExpMonth;
+    optionType?: string;
+    entitlement?: string;
+  }): Promise<HttpResponse<OptionChainResponse>> {
+    this.logger.info('调用 getOptionChainsWithResponse', { params });
+    if (!params.symbol?.trim()) throw new Error('getOptionChains 需要提供 symbol');
+    const includeUnderlyingQuote = params.includeUnderlyingQuote ?? params.includeQuotes;
+    const query = this.buildQuery({ ...params, includeUnderlyingQuote, includeQuotes: undefined });
+    return this.requestWithResponse<OptionChainResponse>('/chains', { query, schema: OptionChainResponseSchema });
+  }
+
   /** `GET /expirationchain`：返回标的全部期权到期日列表。 */
   async getOptionExpirationChain(params: {
     symbol: string;
@@ -247,6 +274,21 @@ export class MarketDataApiClient extends AuthorizedApiClient {
       optionType: params.optionType,
     });
     return this.request<OptionExpirationChainResponse>('/expirationchain', {
+      query,
+      schema: OptionExpirationChainResponseSchema,
+    });
+  }
+
+  async getOptionExpirationChainWithResponse(params: {
+    symbol: string;
+    contractType?: OptionContractType;
+    expMonth?: OptionExpMonth;
+    optionType?: string;
+  }): Promise<HttpResponse<OptionExpirationChainResponse>> {
+    this.logger.info('调用 getOptionExpirationChainWithResponse', { params });
+    if (!params.symbol?.trim()) throw new Error('getOptionExpirationChain 需要提供 symbol');
+    const query = this.buildQuery(params);
+    return this.requestWithResponse<OptionExpirationChainResponse>('/expirationchain', {
       query,
       schema: OptionExpirationChainResponseSchema,
     });
@@ -280,6 +322,23 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     return this.request<PriceHistoryResponse>('/pricehistory', { query, schema: PriceHistoryResponseSchema });
   }
 
+  async getPriceHistoryWithResponse(params: {
+    symbol: string;
+    periodType?: PeriodType;
+    period?: number;
+    frequencyType?: FrequencyType;
+    frequency?: number;
+    startDate?: number;
+    endDate?: number;
+    needExtendedHoursData?: boolean;
+    needPreviousClose?: boolean;
+  }): Promise<HttpResponse<PriceHistoryResponse>> {
+    this.logger.info('调用 getPriceHistoryWithResponse', { params });
+    if (!params.symbol?.trim()) throw new Error('getPriceHistory 需要提供 symbol');
+    const query = this.buildQuery(params);
+    return this.requestWithResponse<PriceHistoryResponse>('/pricehistory', { query, schema: PriceHistoryResponseSchema });
+  }
+
   /** `GET /movers/{symbol}`：拉取涨跌幅榜。 */
   async getMovers(
     symbolId: string,
@@ -294,6 +353,19 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     });
   }
 
+  async getMoversWithResponse(
+    symbolId: string,
+    params: { sort?: 'VOLUME' | 'TRADES' | 'PERCENT_CHANGE_UP' | 'PERCENT_CHANGE_DOWN'; frequency?: 0 | 1 | 5 | 10 | 30 | 60 } = {},
+  ): Promise<HttpResponse<MoversResponse>> {
+    this.logger.info('调用 getMoversWithResponse', { symbolId, params });
+    if (!symbolId?.trim()) throw new Error('getMovers 需要提供 symbolId');
+    const query = this.buildQuery(params);
+    return this.requestWithResponse<MoversResponse>(`/movers/${encodePathIdentifier(symbolId, 'symbolId')}`, {
+      query,
+      schema: MoversResponseSchema,
+    });
+  }
+
   /** `GET /markets`：批量查询市场开闭市时间。 */
   async getMarkets(params: { markets: readonly string[]; date?: string }): Promise<MarketHoursResponse> {
     this.logger.info('调用 getMarkets', { params });
@@ -302,12 +374,32 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     return this.request<MarketHoursResponse>('/markets', { query, schema: MarketHoursResponseSchema });
   }
 
+  async getMarketsWithResponse(params: { markets: readonly string[]; date?: string }): Promise<HttpResponse<MarketHoursResponse>> {
+    this.logger.info('调用 getMarketsWithResponse', { params });
+    if (!params.markets?.length) throw new Error('getMarkets 至少需要传入一个 market');
+    const query = this.buildQuery({ markets: params.markets.join(','), date: params.date });
+    return this.requestWithResponse<MarketHoursResponse>('/markets', { query, schema: MarketHoursResponseSchema });
+  }
+
   /** `GET /markets/{market}`：查询单个市场开闭市时间。 */
   async getMarketHours(marketId: string, params: { date?: string } = {}): Promise<MarketHoursResponse> {
     this.logger.info('调用 getMarketHours', { marketId, params });
     if (!marketId?.trim()) throw new Error('getMarketHours 需要提供 marketId');
     const query = this.buildQuery({ date: params.date });
     return this.request<MarketHoursResponse>(`/markets/${encodePathIdentifier(marketId, 'marketId')}`, {
+      query,
+      schema: MarketHoursResponseSchema,
+    });
+  }
+
+  async getMarketHoursWithResponse(
+    marketId: string,
+    params: { date?: string } = {},
+  ): Promise<HttpResponse<MarketHoursResponse>> {
+    this.logger.info('调用 getMarketHoursWithResponse', { marketId, params });
+    if (!marketId?.trim()) throw new Error('getMarketHours 需要提供 marketId');
+    const query = this.buildQuery(params);
+    return this.requestWithResponse<MarketHoursResponse>(`/markets/${encodePathIdentifier(marketId, 'marketId')}`, {
       query,
       schema: MarketHoursResponseSchema,
     });
@@ -328,11 +420,33 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     });
   }
 
+  async searchInstrumentsWithResponse(
+    params: { symbol: string | readonly string[]; projection: InstrumentProjection },
+  ): Promise<HttpResponse<InstrumentsSearchResponse>> {
+    this.logger.info('调用 searchInstrumentsWithResponse', { params });
+    const symbol = this.normalizeList(params.symbol);
+    if (!symbol) throw new Error('searchInstruments 需要 symbol 参数');
+    if (!params.projection) throw new Error('searchInstruments 需要 projection 参数');
+    const query = this.buildQuery({ symbol, projection: params.projection });
+    return this.requestWithResponse<InstrumentsSearchResponse>('/instruments', {
+      query,
+      schema: InstrumentsSearchResponseSchema,
+    });
+  }
+
   /** `GET /instruments/{cusip}`：通过 CUSIP 查询单个标的基本信息。 */
   async getInstrumentByCusip(cusipId: string): Promise<InstrumentDetail> {
     this.logger.info('调用 getInstrumentByCusip', { cusipId });
     if (!cusipId?.trim()) throw new Error('getInstrumentByCusip 需要提供 CUSIP');
     return this.request<InstrumentDetail>(`/instruments/${encodePathIdentifier(cusipId, 'CUSIP')}`, {
+      schema: InstrumentDetailSchema,
+    });
+  }
+
+  async getInstrumentByCusipWithResponse(cusipId: string): Promise<HttpResponse<InstrumentDetail>> {
+    this.logger.info('调用 getInstrumentByCusipWithResponse', { cusipId });
+    if (!cusipId?.trim()) throw new Error('getInstrumentByCusip 需要提供 CUSIP');
+    return this.requestWithResponse<InstrumentDetail>(`/instruments/${encodePathIdentifier(cusipId, 'CUSIP')}`, {
       schema: InstrumentDetailSchema,
     });
   }

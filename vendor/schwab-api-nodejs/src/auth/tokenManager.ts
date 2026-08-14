@@ -2,11 +2,12 @@ import { performance } from 'node:perf_hooks';
 import {
   AuthorizationCodeParams,
   PersistedToken,
+  PersistedTokenSchema,
   SchwabAuthConfig,
   TokenResponse,
   TokenResponseSchema,
 } from '../types/auth.js';
-import { TokenStore } from './tokenStore.js';
+import { TokenStore, type TokenStoreAdapter } from './tokenStore.js';
 import { Logger, createConsoleLogger, withDuration } from '../utils/logger.js';
 import { redactSensitive } from '../utils/redact.js';
 import { ReauthRequiredError } from '../utils/errors.js';
@@ -27,7 +28,7 @@ export interface TokenManagerOptions {
  */
 export class TokenManager {
   private readonly config: SchwabAuthConfig;
-  private readonly store: TokenStore;
+  private readonly store: TokenStoreAdapter;
   private readonly safetyWindow: number;
   private readonly basicAuthHeader: string;
   private readonly refreshPromises = new Map<string, Promise<PersistedToken>>();
@@ -37,7 +38,7 @@ export class TokenManager {
   private readonly invalidGrantObserver?: (details: { description?: string; body: unknown }) => void;
   private reauthRequired = false;
 
-  constructor(config: SchwabAuthConfig, store?: TokenStore, options: TokenManagerOptions = {}) {
+  constructor(config: SchwabAuthConfig, store?: TokenStoreAdapter, options: TokenManagerOptions = {}) {
     this.config = config;
 
     // 创建基础记录器，确保后续步骤都有统一的输出格式
@@ -60,7 +61,7 @@ export class TokenManager {
     this.basicAuthHeader = `Basic ${basicAuth}`;
     this.logger.info('TokenManager 初始化完成', {
       redirectUri: this.config.redirectUri,
-      tokenStorePath: this.store.path,
+      tokenStorePath: this.store.path ?? '[custom token store adapter]',
       safetyWindowMs: this.safetyWindow,
     });
   }
@@ -136,7 +137,7 @@ export class TokenManager {
     if (this.reauthRequired) {
       throw new ReauthRequiredError();
     }
-    const cached = await this.store.load();
+    const cached = await this.loadPersistedToken();
     if (!cached) {
       this.logger.warn('未找到本地缓存的令牌');
       return null;
@@ -287,6 +288,19 @@ export class TokenManager {
 
   private getRefreshKey(refreshToken: string): string {
     return `${this.config.clientId}:${refreshToken}`;
+  }
+
+  private async loadPersistedToken(): Promise<PersistedToken | null> {
+    const raw = await this.store.load();
+    if (raw === null) return null;
+    const parsed = PersistedTokenSchema.safeParse(raw);
+    if (!parsed.success) {
+      this.logger.error('令牌存储适配器返回无效令牌，fail-closed', {
+        issues: parsed.error.issues,
+      });
+      return null;
+    }
+    return parsed.data;
   }
 
   private analyzeOAuthError(rawBody: string): {

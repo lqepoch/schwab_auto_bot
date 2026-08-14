@@ -37,6 +37,26 @@
     "./streamer-market-data": {
       "types": "./dist/streamer/marketDataClient.d.ts",
       "import": "./dist/streamer/marketDataClient.js"
+    },
+    "./streamer-contracts": {
+      "types": "./dist/types/streamerContracts.d.ts",
+      "import": "./dist/types/streamerContracts.js"
+    },
+    "./streamer-snapshot": {
+      "types": "./dist/streamer/streamerSnapshot.d.ts",
+      "import": "./dist/streamer/streamerSnapshot.js"
+    },
+    "./gateway": {
+      "types": "./dist/gateway/schwabGateway.d.ts",
+      "import": "./dist/gateway/schwabGateway.js"
+    },
+    "./token-store": {
+      "types": "./dist/auth/tokenStore.d.ts",
+      "import": "./dist/auth/tokenStore.js"
+    },
+    "./contract-manifest": {
+      "types": "./dist/contracts/contractManifest.d.ts",
+      "import": "./dist/contracts/contractManifest.js"
     }
   },
   "files": [

@@ -15,6 +15,21 @@ export interface TokenStoreOptions {
   staleLockThresholdMs?: number;
 }
 
+/**
+ * Minimal persistence boundary used by TokenManager.
+ *
+ * TokenStore remains the default owner-only file implementation. Applications
+ * that already have an approved secure store may inject an adapter without
+ * making TokenManager know how credentials are protected at rest.
+ */
+export interface TokenStoreAdapter {
+  /** Return an opaque persisted value; TokenManager validates it at the boundary. */
+  load(): Promise<unknown | null>;
+  save(token: PersistedToken): Promise<void>;
+  /** Optional non-secret identifier used only for diagnostics. */
+  readonly path?: string;
+}
+
 const DEFAULT_FILENAME = '.schwab_tokens.json';
 const DEFAULT_LOCK_RETRY_DELAY_MS = 50;
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
@@ -32,7 +47,7 @@ interface LockMetadata {
  * 简单的文件型令牌存储器。默认写入当前工作目录下的 `.schwab_tokens.json`，
  * 用于跨进程、跨重启缓存 OAuth 访问令牌。
  */
-export class TokenStore {
+export class TokenStore implements TokenStoreAdapter {
   private readonly filePath: string;
   private readonly logger: Logger;
   private readonly lockPath: string;

@@ -1,8 +1,9 @@
 import { TokenManager, TokenManagerOptions } from './auth/tokenManager.js';
-import { TokenStore } from './auth/tokenStore.js';
+import { TokenStore, type TokenStoreAdapter } from './auth/tokenStore.js';
 import { HttpClient } from './utils/httpClient.js';
 import { TraderApiClient, AccountsQuery, OrdersQuery, TransactionsParams } from './clients/trader.js';
 import { MarketDataApiClient } from './clients/marketData.js';
+import { SchwabGateway } from './gateway/schwabGateway.js';
 import { StreamerClient, StreamerClientOptions } from './streamer/streamerClient.js';
 import { MarketDataStreamClient } from './streamer/marketDataClient.js';
 import { SchwabAuthConfig } from './types/auth.js';
@@ -58,6 +59,11 @@ export interface SchwabOwokitOptions {
   httpTimeoutMs?: number;
   /** TokenManager 的额外参数，例如调整安全刷新窗口。 */
   tokenManager?: Omit<TokenManagerOptions, 'logger'>;
+  /**
+   * 可选的安全令牌存储适配器；省略时继续使用 owner-only 文件 TokenStore。
+   * 适配器必须在无法安全读取时返回 null 或抛错，不能返回部分令牌。
+   */
+  tokenStore?: TokenStoreAdapter;
 }
 
 /**
@@ -88,6 +94,8 @@ export class SchwabOwokit {
   readonly streamer: StreamerClient;
   readonly marketDataStream: MarketDataStreamClient;
   readonly marketData: MarketDataApiClient;
+  /** Read-only account/order/market-data boundary with response metadata. */
+  readonly gateway: SchwabGateway;
   private readonly logger: Logger;
 
   constructor(config: SchwabOwokitConfig, options: SchwabOwokitOptions = {}) {
@@ -113,6 +121,7 @@ export class SchwabOwokit {
     );
     this.trader = traderClient;
     this.marketData = marketDataClient;
+    this.gateway = new SchwabGateway(this.trader, this.marketData);
 
     const { streamer, marketDataStream } = this.initializeStreamer(
       options,
@@ -176,7 +185,7 @@ export class SchwabOwokit {
     options: SchwabOwokitOptions,
     baseLogger: Logger,
   ): TokenManager {
-    const tokenStore = new TokenStore({
+    const tokenStore = options.tokenStore ?? new TokenStore({
       filePath: config.tokenStorePath,
       logger: baseLogger.child('tokenStore'),
     });
@@ -351,8 +360,29 @@ export type {
   InstrumentsSearchResponse,
 };
 export { TokenManager, TokenStore, HttpClient, TraderApiClient, StreamerClient, MarketDataApiClient };
+export { SchwabGateway };
+export {
+  REST_CONTRACT_MANIFEST,
+  STREAMER_CONTRACT_MANIFEST,
+  READ_ONLY_GATEWAY_METHODS,
+  expectedFieldIds,
+  manifestServiceNames,
+  MANIFEST_SERVICE_COUNT,
+} from './contracts/contractManifest.js';
+export type {
+  RestClientName,
+  RestContractManifestEntry,
+  StreamerContractManifestEntry,
+} from './contracts/contractManifest.js';
+export type { TokenStoreAdapter, TokenStoreOptions } from './auth/tokenStore.js';
+export type {
+  ReadOnlyGatewayMetadata,
+  ReadOnlyGatewayResponse,
+  SchwabGatewayOptions,
+} from './gateway/schwabGateway.js';
 export { MarketDataStreamClient };
 export {
+  LEVELONE_EQUITIES_SERVICE_FIELDS,
   LEVELONE_OPTIONS_FIELDS,
   LEVELONE_FUTURES_FIELDS,
   LEVELONE_FUTURES_OPTIONS_FIELDS,
@@ -370,6 +400,7 @@ export {
 export type {
   StreamerFieldValueType,
   StreamerDeliveryMode,
+  StreamerOrderingEvidence,
   StreamerService,
   ServiceFieldId,
   ServiceFieldSelection,
@@ -416,6 +447,7 @@ export type {
   RetryConfig,
   RetryEvent,
 } from './utils/httpClient.js';
+export type { RateLimitMetadata, ResponseMetadata as HttpResponseMetadata } from './utils/responseMetadata.js';
 export type { StreamerClientOptions } from './streamer/streamerClient.js';
 export {
   StreamerCommandError,
