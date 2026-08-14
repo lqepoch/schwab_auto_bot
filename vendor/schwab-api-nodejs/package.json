@@ -13,6 +13,18 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./orders": {
+      "types": "./dist/orders/orderBuilders.d.ts",
+      "import": "./dist/orders/orderBuilders.js"
+    },
+    "./options": {
+      "types": "./dist/options/optionSymbol.d.ts",
+      "import": "./dist/options/optionSymbol.js"
+    },
+    "./normalized-quotes": {
+      "types": "./dist/types/normalizedQuotes.d.ts",
+      "import": "./dist/types/normalizedQuotes.js"
     }
   },
   "files": [
