@@ -89,7 +89,7 @@ export class TraderApiClient extends AuthorizedApiClient {
   async getAccount(accountNumber: string, params: AccountsQuery = {}): Promise<AccountResponse> {
     this.logger.info('调用 getAccount', { accountNumber, params });
     const query = this.buildQuery({ fields: params.fields });
-    return this.request<AccountResponse>(`/accounts/${accountNumber}`, {
+    return this.request<AccountResponse>(`/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}`, {
       query,
       schema: AccountResponseSchema,
     });
@@ -98,7 +98,7 @@ export class TraderApiClient extends AuthorizedApiClient {
   /** `GET /accounts/{accountNumber}/orders`：获取指定账户的一段时间内订单列表。 */
   async getOrders(accountNumber: string, params: OrdersQuery): Promise<Order[]> {
     this.logger.info('调用 getOrders', { accountNumber, params });
-    return this.request<Order[]>(`/accounts/${accountNumber}/orders`, {
+    return this.request<Order[]>(`/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/orders`, {
       query: this.buildQuery(params),
       schema: OrdersResponseSchema,
     });
@@ -114,7 +114,9 @@ export class TraderApiClient extends AuthorizedApiClient {
     options: PlaceOrderOptions = {},
   ): Promise<MutationResult> {
     this.logger.info('调用 placeOrder', { accountNumber });
-    return this.requestMutation('PLACE_ORDER', `/accounts/${accountNumber}/orders`,
+    return this.requestMutation(
+      'PLACE_ORDER',
+      `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/orders`,
       {
         method: 'POST',
         body: order,
@@ -126,9 +128,12 @@ export class TraderApiClient extends AuthorizedApiClient {
   /** `GET /accounts/{accountNumber}/orders/{orderId}`：查询订单详情。 */
   async getOrder(accountNumber: string, orderId: number | string): Promise<Order> {
     this.logger.info('调用 getOrder', { accountNumber, orderId });
-    return this.request<Order>(`/accounts/${accountNumber}/orders/${orderId}`, {
+    return this.request<Order>(
+      `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/orders/${encodeNumericIdentifier(orderId, 'orderId')}`,
+      {
       schema: OrderSchema,
-    });
+      },
+    );
   }
 
   /** `PUT /accounts/{accountNumber}/orders/{orderId}`：替换已存在订单。 */
@@ -139,7 +144,9 @@ export class TraderApiClient extends AuthorizedApiClient {
     options: MutationRequestOptions = {},
   ): Promise<MutationResult> {
     this.logger.info('调用 replaceOrder', { accountNumber, orderId });
-    return this.requestMutation('REPLACE_ORDER', `/accounts/${accountNumber}/orders/${orderId}`,
+    return this.requestMutation(
+      'REPLACE_ORDER',
+      `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/orders/${encodeNumericIdentifier(orderId, 'orderId')}`,
       {
         method: 'PUT',
         body: order,
@@ -156,7 +163,9 @@ export class TraderApiClient extends AuthorizedApiClient {
     options: MutationRequestOptions = {},
   ): Promise<MutationResult> {
     this.logger.info('调用 cancelOrder', { accountNumber, orderId });
-    return this.requestMutation('CANCEL_ORDER', `/accounts/${accountNumber}/orders/${orderId}`,
+    return this.requestMutation(
+      'CANCEL_ORDER',
+      `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/orders/${encodeNumericIdentifier(orderId, 'orderId')}`,
       {
         method: 'DELETE',
         body: requestBody,
@@ -189,13 +198,16 @@ export class TraderApiClient extends AuthorizedApiClient {
       },
       options,
     );
-    return this.request<PreviewOrderResponse>(`/accounts/${accountNumber}/previewOrder`, requestOptions);
+    return this.request<PreviewOrderResponse>(
+      `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/previewOrder`,
+      requestOptions,
+    );
   }
 
   /** `GET /accounts/{accountNumber}/transactions`：查询账户交易记录。 */
   async getTransactions(accountNumber: string, params: TransactionsParams): Promise<Transaction[]> {
     this.logger.info('调用 getTransactions', { accountNumber, params });
-    return this.request<Transaction[]>(`/accounts/${accountNumber}/transactions`, {
+    return this.request<Transaction[]>(`/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/transactions`, {
       query: this.buildQuery(params),
       schema: TransactionsResponseSchema,
     });
@@ -205,7 +217,7 @@ export class TraderApiClient extends AuthorizedApiClient {
   async getTransaction(accountNumber: string, transactionId: number | string): Promise<Transaction> {
     this.logger.info('调用 getTransaction', { accountNumber, transactionId });
     const data = await this.request<Transaction | Transaction[]>(
-      `/accounts/${accountNumber}/transactions/${transactionId}`,
+      `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/transactions/${encodeNumericIdentifier(transactionId, 'transactionId')}`,
       { schema: TransactionOrArraySchema },
     );
     if (Array.isArray(data)) {
@@ -304,6 +316,10 @@ export class TraderApiClient extends AuthorizedApiClient {
         location,
         orderId,
         correlationId,
+        requestId: response.requestId,
+        method: response.method,
+        url: response.url,
+        rateLimit: response.rateLimit,
       };
     } catch (error) {
       if (error instanceof UnknownOutcomeError) throw error;
@@ -347,4 +363,37 @@ function parseOrderIdFromLocation(location: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+function encodePathIdentifier(value: string, fieldName: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${fieldName} 必须是非空字符串`);
+  }
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 256 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new Error(`${fieldName} 必须是有效的路径标识符`);
+  }
+  return encodeURIComponent(normalized);
+}
+
+function encodeNumericIdentifier(value: number | string, fieldName: string): string {
+  const normalized = typeof value === 'number'
+    ? Number.isSafeInteger(value) && value > 0 ? String(value) : ''
+    : typeof value === 'string' ? value.trim() : '';
+  if (!/^\d+$/.test(normalized) || normalized === '0') {
+    throw new Error(`${fieldName} 必须是正整数`);
+  }
+  try {
+    const integer = BigInt(normalized);
+    if (integer <= 0n) {
+      throw new Error(`${fieldName} 必须是正整数`);
+    }
+    if (integer > 9_223_372_036_854_775_807n) {
+      throw new Error(`${fieldName} 超出 Schwab int64 范围`);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('超出')) throw error;
+    throw new Error(`${fieldName} 必须是正整数`);
+  }
+  return encodeURIComponent(normalized);
 }

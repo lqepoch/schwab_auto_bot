@@ -1,3 +1,5 @@
+import type { RateLimitMetadata } from './responseMetadata.js';
+
 export interface SchwabApiErrorOptions {
   status: number;
   statusText: string;
@@ -11,6 +13,8 @@ export interface SchwabApiErrorOptions {
   requestId?: string;
   method?: string;
   attempt?: number;
+  correlationId?: string | null;
+  rateLimit?: RateLimitMetadata;
   cause?: unknown;
 }
 
@@ -108,6 +112,8 @@ export class SchwabApiError extends Error {
   readonly requestId?: string;
   readonly method?: string;
   readonly attempt?: number;
+  readonly correlationId?: string | null;
+  readonly rateLimit?: RateLimitMetadata;
 
   constructor(message: string, options: SchwabApiErrorOptions) {
     super(message);
@@ -124,6 +130,8 @@ export class SchwabApiError extends Error {
     this.requestId = options.requestId;
     this.method = options.method;
     this.attempt = options.attempt;
+    this.correlationId = options.correlationId;
+    this.rateLimit = options.rateLimit;
     if (options.cause !== undefined) {
       this.cause = options.cause;
     }
@@ -146,6 +154,8 @@ export class SchwabApiError extends Error {
       requestId: this.requestId,
       method: this.method,
       attempt: this.attempt,
+      correlationId: this.correlationId,
+      rateLimit: this.rateLimit,
     } as const;
   }
 }

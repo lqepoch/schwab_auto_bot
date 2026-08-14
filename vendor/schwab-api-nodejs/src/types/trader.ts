@@ -403,6 +403,10 @@ export interface MutationResult<T = undefined> {
   location: string | null;
   orderId: string | null;
   correlationId: string | null;
+  requestId: string;
+  method: string;
+  url: string;
+  rateLimit: RateLimitMetadata;
 }
 
 export type OrderMutationResult<T = undefined> = MutationResult<T>;
@@ -443,3 +447,4 @@ export interface CancelOrderRequest {
   id?: number;
   order?: Order;
 }
+import type { RateLimitMetadata } from '../utils/responseMetadata.js';

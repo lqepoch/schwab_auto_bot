@@ -160,7 +160,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     this.logger.info('调用 getQuote', { symbol, params });
     if (!symbol?.trim()) throw new Error('getQuote 需要提供 symbol');
     const query = this.buildQuery({ fields: this.normalizeFields(params.fields) });
-    return this.request<SingleQuoteResponse>(`/${encodeURIComponent(symbol)}/quotes`, {
+    return this.request<SingleQuoteResponse>(`/${encodePathIdentifier(symbol, 'symbol')}/quotes`, {
       query,
       schema: SingleQuoteResponseSchema,
     });
@@ -270,7 +270,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     this.logger.info('调用 getMovers', { symbolId, params });
     if (!symbolId?.trim()) throw new Error('getMovers 需要提供 symbolId');
     const query = this.buildQuery({ sort: params.sort, frequency: params.frequency });
-    return this.request<MoversResponse>(`/movers/${encodeURIComponent(symbolId)}`, {
+    return this.request<MoversResponse>(`/movers/${encodePathIdentifier(symbolId, 'symbolId')}`, {
       query,
       schema: MoversResponseSchema,
     });
@@ -289,7 +289,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     this.logger.info('调用 getMarketHours', { marketId, params });
     if (!marketId?.trim()) throw new Error('getMarketHours 需要提供 marketId');
     const query = this.buildQuery({ date: params.date });
-    return this.request<MarketHoursResponse>(`/markets/${encodeURIComponent(marketId)}`, {
+    return this.request<MarketHoursResponse>(`/markets/${encodePathIdentifier(marketId, 'marketId')}`, {
       query,
       schema: MarketHoursResponseSchema,
     });
@@ -314,7 +314,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
   async getInstrumentByCusip(cusipId: string): Promise<InstrumentDetail> {
     this.logger.info('调用 getInstrumentByCusip', { cusipId });
     if (!cusipId?.trim()) throw new Error('getInstrumentByCusip 需要提供 CUSIP');
-    return this.request<InstrumentDetail>(`/instruments/${encodeURIComponent(cusipId)}`, {
+    return this.request<InstrumentDetail>(`/instruments/${encodePathIdentifier(cusipId, 'CUSIP')}`, {
       schema: InstrumentDetailSchema,
     });
   }
@@ -380,6 +380,17 @@ export class MarketDataApiClient extends AuthorizedApiClient {
       intrinsicValue: finiteNumber(quote.moneyIntrinsicValue),
     };
   }
+}
+
+function encodePathIdentifier(value: string, fieldName: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${fieldName} 必须是非空字符串`);
+  }
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 256 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new Error(`${fieldName} 必须是有效的路径标识符`);
+  }
+  return encodeURIComponent(normalized);
 }
 
 function finiteNumber(value: unknown): number | undefined {
