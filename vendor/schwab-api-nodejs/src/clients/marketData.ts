@@ -2,6 +2,8 @@ import { HttpClient } from '../utils/httpClient.js';
 import { TokenManager } from '../auth/tokenManager.js';
 import { AuthorizedApiClient } from '../utils/apiClientBase.js';
 import { Logger, createConsoleLogger } from '../utils/logger.js';
+import { parseSchwabOptionSymbol } from '../options/optionSymbol.js';
+import type { DerivedVerticalOptionQuote, NormalizedOptionQuote } from '../types/normalizedQuotes.js';
 import {
   InstrumentDetail,
   InstrumentProjection,
@@ -16,6 +18,7 @@ import {
   OptionStrategy,
   PriceHistoryResponse,
   QuoteFieldRoot,
+  QuoteItem,
   QuotesResponse,
   SingleQuoteResponse,
   PeriodType,
@@ -74,9 +77,88 @@ export class MarketDataApiClient extends AuthorizedApiClient {
   }
 
   /**
+   * 获取单个期权合约的标准化二级市场行情。
+   *
+   * 该方法刻意使用 Schwab 的批量 `/quotes` 端点，因为该端点的官方示例明确包含
+   * OPTION 的 bid/ask/mark/Greeks。返回值会补充 mid、spread 与 quoteAgeMs，便于
+   * 调用方进行成交质量和陈旧行情判断。
+   */
+  async getOptionQuote(
+    symbol: string,
+    params: { fields?: readonly QuoteFieldRoot[] | string } = {},
+  ): Promise<NormalizedOptionQuote> {
+    const quotes = await this.getOptionQuotes([symbol], params);
+    return quotes[0];
+  }
+
+  /** 批量获取并标准化期权合约行情。 */
+  async getOptionQuotes(
+    symbols: readonly string[],
+    params: { fields?: readonly QuoteFieldRoot[] | string } = {},
+  ): Promise<NormalizedOptionQuote[]> {
+    const normalizedSymbols = symbols
+      .map((symbol) => symbol.trimEnd())
+      .filter((symbol) => symbol.length > 0);
+    if (normalizedSymbols.length === 0) throw new Error('getOptionQuotes 需要至少一个期权 symbol');
+    if (new Set(normalizedSymbols).size !== normalizedSymbols.length) {
+      throw new Error('getOptionQuotes 不接受重复 symbol');
+    }
+
+    const response = await this.getQuotes({
+      symbols: normalizedSymbols,
+      fields: params.fields ?? ['quote', 'reference'],
+    });
+    const observedAt = Date.now();
+    return normalizedSymbols.map((symbol) => {
+      const item = this.findQuoteItem(response, symbol);
+      if (!item) throw new Error(`Schwab 未返回期权行情: ${symbol}`);
+      if (item.assetMainType !== 'OPTION') {
+        throw new Error(`请求的 symbol 不是期权合约: ${symbol} assetMainType=${String(item.assetMainType)}`);
+      }
+      return this.normalizeOptionQuote(item, observedAt);
+    });
+  }
+
+  /**
+   * 基于两条独立期权腿的报价推导垂直价差参考 bid/ask。
+   *
+   * `derivedBid = buyLeg.bid - sellLeg.ask`
+   * `derivedAsk = buyLeg.ask - sellLeg.bid`
+   *
+   * 该结果只代表 leg-derived synthetic market，不代表交易所原生 complex order book 报价。
+   */
+  async getVerticalOptionQuote(
+    buySymbol: string,
+    sellSymbol: string,
+  ): Promise<DerivedVerticalOptionQuote> {
+    const [buy, sell] = await this.getOptionQuotes([buySymbol, sellSymbol]);
+    const derivedBid = subtractIfPresent(buy.bid, sell.ask);
+    const derivedAsk = subtractIfPresent(buy.ask, sell.bid);
+    const derivedMid = midpointIfPresent(derivedBid, derivedAsk);
+    const derivedSpread = subtractIfPresent(derivedAsk, derivedBid);
+    const quoteAgeMs = maxIfPresent(buy.quoteAgeMs, sell.quoteAgeMs);
+
+    return {
+      buy,
+      sell,
+      derivedBid,
+      derivedAsk,
+      derivedMid,
+      derivedSpread,
+      quoteAgeMs,
+      sameUnderlying: buy.underlying !== undefined && buy.underlying === sell.underlying,
+      sameExpiration: buy.expiration !== undefined && buy.expiration === sell.expiration,
+      sameContractType: buy.contractType !== undefined && buy.contractType === sell.contractType,
+    };
+  }
+
+  /**
    * `GET /{symbol}/quotes`：单个标的行情详情。
    * @param symbol 证券代码，支持股票、指数、期权等。
    * @param params.fields 控制返回字段集合。
+   *
+   * 注意：Schwab 当前文档中的该端点示例结构与 `/quotes` 的 NBBO 结构并不一致；
+   * 需要标准化期权 bid/ask 时使用 `getOptionQuote()`。
    */
   async getQuote(
     symbol: string,
@@ -253,4 +335,116 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     if (!cusipId?.trim()) throw new Error('getInstrumentByCusip 需要提供 CUSIP');
     return this.request<InstrumentDetail>(`/instruments/${encodeURIComponent(cusipId)}`);
   }
+
+  private findQuoteItem(response: QuotesResponse, symbol: string): QuoteItem | undefined {
+    return response[symbol]
+      ?? Object.values(response).find((item) => item.symbol === symbol || item.symbol?.trimEnd() === symbol.trimEnd());
+  }
+
+  private normalizeOptionQuote(item: QuoteItem, observedAt: number): NormalizedOptionQuote {
+    const quote = (item.quote ?? {}) as Record<string, unknown>;
+    const reference = (item.reference ?? {}) as Record<string, unknown>;
+    let parsed: ReturnType<typeof parseSchwabOptionSymbol> | undefined;
+    try {
+      parsed = parseSchwabOptionSymbol(item.symbol);
+    } catch {
+      // Adjusted/non-standard contracts may not fit the standard 21-character layout.
+    }
+
+    const bid = finiteNumber(quote.bidPrice);
+    const ask = finiteNumber(quote.askPrice);
+    const mid = midpointIfPresent(bid, ask);
+    const spread = subtractIfPresent(ask, bid);
+    const quoteTime = positiveTimestamp(quote.quoteTime);
+    const contractType = normalizeQuoteContractType(reference.contractType, parsed?.contractType);
+    const expiration = expirationFromReference(reference) ?? parsed?.expiration;
+    const strike = finiteNumber(reference.strikePrice) ?? parsed?.strike;
+    const underlying = stringValue(reference.underlying) ?? parsed?.underlying;
+
+    return {
+      symbol: item.symbol,
+      underlying,
+      contractType,
+      expiration,
+      strike,
+      realtime: item.realtime,
+      quoteType: item.quoteType,
+      bid,
+      ask,
+      bidSize: finiteNumber(quote.bidSize),
+      askSize: finiteNumber(quote.askSize),
+      mark: finiteNumber(quote.mark),
+      last: finiteNumber(quote.lastPrice),
+      mid,
+      spread,
+      spreadPercentOfMid: spread !== undefined && mid !== undefined && mid !== 0
+        ? (spread / Math.abs(mid)) * 100
+        : undefined,
+      quoteTime,
+      tradeTime: positiveTimestamp(quote.tradeTime),
+      quoteAgeMs: quoteTime === undefined ? undefined : Math.max(0, observedAt - quoteTime),
+      delta: finiteNumber(quote.delta),
+      gamma: finiteNumber(quote.gamma),
+      theta: finiteNumber(quote.theta),
+      vega: finiteNumber(quote.vega),
+      rho: finiteNumber(quote.rho),
+      volatility: finiteNumber(quote.volatility),
+      openInterest: finiteNumber(quote.openInterest),
+      totalVolume: finiteNumber(quote.totalVolume),
+      underlyingPrice: finiteNumber(quote.underlyingPrice),
+      theoreticalOptionValue: finiteNumber(quote.theoreticalOptionValue),
+      timeValue: finiteNumber(quote.timeValue),
+      intrinsicValue: finiteNumber(quote.moneyIntrinsicValue),
+    };
+  }
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function positiveTimestamp(value: unknown): number | undefined {
+  const numeric = finiteNumber(value);
+  return numeric !== undefined && numeric > 0 ? numeric : undefined;
+}
+
+function subtractIfPresent(left: number | undefined, right: number | undefined): number | undefined {
+  return left === undefined || right === undefined ? undefined : left - right;
+}
+
+function midpointIfPresent(left: number | undefined, right: number | undefined): number | undefined {
+  return left === undefined || right === undefined ? undefined : (left + right) / 2;
+}
+
+function maxIfPresent(left: number | undefined, right: number | undefined): number | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return Math.max(left, right);
+}
+
+function normalizeQuoteContractType(
+  value: unknown,
+  fallback: 'CALL' | 'PUT' | undefined,
+): 'CALL' | 'PUT' | undefined {
+  if (value === 'C' || value === 'CALL') return 'CALL';
+  if (value === 'P' || value === 'PUT') return 'PUT';
+  return fallback;
+}
+
+function expirationFromReference(reference: Record<string, unknown>): string | undefined {
+  const year = finiteNumber(reference.expirationYear);
+  const month = finiteNumber(reference.expirationMonth);
+  const day = finiteNumber(reference.expirationDay);
+  if (year === undefined || month === undefined || day === undefined) return undefined;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) return undefined;
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
