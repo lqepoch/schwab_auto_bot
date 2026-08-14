@@ -100,9 +100,13 @@ export class TokenStore {
    * 将最新令牌持久化到磁盘。
    */
   async save(token: PersistedToken): Promise<void> {
-    // 写入前确保目录存在
+    // 写入前确保目录存在，并在 POSIX 平台持续收紧到 owner-only，避免目录由默认 umask 留成 0755。
     this.logger.info('准备写入令牌到磁盘', { path: this.filePath });
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    const directoryPath = path.dirname(this.filePath);
+    await fs.mkdir(directoryPath, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') {
+      await fs.chmod(directoryPath, 0o700);
+    }
     const tempPath = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
     const payload = JSON.stringify(token, null, 2);
     let lockHandle: FileHandle | null = null;
@@ -116,7 +120,7 @@ export class TokenStore {
         await temporaryHandle.close();
       }
       await fs.rename(tempPath, this.filePath);
-      const directoryHandle = await fs.open(path.dirname(this.filePath), 'r');
+      const directoryHandle = await fs.open(directoryPath, 'r');
       try {
         await directoryHandle.sync();
       } finally {
