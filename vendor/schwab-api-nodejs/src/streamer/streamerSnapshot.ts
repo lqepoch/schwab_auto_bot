@@ -57,6 +57,7 @@ const DEFAULT_STALE_AFTER_MS = 30_000;
  */
 export class StreamerSnapshotCache {
   private readonly entries = new Map<string, StreamerSnapshotEntry>();
+  private readonly rowFingerprints = new Map<string, string>();
   private readonly staleAfterMs: number;
   private readonly clock: () => number;
   private currentGeneration = 0;
@@ -80,6 +81,7 @@ export class StreamerSnapshotCache {
     this.currentGeneration += 1;
     this.active = true;
     this.entries.clear();
+    this.rowFingerprints.clear();
     return this.currentGeneration;
   }
 
@@ -90,6 +92,7 @@ export class StreamerSnapshotCache {
 
   clear(): void {
     this.entries.clear();
+    this.rowFingerprints.clear();
   }
 
   get<S extends StreamerService>(service: S, key: string, now = this.clock()): StreamerSnapshotEntry<S> | undefined {
@@ -140,8 +143,15 @@ export class StreamerSnapshotCache {
     }
     const cacheKeyValue = cacheKey(service, key);
     const previous = this.entries.get(cacheKeyValue) as StreamerSnapshotEntry<S> | undefined;
+    const fingerprint = stableRowFingerprint(row);
     if (previous) {
-      const ordering = compareOrdering(previous, timestamp, sequence);
+      const ordering = compareOrdering(
+        previous,
+        timestamp,
+        sequence,
+        this.rowFingerprints.get(cacheKeyValue),
+        fingerprint,
+      );
       if (ordering === 'stale-timestamp') return { accepted: false, reason: ordering };
       if (ordering === 'stale-sequence') return { accepted: false, reason: ordering };
       if (ordering === 'duplicate') return { accepted: false, reason: ordering };
@@ -165,6 +175,7 @@ export class StreamerSnapshotCache {
       updatedAt: now,
     };
     this.entries.set(cacheKeyValue, entry);
+    this.rowFingerprints.set(cacheKeyValue, fingerprint);
     return { accepted: true, update: { entry, mode } };
   }
 }
@@ -175,6 +186,8 @@ function compareOrdering<S extends StreamerService>(
   previous: StreamerSnapshotEntry<S>,
   timestamp: number | undefined,
   sequence: number | undefined,
+  previousFingerprint: string | undefined,
+  fingerprint: string,
 ): OrderingResult {
   if (sequence !== undefined && previous.sequence !== undefined) {
     if (sequence < previous.sequence) return 'stale-sequence';
@@ -189,17 +202,19 @@ function compareOrdering<S extends StreamerService>(
 
   if (timestamp !== undefined && previous.timestamp !== undefined) {
     if (timestamp < previous.timestamp) return 'stale-timestamp';
-    if (timestamp === previous.timestamp) return 'duplicate';
+    if (timestamp === previous.timestamp && previousFingerprint === fingerprint) return 'duplicate';
     return 'ok';
   }
   return 'uncertain-order';
 }
 
 function rowKey<S extends StreamerService>(service: S, row: StreamerServiceRow<S>): string | undefined {
+  if (service === 'ACCT_ACTIVITY') {
+    return typeof row.key === 'string' && row.key.trim() ? row.key.trim() : undefined;
+  }
   if (typeof row.key === 'string' && row.key.trim()) return row.key.trim();
   const candidate = row['0'];
   if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
-  if (service === 'ACCT_ACTIVITY' && typeof row['1'] === 'string' && row['1'].trim()) return row['1'].trim();
   return undefined;
 }
 
@@ -210,10 +225,12 @@ function rowTimestamp<S extends StreamerService>(
 ): number | undefined {
   const candidates = service === 'CHART_EQUITY'
     ? [row['7'], payload.timestamp]
-    : service === 'CHART_FUTURES'
-      ? [row['1'], payload.timestamp]
+      : service === 'CHART_FUTURES'
+      ? [row['1']]
       : service === 'NYSE_BOOK' || service === 'NASDAQ_BOOK' || service === 'OPTIONS_BOOK'
         ? [row['1'], payload.timestamp]
+        : service === 'SCREENER_EQUITY' || service === 'SCREENER_OPTION'
+          ? [row['1'], payload.timestamp]
         : [payload.timestamp];
   return candidates.find((value): value is number => typeof value === 'number' && Number.isFinite(value));
 }
@@ -223,6 +240,29 @@ function rowSequence<S extends StreamerService>(service: S, row: StreamerService
   if (typeof candidate === 'number' && Number.isInteger(candidate) && candidate >= 0) return candidate;
   if (typeof candidate === 'string' && /^\d+$/.test(candidate)) return Number(candidate);
   return undefined;
+}
+
+function stableRowFingerprint<S extends StreamerService>(row: StreamerServiceRow<S>): string {
+  return stableSerialize(row);
+}
+
+function stableSerialize(value: unknown): string {
+  if (value === null) return 'null';
+  switch (typeof value) {
+    case 'string': return JSON.stringify(value);
+    case 'number': return Number.isFinite(value) ? String(value) : `number:${String(value)}`;
+    case 'boolean': return value ? 'true' : 'false';
+    case 'undefined': return 'undefined';
+    case 'bigint': return `bigint:${value.toString()}`;
+    case 'function': return `function:${String(value)}`;
+    case 'symbol': return `symbol:${String(value)}`;
+    case 'object': {
+      if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
+      const object = value as Record<string, unknown>;
+      return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableSerialize(object[key])}`).join(',')}}`;
+    }
+    default: return String(value);
+  }
 }
 
 function cacheKey(service: StreamerService, key: string): string {
