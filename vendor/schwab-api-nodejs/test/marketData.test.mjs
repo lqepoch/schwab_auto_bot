@@ -32,6 +32,12 @@ function makeClient() {
   };
 }
 
+function stableOptions(options) {
+  assert.equal(typeof options.schema?.parse, 'function');
+  const { schema: _schema, ...rest } = options;
+  return rest;
+}
+
 test('sends the official includeUnderlyingQuote query key', async () => {
   const { client, calls } = makeClient();
 
@@ -40,7 +46,7 @@ test('sends the official includeUnderlyingQuote query key', async () => {
     includeUnderlyingQuote: true,
   });
 
-  assert.deepEqual(calls, [{
+  assert.deepEqual([{ path: calls[0].path, options: stableOptions(calls[0].options) }], [{
     path: '/chains',
     options: {
       query: {

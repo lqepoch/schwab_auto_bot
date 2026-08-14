@@ -18,10 +18,16 @@ function makeClient(result = {}) {
   return { client: new MarketDataApiClient(http, tokens, logger), calls };
 }
 
+function assertRuntimeSchema(options) {
+  assert.equal(typeof options.schema?.parse, 'function');
+  const { schema: _schema, ...stableOptions } = options;
+  return stableOptions;
+}
+
 test('quotes normalize symbols, fields, and indicative into the documented query', async () => {
   const { client, calls } = makeClient();
   await client.getQuotes({ symbols: ['QQQ', 'QQQ   260812P00740000'], fields: ['quote', 'fundamental'], indicative: true });
-  assert.deepEqual(calls[0], {
+  assert.deepEqual({ path: calls[0].path, options: assertRuntimeSchema(calls[0].options) }, {
     path: '/quotes',
     options: {
       query: { symbols: 'QQQ,QQQ   260812P00740000', fields: 'quote,fundamental', indicative: true },
@@ -73,7 +79,7 @@ test('instrument search and CUSIP lookup encode their path/query contracts', asy
   const { client, calls } = makeClient();
   await client.searchInstruments({ symbol: ['QQQ', 'SPY'], projection: 'SYMBOL_SEARCH' });
   await client.getInstrumentByCusip('12 345');
-  assert.deepEqual(calls[0], {
+  assert.deepEqual({ path: calls[0].path, options: assertRuntimeSchema(calls[0].options) }, {
     path: '/instruments',
     options: { query: { symbol: 'QQQ,SPY', projection: 'SYMBOL_SEARCH' }, accessToken: 'test-token' },
   });

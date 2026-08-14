@@ -29,7 +29,7 @@ npm --prefix vendor/schwab-api-nodejs test
 先按部署环境配置 `SCHWAB_CLIENT_ID`、`SCHWAB_CLIENT_SECRET`、`SCHWAB_REDIRECT_URI` 等环境变量。构建后从本地 package 的入口导入：
 
 ```ts
-import { SchwabOwokit, createConsoleLogger } from './vendor/schwab-api-nodejs/dist/index.js';
+import { SchwabOwokit, createConsoleLogger } from './vendor/schwab-api-nodejs/dist/public.js';
 
 const sdk = SchwabOwokit.fromEnvironment({
   logLevel: 'info',
@@ -178,7 +178,7 @@ socket 并触发重连。
 
 `subscribe()` / `unsubscribe()` 返回的 Promise 会按命令校验 Streamer ACK：兼容通用成功码 `0`，并接受 Schwab 文档规定的 `SUBS=26`、`UNSUBS=27`、`ADD=28`、`VIEW=29`；`LOGIN` 只接受 `0`。拒绝响应、命令/服务不匹配、连接断开和 ACK 超时都会 reject。非零且不匹配的 ACK 是明确拒绝，会回滚该次 canonical mutation；连接断开或 ACK 超时是未知结果，会保留期望的 canonical state 并受控重连，以完整 `SUBS` 对账后才再次报告 ready。底层 `sdk.streamer.send()` 仍是原始发送接口，不提供 ACK 语义。重连恢复会等待每个 service 的完整 `SUBS` ACK 后才报告 ready，不代表已经收到新行情。
 
-可从 package root 按 ACK 结果类型捕获：`import { StreamerCommandError, StreamerCommandTimeoutError, StreamerCommandNotSentError } from './vendor/schwab-api-nodejs/dist/index.js';`
+可从 package root 按 ACK 结果类型捕获：`import { StreamerCommandError, StreamerCommandTimeoutError, StreamerCommandNotSentError } from './vendor/schwab-api-nodejs/dist/public.js';`
 
 ## 错误处理
 

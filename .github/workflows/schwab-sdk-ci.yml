@@ -45,7 +45,7 @@ jobs:
         run: node --experimental-strip-types --test test/*.test.ts test/*.test.mjs
 
       - name: Typecheck root integration
-        run: npm run type-check
+        run: npm run check
 
       - name: Run root contract tests
         run: npm test
