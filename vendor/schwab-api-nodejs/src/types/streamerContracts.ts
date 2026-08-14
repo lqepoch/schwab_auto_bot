@@ -1,16 +1,48 @@
 import { z } from 'zod';
+import { LEVELONE_EQUITIES_FIELDS } from './levelOneFields.js';
 
 export type StreamerFieldValueType = 'string' | 'number' | 'boolean' | 'array' | 'unknown';
 export type StreamerDeliveryMode = 'change' | 'whole' | 'all-sequence';
+/** Ordering evidence available in the local Schwab service document. */
+export type StreamerOrderingEvidence = 'timestamp' | 'sequence';
 
 type FieldEntry = readonly [string, StreamerFieldValueType];
 type FieldMapFor<T extends readonly FieldEntry[]> = {
   readonly [Entry in T[number] as Entry[0]]: { readonly type: Entry[1] };
 };
 
+type LevelOneServiceFieldType<T extends string> = T extends 'boolean'
+  ? 'boolean'
+  : T extends 'double' | 'int' | 'long'
+    ? 'number'
+    : 'string';
+
+type LevelOneServiceFieldMap = {
+  readonly [Field in keyof typeof LEVELONE_EQUITIES_FIELDS]: {
+    readonly type: LevelOneServiceFieldType<typeof LEVELONE_EQUITIES_FIELDS[Field]['type']>;
+  };
+};
+
 function defineFieldMap<const T extends readonly FieldEntry[]>(entries: T): FieldMapFor<T> {
   return Object.fromEntries(entries.map(([id, type]) => [id, { type }])) as FieldMapFor<T>;
 }
+
+/**
+ * Adapt the existing canonical diagnostic/request map to the common typed
+ * service contract without duplicating its 55 wire identifiers.
+ */
+export const LEVELONE_EQUITIES_SERVICE_FIELDS = Object.fromEntries(
+  Object.entries(LEVELONE_EQUITIES_FIELDS).map(([id, definition]) => [
+    id,
+    {
+      type: definition.type === 'boolean'
+        ? 'boolean'
+        : definition.type === 'double' || definition.type === 'int' || definition.type === 'long'
+          ? 'number'
+          : 'string',
+    },
+  ]),
+) as LevelOneServiceFieldMap;
 
 export const LEVELONE_OPTIONS_FIELDS = defineFieldMap([
   ['0', 'string'], ['1', 'string'], ['2', 'number'], ['3', 'number'], ['4', 'number'],
@@ -80,22 +112,26 @@ export const SCREENER_FIELDS = defineFieldMap([
 ] as const);
 
 export const ACCT_ACTIVITY_FIELDS = defineFieldMap([
-  ['0', 'unknown'], ['1', 'string'], ['2', 'string'], ['3', 'string'],
+  ['0', 'unknown'], ['1', 'string'], ['2', 'string'], ['3', 'unknown'],
 ] as const);
 
 export const STREAMER_SERVICE_CONTRACTS = {
-  LEVELONE_OPTIONS: { delivery: 'change', fields: LEVELONE_OPTIONS_FIELDS },
-  LEVELONE_FUTURES: { delivery: 'change', fields: LEVELONE_FUTURES_FIELDS },
-  LEVELONE_FUTURES_OPTIONS: { delivery: 'change', fields: LEVELONE_FUTURES_OPTIONS_FIELDS },
-  LEVELONE_FOREX: { delivery: 'change', fields: LEVELONE_FOREX_FIELDS },
-  NYSE_BOOK: { delivery: 'whole', fields: BOOK_FIELDS },
-  NASDAQ_BOOK: { delivery: 'whole', fields: BOOK_FIELDS },
-  OPTIONS_BOOK: { delivery: 'whole', fields: BOOK_FIELDS },
-  CHART_EQUITY: { delivery: 'all-sequence', fields: CHART_EQUITY_SERVICE_FIELDS },
-  CHART_FUTURES: { delivery: 'all-sequence', fields: CHART_FUTURES_FIELDS },
-  SCREENER_EQUITY: { delivery: 'whole', fields: SCREENER_FIELDS },
-  SCREENER_OPTION: { delivery: 'whole', fields: SCREENER_FIELDS },
-  ACCT_ACTIVITY: { delivery: 'all-sequence', fields: ACCT_ACTIVITY_FIELDS },
+  LEVELONE_EQUITIES: { delivery: 'change', ordering: 'timestamp', fields: LEVELONE_EQUITIES_SERVICE_FIELDS },
+  LEVELONE_OPTIONS: { delivery: 'change', ordering: 'timestamp', fields: LEVELONE_OPTIONS_FIELDS },
+  LEVELONE_FUTURES: { delivery: 'change', ordering: 'timestamp', fields: LEVELONE_FUTURES_FIELDS },
+  LEVELONE_FUTURES_OPTIONS: { delivery: 'change', ordering: 'timestamp', fields: LEVELONE_FUTURES_OPTIONS_FIELDS },
+  LEVELONE_FOREX: { delivery: 'change', ordering: 'timestamp', fields: LEVELONE_FOREX_FIELDS },
+  NYSE_BOOK: { delivery: 'whole', ordering: 'timestamp', fields: BOOK_FIELDS },
+  NASDAQ_BOOK: { delivery: 'whole', ordering: 'timestamp', fields: BOOK_FIELDS },
+  OPTIONS_BOOK: { delivery: 'whole', ordering: 'timestamp', fields: BOOK_FIELDS },
+  CHART_EQUITY: { delivery: 'all-sequence', ordering: 'sequence', fields: CHART_EQUITY_SERVICE_FIELDS },
+  // The local document labels this service All Sequence but its field table
+  // has no sequence field. The cache therefore uses only documented Chart
+  // Time (field 1) as ordering evidence and rejects rows without it.
+  CHART_FUTURES: { delivery: 'all-sequence', ordering: 'timestamp', fields: CHART_FUTURES_FIELDS },
+  SCREENER_EQUITY: { delivery: 'whole', ordering: 'timestamp', fields: SCREENER_FIELDS },
+  SCREENER_OPTION: { delivery: 'whole', ordering: 'timestamp', fields: SCREENER_FIELDS },
+  ACCT_ACTIVITY: { delivery: 'all-sequence', ordering: 'sequence', fields: ACCT_ACTIVITY_FIELDS },
 } as const;
 
 export type StreamerService = keyof typeof STREAMER_SERVICE_CONTRACTS;
@@ -121,7 +157,7 @@ export type StreamerServiceRow<S extends StreamerService> = {
   [field: string]: unknown;
 } & {
   [Field in keyof ServiceFields<S>]?: ServiceFieldValue<S, Field>;
-};
+} & (S extends 'ACCT_ACTIVITY' ? { key: string; seq: number } : {});
 
 export interface TypedStreamerDataPayload<S extends StreamerService> {
   service: S;
@@ -172,9 +208,33 @@ function rowSchema(fields: FieldMap): z.ZodType {
   return z.object({ key: z.string().optional(), ...shape }).passthrough();
 }
 
+const accountActivityMessageDataSchema = z.union([
+  z.string(),
+  z.null(),
+  z.record(z.string(), z.unknown()),
+  z.array(z.unknown()),
+]);
+
+/**
+ * ACCT_ACTIVITY is the one service whose sequence and key live on each row,
+ * outside the numbered field map. Require the documented envelope fields so a
+ * stale/legacy partial activity row cannot enter the generation-scoped cache.
+ */
+const accountActivityRowSchema = z.object({
+  seq: z.union([
+    z.number().int().finite().nonnegative(),
+    z.string().regex(/^\d+$/).transform(Number),
+  ]),
+  key: z.string().min(1),
+  '1': z.string().min(1),
+  '2': z.string(),
+  '3': accountActivityMessageDataSchema,
+}).passthrough();
+
 const SERVICE_ROW_SCHEMAS = Object.fromEntries(
   Object.entries(STREAMER_SERVICE_CONTRACTS).map(([service, contract]) => [service, rowSchema(contract.fields as FieldMap)]),
 ) as Record<StreamerService, z.ZodType>;
+SERVICE_ROW_SCHEMAS.ACCT_ACTIVITY = accountActivityRowSchema;
 
 const SERVICE_PAYLOAD_ENVELOPE = z.object({
   service: z.string(),
