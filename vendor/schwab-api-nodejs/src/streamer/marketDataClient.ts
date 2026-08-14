@@ -47,6 +47,7 @@ export interface UnsubscribeKeysOptions {
  */
 export class MarketDataStreamClient {
   private streamerInfo?: StreamerInfo;
+  private sessionReady = false;
   private readonly logger: Logger;
 
   constructor(
@@ -60,6 +61,7 @@ export class MarketDataStreamClient {
 
   /** Establish the Streamer session and wait until ADMIN/LOGIN has been acknowledged. */
   async connect(): Promise<void> {
+    this.sessionReady = false;
     this.logger.info('开始建立市场数据 Streamer 连接');
     const token = await this.tokenManager.requireAccessToken();
     if (!this.streamerInfo) {
@@ -72,7 +74,9 @@ export class MarketDataStreamClient {
     });
     try {
       await this.streamer.waitForReady({ timeoutMs: 15_000 });
+      this.sessionReady = true;
     } catch (error) {
+      this.sessionReady = false;
       this.logger.error('等待 Streamer 登录就绪超时或失败', {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -84,6 +88,7 @@ export class MarketDataStreamClient {
   /** Disconnect and discard the cached connection-specific StreamerInfo. */
   disconnect(): void {
     this.logger.info('主动断开市场数据 Streamer');
+    this.sessionReady = false;
     this.streamer.disconnect();
     this.streamerInfo = undefined;
   }
@@ -246,7 +251,7 @@ export class MarketDataStreamClient {
   }
 
   private assertConnected(): void {
-    if (!this.streamerInfo || this.streamer.status === 'disconnected') {
+    if (!this.streamerInfo || !this.sessionReady) {
       this.logger.error('尚未建立 Streamer 登录，请先调用 connect()');
       throw new Error('请先调用 connect() 完成 Streamer 登录');
     }
