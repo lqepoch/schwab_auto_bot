@@ -1,0 +1,51 @@
+name: Schwab SDK CI
+
+on:
+  pull_request:
+    paths:
+      - 'vendor/schwab-api-nodejs/**'
+      - 'src/**'
+      - 'test/**'
+      - '.github/workflows/schwab-sdk-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            vendor/schwab-api-nodejs/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install SDK dependencies
+        run: npm ci --prefix vendor/schwab-api-nodejs
+
+      - name: Typecheck SDK source
+        run: npm run typecheck --prefix vendor/schwab-api-nodejs
+
+      - name: Typecheck SDK tests
+        run: npm run typecheck:test --prefix vendor/schwab-api-nodejs
+
+      - name: Run SDK contract tests
+        working-directory: vendor/schwab-api-nodejs
+        run: node --experimental-strip-types --test test/*.test.ts test/*.test.mjs
+
+      - name: Typecheck root integration
+        run: npm run check
+
+      - name: Run root contract tests
+        run: npm test

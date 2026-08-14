@@ -138,6 +138,12 @@ Price Level
 }
 ```
 
+### Chart K线数据 (CHART_FUTURES) 的顺序边界
+
+本地随附的 Schwab Data API 文档把 `CHART_FUTURES` 标为 **All Sequence**，但该服务的字段表没有独立的 Sequence 字段，只有字段 `1` **Chart Time**。因此快照缓存不会猜测或合成连续序列：只把每行字段 `1` 的文档时间作为顺序证据；缺少该字段的行会以 `uncertain-order` 丢弃。相同 Chart Time 但字段内容不同的修正行仍可合并，只有行指纹完全相同才判定为重复。
+
+`ACCT_ACTIVITY` 的 `seq` 与 `key` 位于编号字段之外，且必须和字段 `1`（账户）、`2`（消息类型）、`3`（消息数据）一起存在；不符合该本地文档形状的旧式/部分 fixture 不会进入 generation-scoped 快照。重新连接会清空旧代缓存并重置允许的序列起点，不能把旧代活动消息写入新代。
+
 ## 🔧 调试工具
 
 ### 创建调试器

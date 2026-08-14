@@ -20,6 +20,19 @@ function makeClient() {
       calls.push({ path, options });
       return {};
     },
+    async requestWithResponse(path, options) {
+      calls.push({ path, options });
+      return {
+        body: {},
+        headers: new Headers(),
+        status: 200,
+        requestId: 'fixture',
+        method: 'GET',
+        url: `https://fixture.invalid${path}`,
+        correlationId: null,
+        rateLimit: { headers: {} },
+      };
+    },
   };
   const tokens = {
     async requireAccessToken() {
@@ -32,6 +45,12 @@ function makeClient() {
   };
 }
 
+function stableOptions(options) {
+  assert.equal(typeof options.schema?.parse, 'function');
+  const { schema: _schema, ...rest } = options;
+  return rest;
+}
+
 test('sends the official includeUnderlyingQuote query key', async () => {
   const { client, calls } = makeClient();
 
@@ -40,7 +59,7 @@ test('sends the official includeUnderlyingQuote query key', async () => {
     includeUnderlyingQuote: true,
   });
 
-  assert.deepEqual(calls, [{
+  assert.deepEqual([{ path: calls[0].path, options: stableOptions(calls[0].options) }], [{
     path: '/chains',
     options: {
       query: {

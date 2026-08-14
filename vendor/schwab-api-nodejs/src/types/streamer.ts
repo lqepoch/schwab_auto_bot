@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
 const StreamerDataRowSchema = z
-  .record(z.string(), z.unknown())
-  .and(z.object({ key: z.string().optional() }))
+  .object({ key: z.string().optional() })
+  .passthrough()
   .transform((value) => value as Record<string, unknown> & { key?: string });
 
 export const StreamerCommandResponseSchema = z.object({
@@ -19,7 +19,7 @@ export const StreamerCommandResponseSchema = z.object({
     ]),
     msg: z.string(),
   }),
-});
+}).passthrough();
 
 export type StreamerCommandResponse = z.infer<typeof StreamerCommandResponseSchema>;
 
@@ -44,13 +44,13 @@ export const StreamerDataPayloadSchema = z.object({
   timestamp: z.coerce.number(),
   command: z.string(),
   content: z.array(StreamerDataRowSchema),
-});
+}).passthrough();
 
 export type StreamerDataPayload = z.infer<typeof StreamerDataPayloadSchema>;
 
 export const StreamerNotifyPayloadSchema = z.object({
   heartbeat: z.string().optional(),
-});
+}).passthrough();
 
 export type StreamerNotifyPayload = z.infer<typeof StreamerNotifyPayloadSchema>;
 
@@ -58,7 +58,7 @@ export const StreamerMessageSchema = z.object({
   response: StreamerCommandResponseSchema.array().optional(),
   data: StreamerDataPayloadSchema.array().optional(),
   notify: StreamerNotifyPayloadSchema.array().optional(),
-});
+}).passthrough();
 
 export type StreamerMessage = z.infer<typeof StreamerMessageSchema>;
 

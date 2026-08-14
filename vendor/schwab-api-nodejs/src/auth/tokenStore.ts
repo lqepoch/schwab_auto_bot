@@ -15,6 +15,21 @@ export interface TokenStoreOptions {
   staleLockThresholdMs?: number;
 }
 
+/**
+ * Minimal persistence boundary used by TokenManager.
+ *
+ * TokenStore remains the default owner-only file implementation. Applications
+ * that already have an approved secure store may inject an adapter without
+ * making TokenManager know how credentials are protected at rest.
+ */
+export interface TokenStoreAdapter {
+  /** Return an opaque persisted value; TokenManager validates it at the boundary. */
+  load(): Promise<unknown | null>;
+  save(token: PersistedToken): Promise<void>;
+  /** Optional non-secret identifier used only for diagnostics. */
+  readonly path?: string;
+}
+
 const DEFAULT_FILENAME = '.schwab_tokens.json';
 const DEFAULT_LOCK_RETRY_DELAY_MS = 50;
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
@@ -32,7 +47,7 @@ interface LockMetadata {
  * 简单的文件型令牌存储器。默认写入当前工作目录下的 `.schwab_tokens.json`，
  * 用于跨进程、跨重启缓存 OAuth 访问令牌。
  */
-export class TokenStore {
+export class TokenStore implements TokenStoreAdapter {
   private readonly filePath: string;
   private readonly logger: Logger;
   private readonly lockPath: string;
@@ -100,9 +115,13 @@ export class TokenStore {
    * 将最新令牌持久化到磁盘。
    */
   async save(token: PersistedToken): Promise<void> {
-    // 写入前确保目录存在
+    // 写入前确保目录存在，并在 POSIX 平台持续收紧到 owner-only，避免目录由默认 umask 留成 0755。
     this.logger.info('准备写入令牌到磁盘', { path: this.filePath });
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    const directoryPath = path.dirname(this.filePath);
+    await fs.mkdir(directoryPath, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') {
+      await fs.chmod(directoryPath, 0o700);
+    }
     const tempPath = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
     const payload = JSON.stringify(token, null, 2);
     let lockHandle: FileHandle | null = null;
@@ -116,7 +135,7 @@ export class TokenStore {
         await temporaryHandle.close();
       }
       await fs.rename(tempPath, this.filePath);
-      const directoryHandle = await fs.open(path.dirname(this.filePath), 'r');
+      const directoryHandle = await fs.open(directoryPath, 'r');
       try {
         await directoryHandle.sync();
       } finally {

@@ -111,7 +111,17 @@ test('query encoding, headers, schema validation, and response metadata are dete
     fetch: async (url, init) => {
       observedUrl = String(url);
       observedHeaders = new Headers(init?.headers);
-      return new Response('{"value":7}', { status: 200, headers: { 'content-type': 'application/json', Location: '/orders/7' } });
+      return new Response('{"value":7}', {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          Location: '/orders/7',
+          'Schwab-Client-CorrelID': 'corr-read-1',
+          'x-ratelimit-limit': '120',
+          'x-ratelimit-remaining': '119',
+          'x-ratelimit-reset': '1786689600',
+        },
+      });
     },
   });
   const result = await client.requestWithResponse('/quotes', {
@@ -126,6 +136,20 @@ test('query encoding, headers, schema validation, and response metadata are dete
   assert.equal(observedHeaders?.get('authorization'), 'Bearer access-secret');
   assert.equal(result.status, 200);
   assert.equal(result.headers.get('location'), '/orders/7');
+  assert.match(result.requestId, /^req-\d+-\d+$/);
+  assert.equal(result.method, 'GET');
+  assert.equal(result.url, 'https://api.schwabapi.com/trader/v1/quotes?symbol=QQQ+++260812P00740000&enabled=true');
+  assert.equal(result.correlationId, 'corr-read-1');
+  assert.deepEqual(result.rateLimit, {
+    headers: {
+      'x-ratelimit-limit': '120',
+      'x-ratelimit-remaining': '119',
+      'x-ratelimit-reset': '1786689600',
+    },
+    limit: 120,
+    remaining: 119,
+    reset: 1786689600,
+  });
   assert.deepEqual(result.body, { value: 7 });
 });
 
@@ -139,4 +163,66 @@ test('204 and empty responses return undefined while preserving metadata', async
     assert.equal(result.body, undefined);
     assert.equal(result.status, status);
   }
+});
+
+test('HTTP errors retain safe correlation and rate-limit metadata without sensitive headers', async () => {
+  const client = new HttpClient({
+    baseUrl: 'https://api.schwabapi.com',
+    logger,
+    retryConfig: { maxRetries: 0 },
+    fetch: async () => new Response('{"message":"limited"}', {
+      status: 429,
+      headers: {
+        'Schwab-Client-CorrelID': 'corr-error-1',
+        'retry-after': '7',
+        'ratelimit-limit': '10',
+        'ratelimit-remaining': '0',
+        'set-cookie': 'session=secret',
+      },
+    }),
+  });
+
+  await assert.rejects(() => client.request('/quotes'), (error: unknown) => {
+    if (!(error instanceof SchwabApiError)) return false;
+    assert.equal(error.correlationId, 'corr-error-1');
+    assert.deepEqual(error.rateLimit, {
+      headers: {
+        'ratelimit-limit': '10',
+        'ratelimit-remaining': '0',
+        'retry-after': '7',
+      },
+      limit: 10,
+      remaining: 0,
+      retryAfterMs: 7_000,
+    });
+    assert.equal(error.toJSON().headers['set-cookie'], '[REDACTED]');
+    assert.equal(error.toJSON().headers['authorization'], undefined);
+    return error.status === 429 && error.isRateLimited === true;
+  });
+});
+
+test('response metadata parses X-Rate-Limit aliases with the documented second hyphen', async () => {
+  const client = new HttpClient({
+    baseUrl: 'https://api.schwabapi.com',
+    logger,
+    fetch: async () => new Response('{"ok":true}', {
+      status: 200,
+      headers: {
+        'X-Rate-Limit-Limit': '60',
+        'X-Rate-Limit-Remaining': '59',
+        'X-Rate-Limit-Reset': '1786689600',
+      },
+    }),
+  });
+  const result = await client.requestWithResponse('/quotes');
+  assert.deepEqual(result.rateLimit, {
+    headers: {
+      'x-rate-limit-limit': '60',
+      'x-rate-limit-remaining': '59',
+      'x-rate-limit-reset': '1786689600',
+    },
+    limit: 60,
+    remaining: 59,
+    reset: 1786689600,
+  });
 });

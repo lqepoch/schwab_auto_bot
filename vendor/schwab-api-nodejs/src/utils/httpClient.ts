@@ -3,6 +3,10 @@ import { ZodError, type ZodType } from 'zod';
 import { SchwabApiError } from './errors.ts';
 import { type Logger, createConsoleLogger, withDuration } from './logger.ts';
 import { redactHeaders } from './redact.ts';
+import {
+  createResponseMetadata,
+  type ResponseMetadata,
+} from './responseMetadata.ts';
 import { DEFAULT_USER_AGENT } from './version.ts';
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS';
@@ -82,7 +86,9 @@ export type HttpResponse<T> = {
   body: T;
   headers: Headers;
   status: number;
-};
+} & Omit<ResponseMetadata, 'method'> & { method: HttpMethod };
+
+export type { RateLimitMetadata } from './responseMetadata.ts';
 
 export interface RequestOptions<T = unknown> {
   /** 覆盖默认 HTTP 方法 */
@@ -293,6 +299,8 @@ export class HttpClient {
             requestId,
             method,
             attempt: attemptNumber,
+            correlationId: null,
+            rateLimit: { headers: {} },
             cause: originalError,
           });
         }
@@ -320,12 +328,10 @@ export class HttpClient {
             {
               status: response.status,
               statusText: isAbortError ? 'ABORTED' : 'RESPONSE_BODY_READ_ERROR',
-              url,
               headers: redactHeaders(headersToObject(response.headers)),
               isNetworkError: true,
-              requestId,
-              method,
               attempt: attemptNumber,
+              ...this.getResponseMetadata(response, requestId, method, url),
               cause: originalError,
             },
           );
@@ -394,15 +400,13 @@ export class HttpClient {
           throw new SchwabApiError(message, {
             status: response.status,
             statusText: response.statusText,
-            url,
             headers: redactHeaders(headersToObject(response.headers)),
             body: parsedBody,
             retryAfterMs,
             isRateLimited: response.status === 429,
             isAuthError: response.status === 401,
-            requestId,
-            method,
             attempt: attemptNumber,
+            ...this.getResponseMetadata(response, requestId, method, url),
           });
         }
 
@@ -415,7 +419,7 @@ export class HttpClient {
             attempt: attemptNumber,
             ...withDuration(startTime),
           });
-          return this.withMetadata(undefined as T, response, opts);
+          return this.withMetadata(undefined as T, response, opts, requestId, method, url);
         }
 
         const contentType = response.headers.get('content-type') ?? '';
@@ -441,7 +445,7 @@ export class HttpClient {
 
         if (opts.schema) {
           try {
-            return this.withMetadata(opts.schema.parse(result), response, opts);
+            return this.withMetadata(opts.schema.parse(result), response, opts, requestId, method, url);
           } catch (error) {
             if (error instanceof ZodError) {
               this.logger.error('HTTP 响应验证失败', {
@@ -457,7 +461,7 @@ export class HttpClient {
           }
         }
 
-        return this.withMetadata(result as T, response, opts);
+        return this.withMetadata(result as T, response, opts, requestId, method, url);
       }
 
       throw new Error('HTTP request exceeded maximum retry attempts');
@@ -475,9 +479,32 @@ export class HttpClient {
     return response as unknown as HttpResponse<T>;
   }
 
-  private withMetadata<T>(body: T, response: Response, options: RequestOptions<unknown>): T {
+  private withMetadata<T>(
+    body: T,
+    response: Response,
+    options: RequestOptions<unknown>,
+    requestId: string,
+    method: HttpMethod,
+    url: string,
+  ): T {
     if (!options.includeResponseMetadata) return body;
-    return { body, headers: new Headers(response.headers), status: response.status } as T;
+    return {
+      body,
+      headers: new Headers(response.headers),
+      status: response.status,
+      ...this.getResponseMetadata(response, requestId, method, url),
+    } as T;
+  }
+
+  private getResponseMetadata(
+    response: Response,
+    requestId: string,
+    method: HttpMethod,
+    url: string,
+  ): Omit<ResponseMetadata, 'method'> & { method: HttpMethod } {
+    const retryAfterMs = this.parseRetryAfter(response.headers.get('retry-after')) ?? undefined;
+    return createResponseMetadata(response.headers, requestId, method, url, retryAfterMs) as
+      Omit<ResponseMetadata, 'method'> & { method: HttpMethod };
   }
 
   /**
