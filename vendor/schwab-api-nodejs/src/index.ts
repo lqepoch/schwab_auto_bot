@@ -390,6 +390,23 @@ export type {
   ScreenerOptionSubscriptionOptions,
   AccountActivitySubscriptionOptions,
 } from './streamer/marketDataClient.js';
+export {
+  StreamerSnapshotCache,
+  BoundedAsyncQueue,
+  StreamerSnapshotConsumer,
+} from './streamer/streamerSnapshot.js';
+export type {
+  SnapshotFreshness,
+  SnapshotDiscardReason,
+  StreamerSnapshotCacheOptions,
+  StreamerSnapshotEntry,
+  StreamerSnapshotUpdate,
+  SnapshotApplyResult,
+  SnapshotPayloadResult,
+  QueueOverflowPolicy,
+  QueuePushResult,
+  StreamerSnapshotConsumerOptions,
+} from './streamer/streamerSnapshot.js';
 export type { TokenManagerOptions } from './auth/tokenManager.js';
 export type {
   HttpClientConfig,
