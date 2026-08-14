@@ -164,6 +164,24 @@ test('high-level non-equity services serialize their own fields and reject unkno
   assert.equal(calls.filter((call) => call.kind === 'subscribe').length, 3);
 });
 
+test('VIEW wrappers cover documented market services and exclude ACCT_ACTIVITY', async () => {
+  const { client, calls } = makeClient();
+  await client.connect();
+  await client.viewLevelOneOptions({ keys: 'QQQ   260814P00740000', fields: ['0', '2'] });
+  await client.viewOptionsBook({ keys: 'QQQ   260814P00740000', fields: ['0', '1', '2', '3'] });
+  await client.viewChartEquity({ keys: 'QQQ', fields: ['0', '7'] });
+  await client.viewScreenerEquity({ keys: 'INDEX_ALL_VOLUME_0', fields: ['0', '4'] });
+
+  const viewCalls = calls.filter((call) => call.kind === 'subscribe');
+  assert.deepEqual(viewCalls.map((call) => ({ service: call.options.service, command: call.options.command })), [
+    { service: 'LEVELONE_OPTIONS', command: 'VIEW' },
+    { service: 'OPTIONS_BOOK', command: 'VIEW' },
+    { service: 'CHART_EQUITY', command: 'VIEW' },
+    { service: 'SCREENER_EQUITY', command: 'VIEW' },
+  ]);
+  assert.equal(typeof client.viewAccountActivity, 'undefined');
+});
+
 test('book helpers support incremental ADD without falling back to raw streamer.send', async () => {
   const { client, calls } = makeClient();
   await client.connect();
