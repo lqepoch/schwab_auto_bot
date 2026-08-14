@@ -27,6 +27,9 @@ const RATE_LIMIT_HEADERS = new Set([
   'x-ratelimit-limit',
   'x-ratelimit-remaining',
   'x-ratelimit-reset',
+  'x-rate-limit-limit',
+  'x-rate-limit-remaining',
+  'x-rate-limit-reset',
 ]);
 
 const CORRELATION_HEADERS = [
@@ -52,11 +55,21 @@ export function createResponseMetadata(
   });
 
   const retryAfterSeconds = parseNonNegativeNumber(rateLimitHeaders['retry-after']);
-  const limit = parseNonNegativeNumber(rateLimitHeaders['ratelimit-limit'] ?? rateLimitHeaders['x-ratelimit-limit']);
-  const remaining = parseNonNegativeNumber(
-    rateLimitHeaders['ratelimit-remaining'] ?? rateLimitHeaders['x-ratelimit-remaining'],
+  const limit = parseNonNegativeNumber(
+    rateLimitHeaders['ratelimit-limit']
+      ?? rateLimitHeaders['x-ratelimit-limit']
+      ?? rateLimitHeaders['x-rate-limit-limit'],
   );
-  const reset = parseNonNegativeNumber(rateLimitHeaders['ratelimit-reset'] ?? rateLimitHeaders['x-ratelimit-reset']);
+  const remaining = parseNonNegativeNumber(
+    rateLimitHeaders['ratelimit-remaining']
+      ?? rateLimitHeaders['x-ratelimit-remaining']
+      ?? rateLimitHeaders['x-rate-limit-remaining'],
+  );
+  const reset = parseNonNegativeNumber(
+    rateLimitHeaders['ratelimit-reset']
+      ?? rateLimitHeaders['x-ratelimit-reset']
+      ?? rateLimitHeaders['x-rate-limit-reset'],
+  );
   const parsedRetryAfterMs = retryAfterMs ?? (retryAfterSeconds === undefined ? undefined : retryAfterSeconds * 1_000);
 
   return {

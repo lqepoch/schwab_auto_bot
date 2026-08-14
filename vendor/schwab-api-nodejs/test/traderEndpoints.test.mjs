@@ -121,13 +121,19 @@ test('getStreamerInfo supports object and array user preference shapes and valid
 
 test('mutation methods force zero retries and preserve request body/path', async () => {
   const { client, calls } = makeClient({
-    '/accounts/hash/orders': { body: undefined, headers: new Headers({ Location: '/accounts/hash/orders/41' }), status: 201 },
+    '/accounts/hash/orders': {
+      body: undefined,
+      headers: new Headers({ Location: '/accounts/hash/orders/41' }),
+      status: 201,
+      correlationId: 'metadata-correlation',
+    },
     '/accounts/hash/orders/42': (options) => options.method === 'PUT'
       ? { body: undefined, headers: new Headers({ Location: '/accounts/hash/orders/42' }), status: 201 }
       : { body: undefined, headers: new Headers(), status: 204 },
   });
   const order = { orderStrategyType: 'SINGLE', orderType: 'LIMIT', price: 0.9, orderLegCollection: [] };
-  await client.placeOrder('hash', order);
+  const placed = await client.placeOrder('hash', order);
+  assert.equal(placed.correlationId, 'metadata-correlation');
   await client.replaceOrder('hash', 42, order);
   await client.cancelOrder('hash', 42);
   assert.equal(calls.length, 3);

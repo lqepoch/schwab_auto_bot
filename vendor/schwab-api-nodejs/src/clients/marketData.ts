@@ -1,4 +1,5 @@
 import { HttpClient } from '../utils/httpClient.js';
+import type { HttpResponse } from '../utils/httpClient.js';
 import { TokenManager } from '../auth/tokenManager.js';
 import { AuthorizedApiClient } from '../utils/apiClientBase.js';
 import { Logger, createConsoleLogger } from '../utils/logger.js';
@@ -67,6 +68,15 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     fields?: readonly QuoteFieldRoot[] | string;
     indicative?: boolean;
   }): Promise<QuotesResponse> {
+    return (await this.getQuotesWithResponse(params)).body;
+  }
+
+  /** Metadata-preserving read variant for read-only gateway consumers. */
+  async getQuotesWithResponse(params: {
+    symbols: string | readonly string[];
+    fields?: readonly QuoteFieldRoot[] | string;
+    indicative?: boolean;
+  }): Promise<HttpResponse<QuotesResponse>> {
     this.logger.info('调用 getQuotes', { params });
     const symbols = this.normalizeList(params.symbols);
     if (!symbols) throw new Error('getQuotes 需要至少一个 symbols 参数');
@@ -75,7 +85,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
       fields: this.normalizeFields(params.fields),
       indicative: params.indicative,
     });
-    return this.request<QuotesResponse>('/quotes', { query, schema: QuotesResponseSchema });
+    return this.requestWithResponse<QuotesResponse>('/quotes', { query, schema: QuotesResponseSchema });
   }
 
   /**
@@ -157,10 +167,18 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     symbol: string,
     params: { fields?: readonly QuoteFieldRoot[] | string } = {},
   ): Promise<SingleQuoteResponse> {
+    return (await this.getQuoteWithResponse(symbol, params)).body;
+  }
+
+  /** Metadata-preserving read variant for read-only gateway consumers. */
+  async getQuoteWithResponse(
+    symbol: string,
+    params: { fields?: readonly QuoteFieldRoot[] | string } = {},
+  ): Promise<HttpResponse<SingleQuoteResponse>> {
     this.logger.info('调用 getQuote', { symbol, params });
     if (!symbol?.trim()) throw new Error('getQuote 需要提供 symbol');
     const query = this.buildQuery({ fields: this.normalizeFields(params.fields) });
-    return this.request<SingleQuoteResponse>(`/${encodePathIdentifier(symbol, 'symbol')}/quotes`, {
+    return this.requestWithResponse<SingleQuoteResponse>(`/${encodePathIdentifier(symbol, 'symbol')}/quotes`, {
       query,
       schema: SingleQuoteResponseSchema,
     });

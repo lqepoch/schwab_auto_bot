@@ -200,3 +200,29 @@ test('HTTP errors retain safe correlation and rate-limit metadata without sensit
     return error.status === 429 && error.isRateLimited === true;
   });
 });
+
+test('response metadata parses X-Rate-Limit aliases with the documented second hyphen', async () => {
+  const client = new HttpClient({
+    baseUrl: 'https://api.schwabapi.com',
+    logger,
+    fetch: async () => new Response('{"ok":true}', {
+      status: 200,
+      headers: {
+        'X-Rate-Limit-Limit': '60',
+        'X-Rate-Limit-Remaining': '59',
+        'X-Rate-Limit-Reset': '1786689600',
+      },
+    }),
+  });
+  const result = await client.requestWithResponse('/quotes');
+  assert.deepEqual(result.rateLimit, {
+    headers: {
+      'x-rate-limit-limit': '60',
+      'x-rate-limit-remaining': '59',
+      'x-rate-limit-reset': '1786689600',
+    },
+    limit: 60,
+    remaining: 59,
+    reset: 1786689600,
+  });
+});

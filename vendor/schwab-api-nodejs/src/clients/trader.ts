@@ -30,7 +30,7 @@ import {
   PreviewOrderResponse,
   MutationResult,
 } from '../types/trader.js';
-import type { RequestOptions } from '../utils/httpClient.js';
+import type { HttpResponse, RequestOptions } from '../utils/httpClient.js';
 
 /**
  * Mutation requests may only override the physical request timeout. Automatic
@@ -77,9 +77,14 @@ export class TraderApiClient extends AuthorizedApiClient {
 
   /** `GET /accounts`：查询关联账户余额与持仓。 */
   async getAccounts(params: AccountsQuery = {}): Promise<AccountResponse[]> {
+    return (await this.getAccountsWithResponse(params)).body;
+  }
+
+  /** Metadata-preserving read variant for read-only gateway consumers. */
+  async getAccountsWithResponse(params: AccountsQuery = {}): Promise<HttpResponse<AccountResponse[]>> {
     this.logger.info('调用 getAccounts', { params });
     const query = this.buildQuery({ fields: params.fields });
-    return this.request<AccountResponse[]>('/accounts', {
+    return this.requestWithResponse<AccountResponse[]>('/accounts', {
       query,
       schema: AccountsResponseSchema,
     });
@@ -87,9 +92,17 @@ export class TraderApiClient extends AuthorizedApiClient {
 
   /** `GET /accounts/{accountNumber}`：查询单个账户详情。 */
   async getAccount(accountNumber: string, params: AccountsQuery = {}): Promise<AccountResponse> {
+    return (await this.getAccountWithResponse(accountNumber, params)).body;
+  }
+
+  /** Metadata-preserving read variant for read-only gateway consumers. */
+  async getAccountWithResponse(
+    accountNumber: string,
+    params: AccountsQuery = {},
+  ): Promise<HttpResponse<AccountResponse>> {
     this.logger.info('调用 getAccount', { accountNumber, params });
     const query = this.buildQuery({ fields: params.fields });
-    return this.request<AccountResponse>(`/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}`, {
+    return this.requestWithResponse<AccountResponse>(`/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}`, {
       query,
       schema: AccountResponseSchema,
     });
@@ -97,8 +110,13 @@ export class TraderApiClient extends AuthorizedApiClient {
 
   /** `GET /accounts/{accountNumber}/orders`：获取指定账户的一段时间内订单列表。 */
   async getOrders(accountNumber: string, params: OrdersQuery): Promise<Order[]> {
+    return (await this.getOrdersWithResponse(accountNumber, params)).body;
+  }
+
+  /** Metadata-preserving read variant for read-only gateway consumers. */
+  async getOrdersWithResponse(accountNumber: string, params: OrdersQuery): Promise<HttpResponse<Order[]>> {
     this.logger.info('调用 getOrders', { accountNumber, params });
-    return this.request<Order[]>(`/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/orders`, {
+    return this.requestWithResponse<Order[]>(`/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/orders`, {
       query: this.buildQuery(params),
       schema: OrdersResponseSchema,
     });
@@ -127,8 +145,13 @@ export class TraderApiClient extends AuthorizedApiClient {
 
   /** `GET /accounts/{accountNumber}/orders/{orderId}`：查询订单详情。 */
   async getOrder(accountNumber: string, orderId: number | string): Promise<Order> {
+    return (await this.getOrderWithResponse(accountNumber, orderId)).body;
+  }
+
+  /** Metadata-preserving read variant for read-only gateway consumers. */
+  async getOrderWithResponse(accountNumber: string, orderId: number | string): Promise<HttpResponse<Order>> {
     this.logger.info('调用 getOrder', { accountNumber, orderId });
-    return this.request<Order>(
+    return this.requestWithResponse<Order>(
       `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/orders/${encodeNumericIdentifier(orderId, 'orderId')}`,
       {
       schema: OrderSchema,
@@ -295,7 +318,7 @@ export class TraderApiClient extends AuthorizedApiClient {
       const response = await this.requestWithResponse<undefined>(path, requestOptions);
       const location = response.headers.get('location')?.trim() || null;
       const orderId = parseOrderIdFromLocation(location);
-      const correlationId = response.headers.get('Schwab-Client-CorrelID')?.trim() || null;
+      const correlationId = response.correlationId ?? (response.headers.get('Schwab-Client-CorrelID')?.trim() || null);
       if (operation !== 'CANCEL_ORDER' && (!location || !orderId)) {
         throw new UnknownOutcomeError(
           'Schwab accepted the order mutation without a valid Location header',
@@ -332,7 +355,7 @@ export class TraderApiClient extends AuthorizedApiClient {
             path,
             status: error.status || undefined,
             requestId: error.requestId,
-            correlationId: correlationIdFromHeaders(error.headers),
+            correlationId: error.correlationId ?? correlationIdFromHeaders(error.headers),
             location: headerFromHeaders(error.headers, 'location'),
             cause: error,
           },
