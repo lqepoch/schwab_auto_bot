@@ -24,9 +24,23 @@ import {
   PeriodType,
   FrequencyType,
 } from '../types/marketData.js';
+import {
+  InstrumentDetailSchema,
+  InstrumentsSearchResponseSchema,
+  MarketHoursResponseSchema,
+  MoversResponseSchema,
+  OptionChainResponseSchema,
+  OptionExpirationChainResponseSchema,
+  PriceHistoryResponseSchema,
+  QuotesResponseSchema,
+  SingleQuoteResponseSchema,
+} from '../validation/marketDataSchemas.js';
 
 /**
  * Market Data REST API 封装，对应 https://api.schwabapi.com/marketdata/v1 下的全部端点。
+ *
+ * 所有 REST 响应都会在传出 SDK 前执行宽容式 runtime schema validation：
+ * 保留 Schwab 新增的未知字段，同时阻止错误的顶层结构、无效数值类型和缺失的稳定必需字段进入业务层。
  */
 export class MarketDataApiClient extends AuthorizedApiClient {
   constructor(http: HttpClient, tokens: TokenManager, logger?: Logger) {
@@ -34,7 +48,6 @@ export class MarketDataApiClient extends AuthorizedApiClient {
   }
 
   private normalizeList(value?: string | readonly string[]): string | undefined {
-    // 处理数组参数，确保最终使用逗号分隔的字符串
     if (!value) return undefined;
     if (typeof value === 'string') return value;
     if (Array.isArray(value)) return value.join(',');
@@ -43,21 +56,12 @@ export class MarketDataApiClient extends AuthorizedApiClient {
 
   private normalizeFields(value?: readonly QuoteFieldRoot[] | string): string | undefined {
     if (!value) return undefined;
-    if (Array.isArray(value)) {
-      return value.join(',');
-    }
-    if (typeof value === 'string') {
-      return value;
-    }
+    if (Array.isArray(value)) return value.join(',');
+    if (typeof value === 'string') return value;
     return undefined;
   }
 
-  /**
-   * `GET /quotes`：批量获取行情。
-   * @param params.symbols 可传单个字符串或字符串数组，推荐使用数组便于维护。
-   * @param params.fields 指定返回字段，如 `['quote','fundamental']`。
-   * @param params.indicative ETF 需要时传 `true` 以返回 `.IV` 指数值。
-   */
+  /** `GET /quotes`：批量获取行情。 */
   async getQuotes(params: {
     symbols: string | readonly string[];
     fields?: readonly QuoteFieldRoot[] | string;
@@ -65,23 +69,18 @@ export class MarketDataApiClient extends AuthorizedApiClient {
   }): Promise<QuotesResponse> {
     this.logger.info('调用 getQuotes', { params });
     const symbols = this.normalizeList(params.symbols);
-    if (!symbols) {
-      throw new Error('getQuotes 需要至少一个 symbols 参数');
-    }
+    if (!symbols) throw new Error('getQuotes 需要至少一个 symbols 参数');
     const query = this.buildQuery({
       symbols,
       fields: this.normalizeFields(params.fields),
       indicative: params.indicative,
     });
-    return this.request<QuotesResponse>('/quotes', { query });
+    return this.request<QuotesResponse>('/quotes', { query, schema: QuotesResponseSchema });
   }
 
   /**
    * 获取单个期权合约的标准化二级市场行情。
-   *
-   * 该方法刻意使用 Schwab 的批量 `/quotes` 端点，因为该端点的官方示例明确包含
-   * OPTION 的 bid/ask/mark/Greeks。返回值会补充 mid、spread 与 quoteAgeMs，便于
-   * 调用方进行成交质量和陈旧行情判断。
+   * 使用 `/quotes` 获取 OPTION bid/ask/mark/Greeks，并补充 mid/spread/quoteAgeMs。
    */
   async getOptionQuote(
     symbol: string,
@@ -120,12 +119,10 @@ export class MarketDataApiClient extends AuthorizedApiClient {
   }
 
   /**
-   * 基于两条独立期权腿的报价推导垂直价差参考 bid/ask。
-   *
-   * `derivedBid = buyLeg.bid - sellLeg.ask`
-   * `derivedAsk = buyLeg.ask - sellLeg.bid`
-   *
-   * 该结果只代表 leg-derived synthetic market，不代表交易所原生 complex order book 报价。
+   * 基于两条独立期权腿的 NBBO 推导垂直价差参考市场。
+   * derivedBid = buyLeg.bid - sellLeg.ask
+   * derivedAsk = buyLeg.ask - sellLeg.bid
+   * 该结果属于 leg-derived synthetic market，不代表交易所原生 complex-order-book 报价。
    */
   async getVerticalOptionQuote(
     buySymbol: string,
@@ -154,11 +151,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
 
   /**
    * `GET /{symbol}/quotes`：单个标的行情详情。
-   * @param symbol 证券代码，支持股票、指数、期权等。
-   * @param params.fields 控制返回字段集合。
-   *
-   * 注意：Schwab 当前文档中的该端点示例结构与 `/quotes` 的 NBBO 结构并不一致；
-   * 需要标准化期权 bid/ask 时使用 `getOptionQuote()`。
+   * Schwab 文档中的该端点示例结构与 `/quotes` NBBO 结构存在差异；标准化期权行情使用 `getOptionQuote()`。
    */
   async getQuote(
     symbol: string,
@@ -167,15 +160,13 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     this.logger.info('调用 getQuote', { symbol, params });
     if (!symbol?.trim()) throw new Error('getQuote 需要提供 symbol');
     const query = this.buildQuery({ fields: this.normalizeFields(params.fields) });
-    return this.request<SingleQuoteResponse>(`/${encodeURIComponent(symbol)}/quotes`, { query });
+    return this.request<SingleQuoteResponse>(`/${encodeURIComponent(symbol)}/quotes`, {
+      query,
+      schema: SingleQuoteResponseSchema,
+    });
   }
 
-  /**
-   * `GET /chains`：期权链数据。
-   * 常用参数：
-   * - `contractType` 取值 `CALL`/`PUT`/`ALL`
-   * - `strategy` 结合 `strike`、`range` 控制返回行权价。
-   */
+  /** `GET /chains`：期权链数据。 */
   async getOptionChains(params: {
     symbol: string;
     contractType?: OptionContractType;
@@ -219,12 +210,10 @@ export class MarketDataApiClient extends AuthorizedApiClient {
       optionType: params.optionType,
       entitlement: params.entitlement,
     });
-    return this.request<OptionChainResponse>('/chains', { query });
+    return this.request<OptionChainResponse>('/chains', { query, schema: OptionChainResponseSchema });
   }
 
-  /**
-   * `GET /expirationchain`：返回标的全部期权到期日列表。
-   */
+  /** `GET /expirationchain`：返回标的全部期权到期日列表。 */
   async getOptionExpirationChain(params: {
     symbol: string;
     contractType?: OptionContractType;
@@ -239,13 +228,13 @@ export class MarketDataApiClient extends AuthorizedApiClient {
       expMonth: params.expMonth,
       optionType: params.optionType,
     });
-    return this.request<OptionExpirationChainResponse>('/expirationchain', { query });
+    return this.request<OptionExpirationChainResponse>('/expirationchain', {
+      query,
+      schema: OptionExpirationChainResponseSchema,
+    });
   }
 
-  /**
-   * `GET /pricehistory`：获取历史 OHLCV 数据。
-   * 可以通过 `periodType/period` 或 `startDate/endDate` 控制时间范围。
-   */
+  /** `GET /pricehistory`：获取历史 OHLCV 数据。 */
   async getPriceHistory(params: {
     symbol: string;
     periodType?: PeriodType;
@@ -270,13 +259,10 @@ export class MarketDataApiClient extends AuthorizedApiClient {
       needExtendedHoursData: params.needExtendedHoursData,
       needPreviousClose: params.needPreviousClose,
     });
-    return this.request<PriceHistoryResponse>('/pricehistory', { query });
+    return this.request<PriceHistoryResponse>('/pricehistory', { query, schema: PriceHistoryResponseSchema });
   }
 
-  /**
-   * `GET /movers/{symbol}`：拉取涨跌幅榜。
-   * @param symbolId 指数或筛选器 ID，如 `$DJI`、`$COMPX`。
-   */
+  /** `GET /movers/{symbol}`：拉取涨跌幅榜。 */
   async getMovers(
     symbolId: string,
     params: { sort?: 'VOLUME' | 'TRADES' | 'PERCENT_CHANGE_UP' | 'PERCENT_CHANGE_DOWN'; frequency?: 0 | 1 | 5 | 10 | 30 | 60 } = {},
@@ -284,38 +270,32 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     this.logger.info('调用 getMovers', { symbolId, params });
     if (!symbolId?.trim()) throw new Error('getMovers 需要提供 symbolId');
     const query = this.buildQuery({ sort: params.sort, frequency: params.frequency });
-    return this.request<MoversResponse>(`/movers/${encodeURIComponent(symbolId)}`, { query });
+    return this.request<MoversResponse>(`/movers/${encodeURIComponent(symbolId)}`, {
+      query,
+      schema: MoversResponseSchema,
+    });
   }
 
-  /**
-   * `GET /markets`：批量查询各市场在指定日期的开闭市时间。
-   * @param params.markets 传入市场标识数组，如 `['EQUITY','OPTION']`。
-   */
+  /** `GET /markets`：批量查询市场开闭市时间。 */
   async getMarkets(params: { markets: readonly string[]; date?: string }): Promise<MarketHoursResponse> {
     this.logger.info('调用 getMarkets', { params });
-    if (!params.markets?.length) {
-      throw new Error('getMarkets 至少需要传入一个 market');
-    }
-    const query = this.buildQuery({
-      markets: params.markets.join(','),
-      date: params.date,
-    });
-    return this.request<MarketHoursResponse>('/markets', { query });
+    if (!params.markets?.length) throw new Error('getMarkets 至少需要传入一个 market');
+    const query = this.buildQuery({ markets: params.markets.join(','), date: params.date });
+    return this.request<MarketHoursResponse>('/markets', { query, schema: MarketHoursResponseSchema });
   }
 
-  /**
-   * `GET /markets/{market}`：查询单个市场的开闭市时间。
-   */
+  /** `GET /markets/{market}`：查询单个市场开闭市时间。 */
   async getMarketHours(marketId: string, params: { date?: string } = {}): Promise<MarketHoursResponse> {
     this.logger.info('调用 getMarketHours', { marketId, params });
     if (!marketId?.trim()) throw new Error('getMarketHours 需要提供 marketId');
     const query = this.buildQuery({ date: params.date });
-    return this.request<MarketHoursResponse>(`/markets/${encodeURIComponent(marketId)}`, { query });
+    return this.request<MarketHoursResponse>(`/markets/${encodeURIComponent(marketId)}`, {
+      query,
+      schema: MarketHoursResponseSchema,
+    });
   }
 
-  /**
-   * `GET /instruments`：根据 symbol + projection 检索基础信息或基本面数据。
-   */
+  /** `GET /instruments`：根据 symbol + projection 检索基础信息或基本面数据。 */
   async searchInstruments(
     params: { symbol: string | readonly string[]; projection: InstrumentProjection },
   ): Promise<InstrumentsSearchResponse> {
@@ -324,16 +304,19 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     if (!symbol) throw new Error('searchInstruments 需要 symbol 参数');
     if (!params.projection) throw new Error('searchInstruments 需要 projection 参数');
     const query = this.buildQuery({ symbol, projection: params.projection });
-    return this.request<InstrumentsSearchResponse>('/instruments', { query });
+    return this.request<InstrumentsSearchResponse>('/instruments', {
+      query,
+      schema: InstrumentsSearchResponseSchema,
+    });
   }
 
-  /**
-   * `GET /instruments/{cusip}`：通过 CUSIP 查询单个标的基本信息。
-   */
+  /** `GET /instruments/{cusip}`：通过 CUSIP 查询单个标的基本信息。 */
   async getInstrumentByCusip(cusipId: string): Promise<InstrumentDetail> {
     this.logger.info('调用 getInstrumentByCusip', { cusipId });
     if (!cusipId?.trim()) throw new Error('getInstrumentByCusip 需要提供 CUSIP');
-    return this.request<InstrumentDetail>(`/instruments/${encodeURIComponent(cusipId)}`);
+    return this.request<InstrumentDetail>(`/instruments/${encodeURIComponent(cusipId)}`, {
+      schema: InstrumentDetailSchema,
+    });
   }
 
   private findQuoteItem(response: QuotesResponse, symbol: string): QuoteItem | undefined {
