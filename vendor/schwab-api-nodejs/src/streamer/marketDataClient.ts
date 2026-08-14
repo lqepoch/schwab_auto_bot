@@ -4,6 +4,12 @@ import { StreamerClient } from './streamerClient.js';
 import type { StreamerInfo } from '../types/trader.js';
 import type { LevelOneEquityFieldId, LevelOneEquityFieldSelection } from '../types/levelOneFields.js';
 import { serializeLevelOneEquityFields } from '../types/levelOneFields.js';
+import {
+  serializeStreamerServiceFields,
+  type ServiceFieldId,
+  type ServiceFieldSelection,
+  type StreamerService,
+} from '../types/streamerContracts.js';
 import { Logger, createConsoleLogger } from '../utils/logger.js';
 
 type SubscriptionKeysInput = string | ReadonlyArray<string>;
@@ -20,19 +26,37 @@ export type LevelOneEquitiesSubscriptionOptions = LevelOneSubscriptionOptions<Le
   fields?: LevelOneEquityFieldSelection;
 };
 
-export interface ChartSubscriptionOptions {
+export type LevelOneOptionsSubscriptionOptions = LevelOneSubscriptionOptions<ServiceFieldId<'LEVELONE_OPTIONS'>>;
+export type LevelOneFuturesSubscriptionOptions = LevelOneSubscriptionOptions<ServiceFieldId<'LEVELONE_FUTURES'>>;
+export type LevelOneFuturesOptionsSubscriptionOptions =
+  LevelOneSubscriptionOptions<ServiceFieldId<'LEVELONE_FUTURES_OPTIONS'>>;
+export type LevelOneForexSubscriptionOptions = LevelOneSubscriptionOptions<ServiceFieldId<'LEVELONE_FOREX'>>;
+export type BookSubscriptionOptions<S extends 'NYSE_BOOK' | 'NASDAQ_BOOK' | 'OPTIONS_BOOK'> =
+  LevelOneSubscriptionOptions<ServiceFieldId<S>>;
+
+export interface ChartSubscriptionOptions<TField extends string = string> {
   keys: SubscriptionKeysInput;
   frequency?: string;
   period?: string;
+  fields?: StreamerFieldSelection<TField>;
 }
 
-export interface ScreenerSubscriptionOptions {
+export interface ScreenerSubscriptionOptions<TField extends string = string> {
   keys?: SubscriptionKeysInput;
+  fields?: StreamerFieldSelection<TField>;
 }
 
 export interface AccountActivitySubscriptionOptions {
   keys?: SubscriptionKeysInput;
+  fields?: ServiceFieldSelection<'ACCT_ACTIVITY'>;
 }
+
+export type ChartEquitySubscriptionOptions = ChartSubscriptionOptions<ServiceFieldId<'CHART_EQUITY'>>;
+export type ChartFuturesSubscriptionOptions = ChartSubscriptionOptions<ServiceFieldId<'CHART_FUTURES'>>;
+export type ScreenerEquitySubscriptionOptions =
+  ScreenerSubscriptionOptions<ServiceFieldId<'SCREENER_EQUITY'>>;
+export type ScreenerOptionSubscriptionOptions =
+  ScreenerSubscriptionOptions<ServiceFieldId<'SCREENER_OPTION'>>;
 
 export interface UnsubscribeKeysOptions {
   keys: SubscriptionKeysInput;
@@ -114,11 +138,11 @@ export class MarketDataStreamClient {
     return this.unsubscribeByKeys('LEVELONE_EQUITIES', options, 'LevelOneEquities');
   }
 
-  async subscribeLevelOneOptions(options: LevelOneSubscriptionOptions): Promise<void> {
+  async subscribeLevelOneOptions(options: LevelOneOptionsSubscriptionOptions): Promise<void> {
     return this.subscribeLevelOne('LEVELONE_OPTIONS', options, 'LevelOneOptions');
   }
 
-  async addLevelOneOptions(options: LevelOneSubscriptionOptions): Promise<void> {
+  async addLevelOneOptions(options: LevelOneOptionsSubscriptionOptions): Promise<void> {
     return this.subscribeLevelOne('LEVELONE_OPTIONS', options, 'LevelOneOptions', 'ADD');
   }
 
@@ -126,11 +150,11 @@ export class MarketDataStreamClient {
     return this.unsubscribeByKeys('LEVELONE_OPTIONS', options, 'LevelOneOptions');
   }
 
-  async subscribeLevelOneFutures(options: LevelOneSubscriptionOptions): Promise<void> {
+  async subscribeLevelOneFutures(options: LevelOneFuturesSubscriptionOptions): Promise<void> {
     return this.subscribeLevelOne('LEVELONE_FUTURES', options, 'LevelOneFutures');
   }
 
-  async addLevelOneFutures(options: LevelOneSubscriptionOptions): Promise<void> {
+  async addLevelOneFutures(options: LevelOneFuturesSubscriptionOptions): Promise<void> {
     return this.subscribeLevelOne('LEVELONE_FUTURES', options, 'LevelOneFutures', 'ADD');
   }
 
@@ -138,11 +162,11 @@ export class MarketDataStreamClient {
     return this.unsubscribeByKeys('LEVELONE_FUTURES', options, 'LevelOneFutures');
   }
 
-  async subscribeLevelOneFuturesOptions(options: LevelOneSubscriptionOptions): Promise<void> {
+  async subscribeLevelOneFuturesOptions(options: LevelOneFuturesOptionsSubscriptionOptions): Promise<void> {
     return this.subscribeLevelOne('LEVELONE_FUTURES_OPTIONS', options, 'LevelOneFuturesOptions');
   }
 
-  async addLevelOneFuturesOptions(options: LevelOneSubscriptionOptions): Promise<void> {
+  async addLevelOneFuturesOptions(options: LevelOneFuturesOptionsSubscriptionOptions): Promise<void> {
     return this.subscribeLevelOne('LEVELONE_FUTURES_OPTIONS', options, 'LevelOneFuturesOptions', 'ADD');
   }
 
@@ -150,11 +174,11 @@ export class MarketDataStreamClient {
     return this.unsubscribeByKeys('LEVELONE_FUTURES_OPTIONS', options, 'LevelOneFuturesOptions');
   }
 
-  async subscribeLevelOneForex(options: LevelOneSubscriptionOptions): Promise<void> {
+  async subscribeLevelOneForex(options: LevelOneForexSubscriptionOptions): Promise<void> {
     return this.subscribeLevelOne('LEVELONE_FOREX', options, 'LevelOneForex');
   }
 
-  async addLevelOneForex(options: LevelOneSubscriptionOptions): Promise<void> {
+  async addLevelOneForex(options: LevelOneForexSubscriptionOptions): Promise<void> {
     return this.subscribeLevelOne('LEVELONE_FOREX', options, 'LevelOneForex', 'ADD');
   }
 
@@ -162,11 +186,11 @@ export class MarketDataStreamClient {
     return this.unsubscribeByKeys('LEVELONE_FOREX', options, 'LevelOneForex');
   }
 
-  async subscribeNyseBook(options: LevelOneSubscriptionOptions): Promise<void> {
+  async subscribeNyseBook(options: BookSubscriptionOptions<'NYSE_BOOK'>): Promise<void> {
     return this.subscribeLevelOne('NYSE_BOOK', options, 'NYSE_BOOK');
   }
 
-  async addNyseBook(options: LevelOneSubscriptionOptions): Promise<void> {
+  async addNyseBook(options: BookSubscriptionOptions<'NYSE_BOOK'>): Promise<void> {
     return this.subscribeLevelOne('NYSE_BOOK', options, 'NYSE_BOOK', 'ADD');
   }
 
@@ -174,11 +198,11 @@ export class MarketDataStreamClient {
     return this.unsubscribeByKeys('NYSE_BOOK', options, 'NYSE_BOOK');
   }
 
-  async subscribeNasdaqBook(options: LevelOneSubscriptionOptions): Promise<void> {
+  async subscribeNasdaqBook(options: BookSubscriptionOptions<'NASDAQ_BOOK'>): Promise<void> {
     return this.subscribeLevelOne('NASDAQ_BOOK', options, 'NASDAQ_BOOK');
   }
 
-  async addNasdaqBook(options: LevelOneSubscriptionOptions): Promise<void> {
+  async addNasdaqBook(options: BookSubscriptionOptions<'NASDAQ_BOOK'>): Promise<void> {
     return this.subscribeLevelOne('NASDAQ_BOOK', options, 'NASDAQ_BOOK', 'ADD');
   }
 
@@ -186,11 +210,11 @@ export class MarketDataStreamClient {
     return this.unsubscribeByKeys('NASDAQ_BOOK', options, 'NASDAQ_BOOK');
   }
 
-  async subscribeOptionsBook(options: LevelOneSubscriptionOptions): Promise<void> {
+  async subscribeOptionsBook(options: BookSubscriptionOptions<'OPTIONS_BOOK'>): Promise<void> {
     return this.subscribeLevelOne('OPTIONS_BOOK', options, 'OPTIONS_BOOK');
   }
 
-  async addOptionsBook(options: LevelOneSubscriptionOptions): Promise<void> {
+  async addOptionsBook(options: BookSubscriptionOptions<'OPTIONS_BOOK'>): Promise<void> {
     return this.subscribeLevelOne('OPTIONS_BOOK', options, 'OPTIONS_BOOK', 'ADD');
   }
 
@@ -198,7 +222,7 @@ export class MarketDataStreamClient {
     return this.unsubscribeByKeys('OPTIONS_BOOK', options, 'OPTIONS_BOOK');
   }
 
-  async subscribeChartEquity(options: ChartSubscriptionOptions): Promise<void> {
+  async subscribeChartEquity(options: ChartEquitySubscriptionOptions): Promise<void> {
     return this.subscribeChart('CHART_EQUITY', options, 'CHART_EQUITY');
   }
 
@@ -206,7 +230,7 @@ export class MarketDataStreamClient {
     return this.unsubscribeByKeys('CHART_EQUITY', options, 'CHART_EQUITY');
   }
 
-  async subscribeChartFutures(options: ChartSubscriptionOptions): Promise<void> {
+  async subscribeChartFutures(options: ChartFuturesSubscriptionOptions): Promise<void> {
     return this.subscribeChart('CHART_FUTURES', options, 'CHART_FUTURES');
   }
 
@@ -214,11 +238,11 @@ export class MarketDataStreamClient {
     return this.unsubscribeByKeys('CHART_FUTURES', options, 'CHART_FUTURES');
   }
 
-  async subscribeScreenerEquity(options: ScreenerSubscriptionOptions = {}): Promise<void> {
+  async subscribeScreenerEquity(options: ScreenerEquitySubscriptionOptions = {}): Promise<void> {
     this.assertConnected();
     return this.streamer.subscribe({
       service: 'SCREENER_EQUITY',
-      parameters: this.parametersForOptionalKeys(options.keys),
+      parameters: this.parametersForFields('SCREENER_EQUITY', options.keys, options.fields),
     });
   }
 
@@ -226,11 +250,11 @@ export class MarketDataStreamClient {
     return this.unsubscribeOptionalKeys('SCREENER_EQUITY', options.keys);
   }
 
-  async subscribeScreenerOption(options: ScreenerSubscriptionOptions = {}): Promise<void> {
+  async subscribeScreenerOption(options: ScreenerOptionSubscriptionOptions = {}): Promise<void> {
     this.assertConnected();
     return this.streamer.subscribe({
       service: 'SCREENER_OPTION',
-      parameters: this.parametersForOptionalKeys(options.keys),
+      parameters: this.parametersForFields('SCREENER_OPTION', options.keys, options.fields),
     });
   }
 
@@ -242,7 +266,7 @@ export class MarketDataStreamClient {
     this.assertConnected();
     return this.streamer.subscribe({
       service: 'ACCT_ACTIVITY',
-      parameters: this.parametersForOptionalKeys(options.keys),
+      parameters: this.parametersForFields('ACCT_ACTIVITY', options.keys, options.fields),
     });
   }
 
@@ -258,14 +282,16 @@ export class MarketDataStreamClient {
   }
 
   private subscribeLevelOne(
-    service: string,
+    service: StreamerService | 'LEVELONE_EQUITIES',
     options: LevelOneSubscriptionOptions,
     errorLabel: string,
     command: 'SUBS' | 'ADD' = 'SUBS',
   ): Promise<void> {
     this.assertConnected();
     const keys = this.requireKeys(options.keys, errorLabel);
-    const fields = this.serializeFields(options.fields);
+    const fields = service === 'LEVELONE_EQUITIES'
+      ? this.serializeFields(options.fields)
+      : serializeStreamerServiceFields(service, options.fields as ServiceFieldSelection<typeof service>);
     this.logger.info('下发 Streamer 订阅命令', { service, command, keys, fields });
     return this.streamer.subscribe({
       service,
@@ -277,15 +303,21 @@ export class MarketDataStreamClient {
     });
   }
 
-  private subscribeChart(service: string, options: ChartSubscriptionOptions, errorLabel: string): Promise<void> {
+  private subscribeChart(
+    service: 'CHART_EQUITY' | 'CHART_FUTURES',
+    options: ChartSubscriptionOptions,
+    errorLabel: string,
+  ): Promise<void> {
     this.assertConnected();
     const keys = this.requireKeys(options.keys, errorLabel);
+    const fields = serializeStreamerServiceFields(service, options.fields as ServiceFieldSelection<typeof service>);
     return this.streamer.subscribe({
       service,
       parameters: {
         keys,
         ...(options.frequency ? { frequency: options.frequency.trim() } : {}),
         ...(options.period ? { period: options.period.trim() } : {}),
+        ...(fields ? { fields } : {}),
       },
     });
   }
@@ -311,6 +343,20 @@ export class MarketDataStreamClient {
   private parametersForOptionalKeys(keys?: SubscriptionKeysInput): { keys: string } | undefined {
     const sanitized = this.sanitizeKeys(keys);
     return sanitized ? { keys: sanitized } : undefined;
+  }
+
+  private parametersForFields<S extends StreamerService>(
+    service: S,
+    keys?: SubscriptionKeysInput,
+    fields?: ServiceFieldSelection<S>,
+  ): Record<string, string> | undefined {
+    const sanitizedKeys = this.sanitizeKeys(keys);
+    const serializedFields = serializeStreamerServiceFields(service, fields);
+    if (!sanitizedKeys && !serializedFields) return undefined;
+    return {
+      ...(sanitizedKeys ? { keys: sanitizedKeys } : {}),
+      ...(serializedFields ? { fields: serializedFields } : {}),
+    };
   }
 
   private requireKeys(keys: SubscriptionKeysInput | undefined, label: string): string {

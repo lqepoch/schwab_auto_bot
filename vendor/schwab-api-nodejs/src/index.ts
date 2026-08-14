@@ -352,6 +352,44 @@ export type {
 };
 export { TokenManager, TokenStore, HttpClient, TraderApiClient, StreamerClient, MarketDataApiClient };
 export { MarketDataStreamClient };
+export {
+  LEVELONE_OPTIONS_FIELDS,
+  LEVELONE_FUTURES_FIELDS,
+  LEVELONE_FUTURES_OPTIONS_FIELDS,
+  LEVELONE_FOREX_FIELDS,
+  BOOK_FIELDS,
+  CHART_EQUITY_SERVICE_FIELDS,
+  CHART_FUTURES_FIELDS,
+  SCREENER_FIELDS,
+  ACCT_ACTIVITY_FIELDS,
+  STREAMER_SERVICE_CONTRACTS,
+  serializeStreamerServiceFields,
+  decodeStreamerServicePayload,
+  decodeStreamerServiceRow,
+} from './types/streamerContracts.js';
+export type {
+  StreamerFieldValueType,
+  StreamerDeliveryMode,
+  StreamerService,
+  ServiceFieldId,
+  ServiceFieldSelection,
+  StreamerServiceRow,
+  TypedStreamerDataPayload,
+} from './types/streamerContracts.js';
+export type {
+  LevelOneOptionsSubscriptionOptions,
+  LevelOneFuturesSubscriptionOptions,
+  LevelOneFuturesOptionsSubscriptionOptions,
+  LevelOneForexSubscriptionOptions,
+  BookSubscriptionOptions,
+  ChartSubscriptionOptions,
+  ChartEquitySubscriptionOptions,
+  ChartFuturesSubscriptionOptions,
+  ScreenerSubscriptionOptions,
+  ScreenerEquitySubscriptionOptions,
+  ScreenerOptionSubscriptionOptions,
+  AccountActivitySubscriptionOptions,
+} from './streamer/marketDataClient.js';
 export type { TokenManagerOptions } from './auth/tokenManager.js';
 export type {
   HttpClientConfig,
