@@ -29,6 +29,16 @@ export type OrderType =
   | 'STOP_MARKET'
   | 'MARKET_ON_OPEN'
   | 'QUOTE'
+  | 'NET_DEBIT'
+  | 'NET_CREDIT'
+  | 'NET_ZERO'
+  | 'UNKNOWN'
+  | (string & {});
+
+export type OrderStrategyType =
+  | 'SINGLE'
+  | 'TRIGGER'
+  | 'OCO'
   | 'UNKNOWN'
   | (string & {});
 
@@ -286,7 +296,7 @@ export interface Order {
   orderLegCollection?: OrderLeg[];
   activationPrice?: number;
   specialInstruction?: string;
-  orderStrategyType?: string;
+  orderStrategyType?: OrderStrategyType;
   orderId?: number;
   cancelable?: boolean;
   editable?: boolean;
@@ -398,7 +408,7 @@ export interface MutationResult<T = undefined> {
 export type OrderMutationResult<T = undefined> = MutationResult<T>;
 
 export interface OrderPreviewRequest {
-  orderStrategyType: string;
+  orderStrategyType: OrderStrategyType;
   session?: Session;
   duration?: Duration;
   orderType?: OrderType;
