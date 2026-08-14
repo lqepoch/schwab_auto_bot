@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { Order, PreviewOrderResponse } from '../types/trader.js';
 
 const finiteNumber = z.number().finite();
 const finiteNumberOptional = finiteNumber.optional();
@@ -86,7 +87,11 @@ const OrderActivitySchema = z.object({
   executionLegs: z.array(ExecutionLegSchema).optional(),
 }).passthrough();
 
-export const OrderSchema: z.ZodTypeAny = z.lazy(() => z.object({
+/**
+ * Schwab order responses are recursive through childOrderStrategies. Keep the
+ * runtime object open to additive broker fields while exposing the SDK's Order type.
+ */
+export const OrderSchema: z.ZodType<Order> = z.lazy(() => z.object({
   session: z.string().optional(),
   duration: z.string().optional(),
   orderType: z.string().optional(),
@@ -109,9 +114,9 @@ export const OrderSchema: z.ZodTypeAny = z.lazy(() => z.object({
   orderActivityCollection: z.array(OrderActivitySchema).optional(),
   childOrderStrategies: z.array(OrderSchema).optional(),
   statusDescription: z.string().optional(),
-}).passthrough());
+}).passthrough()) as unknown as z.ZodType<Order>;
 
-export const OrdersResponseSchema = z.array(OrderSchema);
+export const OrdersResponseSchema: z.ZodType<Order[]> = z.array(OrderSchema);
 
 export const TransactionSchema = z.object({
   activityId: finiteNumberOptional,
@@ -156,8 +161,10 @@ export const UserPreferencesResponseSchema = z.union([
   z.array(UserPreferenceSchema),
 ]);
 
-export const PreviewOrderResponseSchema = z.object({
+const PreviewOrderResponseBaseSchema = z.object({
   orderStrategies: z.array(OrderSchema).optional(),
   projectedBalances: BalanceSchema.optional(),
   validations: z.unknown().optional(),
 }).passthrough();
+
+export const PreviewOrderResponseSchema = PreviewOrderResponseBaseSchema as unknown as z.ZodType<PreviewOrderResponse>;
