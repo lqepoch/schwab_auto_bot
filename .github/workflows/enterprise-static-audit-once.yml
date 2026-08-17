@@ -27,25 +27,54 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Static convergence inventory
-        shell: bash
         run: |
           set -euo pipefail
-          echo '=== largest automation sources ==='
-          find src/automation -type f -name '*.ts' -printf '%s %p\n' | sort -nr | head -20
-          echo '=== fire-and-forget void calls ==='
-          rg -n '\bvoid\s+[A-Za-z_$][A-Za-z0-9_$.]*\(' src/automation || true
-          echo '=== raw String(error) rendering ==='
-          rg -n 'String\(error\)' src/automation || true
-          echo '=== process-global coupling ==='
-          rg -n 'process\.(argv|env|on|once|off|stdin|stdout|stderr|exit|execPath|pid)' src/automation || true
-          echo '=== depth-sensitive module paths ==='
-          rg -n 'fileURLToPath\(import\.meta\.url\)|dirname\(dirname' src/automation || true
-          echo '=== timers ==='
-          rg -n '(setInterval|setTimeout)\(' src/automation || true
-          echo '=== suppressed catches ==='
-          rg -n 'catch\s*\{\s*\}|catch\s*\([^)]*\)\s*\{\s*\}' src/automation || true
-          echo '=== TODO/FIXME/HACK/legacy/deprecated ==='
-          rg -ni '\b(TODO|FIXME|HACK|legacy|deprecated)\b' src test docs || true
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          automation = sorted(Path('src/automation').rglob('*.ts'))
+          print('=== largest automation sources ===')
+          for path in sorted(automation, key=lambda p: p.stat().st_size, reverse=True)[:20]:
+              print(f'{path.stat().st_size:7d} {path}')
+
+          checks = {
+              'fire-and-forget void calls': re.compile(r'\bvoid\s+[A-Za-z_$][A-Za-z0-9_$.]*\('),
+              'raw String(error) rendering': re.compile(r'String\(error\)'),
+              'process-global coupling': re.compile(r'process\.(?:argv|env|on|once|off|stdin|stdout|stderr|exit|execPath|pid)'),
+              'depth-sensitive module paths': re.compile(r'fileURLToPath\(import\.meta\.url\)|dirname\(dirname'),
+              'timers': re.compile(r'(?:setInterval|setTimeout)\('),
+              'empty catch blocks': re.compile(r'catch\s*(?:\([^)]*\))?\s*\{\s*\}'),
+          }
+          for label, pattern in checks.items():
+              print(f'=== {label} ===')
+              hits = 0
+              for path in automation:
+                  for line_no, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+                      if pattern.search(line):
+                          hits += 1
+                          print(f'{path}:{line_no}:{line.strip()}')
+              print(f'count={hits}')
+
+          print('=== TODO/FIXME/HACK/legacy/deprecated ===')
+          marker = re.compile(r'\b(?:TODO|FIXME|HACK|legacy|deprecated)\b', re.I)
+          hits = 0
+          for root in [Path('src'), Path('test'), Path('docs')]:
+              if not root.exists():
+                  continue
+              for path in root.rglob('*'):
+                  if not path.is_file() or path.suffix.lower() not in {'.ts', '.js', '.mjs', '.md', '.json'}:
+                      continue
+                  try:
+                      lines = path.read_text(encoding='utf-8').splitlines()
+                  except UnicodeDecodeError:
+                      continue
+                  for line_no, line in enumerate(lines, 1):
+                      if marker.search(line):
+                          hits += 1
+                          print(f'{path}:{line_no}:{line.strip()}')
+          print(f'count={hits}')
+          PY
 
       - name: Dead-code and dependency audit
         run: npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
