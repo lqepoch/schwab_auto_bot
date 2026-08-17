@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import type WebSocket from "ws";
-import { SchwabActivityStream, type ActivityBatch, type StreamContext } from "../src/activity_stream.ts";
+import { SchwabActivityStream, type ActivityBatch, type StreamContext } from "../src/automation/stream/activityStream.ts";
 
 const context: StreamContext = {
   accessToken: "access-token",

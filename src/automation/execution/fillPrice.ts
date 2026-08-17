@@ -1,4 +1,4 @@
-import type { Json } from "./order_policy.ts";
+import type { Json } from "../policy/order.ts";
 
 export type CompleteNetDebitFill = {
   priceCents: number;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { completeNetDebitFill, completeOrderLimitFill } from "../src/fill_price.ts";
+import { completeNetDebitFill, completeOrderLimitFill } from "../src/automation/execution/fillPrice.ts";
 
 function filledVertical() {
   return {

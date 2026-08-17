@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beginLogin, login, status } from "./auth.ts";
+import { beginLogin, login, status } from "./provider.ts";
 
 function openBrowser(url: string): void {
   const child = spawn("rundll32.exe", ["url.dll,FileProtocolHandler", url], { detached: true, stdio: "ignore", windowsHide: true });
@@ -68,7 +68,7 @@ export async function runAuthCli(argv = process.argv): Promise<void> {
     }
     await runInteractiveLogin();
   } else {
-    throw new Error("用法: node src/auth_cli.ts [status|login|relogin --confirm REAUTHORIZE_SCHWAB]");
+    throw new Error("用法: node src/automation/auth/cli.ts [status|login|relogin --confirm REAUTHORIZE_SCHWAB]");
   }
 }
 

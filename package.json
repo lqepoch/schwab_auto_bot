@@ -70,9 +70,9 @@
   ],
   "scripts": {
     "start": "node src/automation/cli.ts",
-    "auth:login": "node src/auth_cli.ts login",
-    "auth:relogin": "node src/auth_cli.ts relogin --confirm REAUTHORIZE_SCHWAB",
-    "auth:status": "node src/auth_cli.ts status",
+    "auth:login": "node src/automation/auth/cli.ts login",
+    "auth:relogin": "node src/automation/auth/cli.ts relogin --confirm REAUTHORIZE_SCHWAB",
+    "auth:status": "node src/automation/auth/cli.ts status",
     "build:sdk": "tsc -p tsconfig.sdk.json",
     "build:automation": "tsc -p tsconfig.automation.json",
     "build": "npm run build:sdk && npm run build:automation",

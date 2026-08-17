@@ -1,4 +1,4 @@
-import type { OptionOrderInfo } from "./order_policy.ts";
+import type { OptionOrderInfo } from "./order.ts";
 
 export const REQUIRED_REFRESH_SPREAD_WIDTH = 1;
 

@@ -1,6 +1,6 @@
-import { orderInfo, orderPolicyViolation, type Json } from "../order_policy.ts";
-import { isRefreshSpreadEligible } from "../refresh_order_policy.ts";
-import type { RuntimePolicy } from "../runtime_policy.ts";
+import { orderInfo, orderPolicyViolation, type Json } from "./policy/order.ts";
+import { isRefreshSpreadEligible } from "./policy/refreshOrder.ts";
+import type { RuntimePolicy } from "./policy/runtime.ts";
 
 export type ManagedOpeningInfo = NonNullable<ReturnType<typeof orderInfo>>;
 

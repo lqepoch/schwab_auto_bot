@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clampPrice, PriceExplorer } from "../src/price_explorer.ts";
+import { clampPrice, PriceExplorer } from "../src/automation/execution/priceExplorer.ts";
 
 test("pairs only two same-price full fills within ten seconds and consumes them once", () => {
   const explorer = new PriceExplorer();

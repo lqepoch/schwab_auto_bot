@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { weeklyReauthorizationWeek } from "../src/auth.ts";
+import { weeklyReauthorizationWeek } from "../src/automation/auth/provider.ts";
 
 test("weekly reauthorization boundary changes at Monday 06:00 Beijing time", () => {
   assert.equal(weeklyReauthorizationWeek(new Date("2026-07-19T21:59:00Z")), "2026-07-13");

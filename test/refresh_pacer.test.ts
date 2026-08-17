@@ -6,7 +6,7 @@ import {
   effectiveFixedPriceRefreshIntervalMs,
   FixedPriceRefreshPacer,
   fixedPriceRefreshIntervalMs,
-} from "../src/refresh_pacer.ts";
+} from "../src/automation/scheduling/refreshPacer.ts";
 
 test("fixed-price refresh cadence stays within 0.7 to 1.2 seconds and slows under load", () => {
   assert.equal(fixedPriceRefreshIntervalMs(0), FIXED_PRICE_REFRESH_INTERVAL_MIN_MS);

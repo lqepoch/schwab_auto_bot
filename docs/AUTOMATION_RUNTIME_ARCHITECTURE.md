@@ -1,3 +1,18 @@
+## Automation source layout
+
+All automation implementation now lives below `src/automation/`; root `src/` contains only the SDK public entrypoints and the stable executable `main.ts`. The module is grouped by responsibility:
+
+- `auth/`: automation OAuth provider and weekly reauthorization adapter.
+- `broker/`: Schwab REST adapter, authoritative snapshot coordination, rate-limit metadata and serialized broker writes.
+- `execution/`: fill pricing, fixed-price cycles, Preview/write preflight, rejection handling and price exploration.
+- `observability/`: business log formatting and durable execution journal.
+- `policy/`: runtime, entry/exit, refresh and freshness rules.
+- `scheduling/`: activity/refresh pacing, priority queues and round limits.
+- `state/`: runtime lock and unknown-write reconciliation.
+- `stream/`: account-activity Streamer adapter.
+
+`test/automation_layout.test.ts` enforces this boundary so automation files cannot drift back into the SDK root.
+
 # Automation runtime architecture
 
 ## Production boundary

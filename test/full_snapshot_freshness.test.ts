@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FULL_SNAPSHOT_MAX_AGE_MS, isFullSnapshotFresh } from "../src/full_snapshot_freshness.ts";
+import { FULL_SNAPSHOT_MAX_AGE_MS, isFullSnapshotFresh } from "../src/automation/policy/fullSnapshotFreshness.ts";
 
 test("full snapshot is fresh through the five-second boundary", () => {
   const completedAt = 10_000;

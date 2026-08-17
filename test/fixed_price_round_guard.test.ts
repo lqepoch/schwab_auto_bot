@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FixedPriceRefreshRoundGuard } from "../src/fixed_price_round_guard.ts";
+import { FixedPriceRefreshRoundGuard } from "../src/automation/execution/fixedPriceRoundGuard.ts";
 
 test("a fixed-price refresh round queues each strategy at most once", () => {
   const guard = new FixedPriceRefreshRoundGuard();

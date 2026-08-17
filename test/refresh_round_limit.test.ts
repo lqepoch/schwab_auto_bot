@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RefreshRoundLimit } from "../src/refresh_round_limit.ts";
+import { RefreshRoundLimit } from "../src/automation/scheduling/refreshRoundLimit.ts";
 
 test("unlimited refresh rounds remain startable", () => {
   const limit = new RefreshRoundLimit(null);

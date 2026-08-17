@@ -6,15 +6,15 @@ import {
   BrokerWriteRejectedError,
   BrokerWriteStoppingError,
   UnknownOutcomeError,
-} from "../src/broker_write_coordinator.ts";
+} from "../src/automation/broker/writeCoordinator.ts";
 import type {
   BrokerWriteRequest,
   BrokerWriteResponse,
-} from "../src/broker_write_coordinator.ts";
+} from "../src/automation/broker/writeCoordinator.ts";
 import type {
   UnknownWriteFailure,
   UnknownWriteRecord,
-} from "../src/unknown_write_reconciliation.ts";
+} from "../src/automation/state/unknownWriteReconciliation.ts";
 
 type Outcome = BrokerWriteResponse | Error;
 
