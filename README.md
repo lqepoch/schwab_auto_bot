@@ -1,8 +1,17 @@
-# Schwab Auto Bot
+# Schwab Automation & API Toolkit
 
-面向 Schwab 的 Node.js 24 自动化调度器。它的运行时只有一个入口：`src/main.ts`。
+面向 Schwab 的 Node.js 24 / TypeScript 单包工程。API SDK、OAuth、Streamer、订单契约与自动下单运行时统一位于根 `src/`；自动执行通过稳定子模块 `schwab-owokit/automation` 暴露，CLI 仍保留 `src/main.ts` 的既有生命周期与安全语义。
 
-项目已将 `vendor/schwab-api-nodejs` 中的 HTTP 传输层直接纳入主调用链：账户、订单、Preview、Submit、Replace 与 Cancel 都先经过同一配额准入，再使用 SDK 传输层发出一次物理请求。没有第二个 `node_vertical_cli` 运行入口，也不需要 Python、SQLite 或单独安装 vendor SDK。
+仓库只保留一个 npm 依赖图、一个测试入口和一套 CI。账户、订单、Preview、Submit、Replace 与 Cancel 继续经过同一配额准入和单次物理请求链路；无需单独安装或维护嵌套 SDK package。
+
+## 统一代码布局
+
+- `src/clients`、`src/auth/`、`src/streamer`、`src/orders`、`src/options`、`src/utils` 等目录承载 Schwab API/SDK 能力。
+- `src/automation/public.ts` 是自动下单模块边界；`src/automation/cli.ts` 是 `npm start` 入口。现有自动交易实现文件保留在同一 `src/` 中，降低结构迁移对实盘语义的影响。
+- `test/` 同时执行 SDK 契约测试与自动交易安全测试；`docs/SDK_API_README.md` 保存 SDK 专项使用说明。
+- 原嵌套 SDK 目录已移除，源码、依赖、TypeScript 配置与 CI 归一。
+
+结构迁移只调整代码所有权与模块边界；真实写入确认、Submit Preview、原生 Replace、单一最终写闸门、WAL/UnknownOutcome、权威订单快照和审计日志均保持原执行语义。
 
 ## 安全边界
 

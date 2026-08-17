@@ -1,4 +1,12 @@
 node_modules/
+dist/
+coverage/
+.nyc_output/
+.npm/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
 state/
 .state/
 *.log

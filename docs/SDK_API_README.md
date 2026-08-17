@@ -16,11 +16,11 @@
 ### 1. 安装、构建和测试
 
 ```bash
-npm --prefix vendor/schwab-api-nodejs install
-npm --prefix vendor/schwab-api-nodejs run typecheck
-npm --prefix vendor/schwab-api-nodejs run typecheck:test
-npm --prefix vendor/schwab-api-nodejs run build
-npm --prefix vendor/schwab-api-nodejs test
+npm install
+npm run typecheck
+npm run typecheck:test
+npm run build
+npm test
 ```
 `npm test` 会先检查测试代码类型，再构建并自动发现 `test/*.test.ts` 与 `test/*.test.mjs`。该 SDK 尚未发布到 npm registry，因此不要使用 `npm install schwab-owokit`。`dist/` 和 `node_modules/` 是本地构建产物，不应提交。
 
@@ -29,7 +29,7 @@ npm --prefix vendor/schwab-api-nodejs test
 先按部署环境配置 `SCHWAB_CLIENT_ID`、`SCHWAB_CLIENT_SECRET`、`SCHWAB_REDIRECT_URI` 等环境变量。构建后从本地 package 的入口导入：
 
 ```ts
-import { SchwabOwokit, createConsoleLogger } from './vendor/schwab-api-nodejs/dist/public.js';
+import { SchwabOwokit, createConsoleLogger } from './dist/public.js';
 
 const sdk = SchwabOwokit.fromEnvironment({
   logLevel: 'info',
@@ -194,7 +194,7 @@ socket 并触发重连。
 
 `streamer-snapshot` 提供 opt-in、可取消的 async iterator 和 bounded queue，不宣称原生 complex option book 或交易执行报价。缓存只接受文档顺序证据：CHART_EQUITY/ACCT_ACTIVITY 使用 documented sequence；CHART_FUTURES 虽标为 All Sequence 但没有独立 sequence 字段，只使用字段 `1` Chart Time，缺失时 fail-closed，不伪造连续序列。socket generation 切换会隔离旧代数据。
 
-可从 package root 按 ACK 结果类型捕获：`import { StreamerCommandError, StreamerCommandTimeoutError, StreamerCommandNotSentError } from './vendor/schwab-api-nodejs/dist/public.js';`
+可从 package root 按 ACK 结果类型捕获：`import { StreamerCommandError, StreamerCommandTimeoutError, StreamerCommandNotSentError } from './dist/public.js';`
 
 ## 错误处理
 

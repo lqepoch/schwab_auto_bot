@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true
+  },
+  "include": [
+    "src/*.ts",
+    "src/automation/**/*.ts"
+  ],
+  "exclude": [
+    "src/index.ts",
+    "src/public.ts",
+    "dist",
+    "node_modules"
+  ]
+}

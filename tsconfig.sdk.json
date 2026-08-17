@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/accounts/**/*.ts",
+    "src/auth/**/*.ts",
+    "src/clients/**/*.ts",
+    "src/contracts/**/*.ts",
+    "src/gateway/**/*.ts",
+    "src/options/**/*.ts",
+    "src/orders/**/*.ts",
+    "src/streamer/**/*.ts",
+    "src/types/**/*.ts",
+    "src/utils/**/*.ts",
+    "src/validation/**/*.ts",
+    "src/index.ts",
+    "src/public.ts"
+  ]
+}

@@ -71,6 +71,7 @@ function readLock(path: string): RuntimeLockRecord | null {
     const value = JSON.parse(readFileSync(path, "utf8")) as Partial<RuntimeLockRecord>;
     if (
       value.schemaVersion !== 1
+      || typeof value.pid !== "number"
       || !Number.isInteger(value.pid)
       || value.pid <= 0
       || typeof value.runId !== "string"
