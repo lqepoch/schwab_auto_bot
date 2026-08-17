@@ -1,0 +1,402 @@
+name: One-shot source tree unification
+
+on:
+  push:
+    branches:
+      - refactor/unify-sdk-automation-module
+
+permissions:
+  contents: write
+
+jobs:
+  refactor:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: vendor/schwab-api-nodejs/package-lock.json
+
+      - name: Unify SDK and automation into one source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_ROOT="vendor/schwab-api-nodejs"
+          test -d "$SDK_ROOT/src"
+          test -d src
+          test -d test
+
+          # Promote the SDK implementation into the repository's canonical src/ tree.
+          cp -a "$SDK_ROOT/src/." src/
+
+          # Merge SDK contract tests into the canonical test/ tree. Filenames are disjoint.
+          cp -a "$SDK_ROOT/test/." test/
+
+          # Preserve SDK/reference material without retaining a nested package boundary.
+          mkdir -p docs
+          mv "$SDK_ROOT/docs" docs/sdk
+          mv "$SDK_ROOT/reference-code" docs/reference-code
+          mv "$SDK_ROOT/schwab-api-document" docs/schwab-api-document
+          mv "$SDK_ROOT/DEBUG_FEATURES.md" docs/SDK_DEBUG_FEATURES.md
+          mv "$SDK_ROOT/OPTIMIZATION_SUMMARY.md" docs/SDK_OPTIMIZATION_SUMMARY.md
+          mv "$SDK_ROOT/README.md" docs/SDK_API_README.md
+          mv "$SDK_ROOT/examples" examples
+          mkdir -p scripts/sdk
+          cp -a "$SDK_ROOT/scripts/." scripts/sdk/
+
+          # Reuse the SDK dependency lock because it is the superset required by the unified package.
+          cp "$SDK_ROOT/package-lock.json" package-lock.json
+
+          cat > package.json <<'JSON'
+          {
+            "name": "schwab-owokit",
+            "version": "1.0.0",
+            "description": "TypeScript Charles Schwab API toolkit with a guarded automated order-execution module.",
+            "type": "module",
+            "private": true,
+            "engines": {
+              "node": ">=24"
+            },
+            "main": "./dist/public.js",
+            "types": "./dist/public.d.ts",
+            "exports": {
+              ".": {
+                "types": "./dist/public.d.ts",
+                "import": "./dist/public.js"
+              },
+              "./accounts": {
+                "types": "./dist/accounts/accountHashResolver.d.ts",
+                "import": "./dist/accounts/accountHashResolver.js"
+              },
+              "./orders": {
+                "types": "./dist/orders/orderBuilders.d.ts",
+                "import": "./dist/orders/orderBuilders.js"
+              },
+              "./options": {
+                "types": "./dist/options/optionSymbol.d.ts",
+                "import": "./dist/options/optionSymbol.js"
+              },
+              "./normalized-quotes": {
+                "types": "./dist/types/normalizedQuotes.d.ts",
+                "import": "./dist/types/normalizedQuotes.js"
+              },
+              "./streamer-fields": {
+                "types": "./dist/types/levelOneFields.d.ts",
+                "import": "./dist/types/levelOneFields.js"
+              },
+              "./streamer-market-data": {
+                "types": "./dist/streamer/marketDataClient.d.ts",
+                "import": "./dist/streamer/marketDataClient.js"
+              },
+              "./streamer-contracts": {
+                "types": "./dist/types/streamerContracts.d.ts",
+                "import": "./dist/types/streamerContracts.js"
+              },
+              "./streamer-snapshot": {
+                "types": "./dist/streamer/streamerSnapshot.d.ts",
+                "import": "./dist/streamer/streamerSnapshot.js"
+              },
+              "./gateway": {
+                "types": "./dist/gateway/schwabGateway.d.ts",
+                "import": "./dist/gateway/schwabGateway.js"
+              },
+              "./token-store": {
+                "types": "./dist/auth/tokenStore.d.ts",
+                "import": "./dist/auth/tokenStore.js"
+              },
+              "./contract-manifest": {
+                "types": "./dist/contracts/contractManifest.d.ts",
+                "import": "./dist/contracts/contractManifest.js"
+              },
+              "./automation": {
+                "types": "./dist/automation/public.d.ts",
+                "import": "./dist/automation/public.js"
+              }
+            },
+            "files": [
+              "dist",
+              "README.md",
+              "docs/SDK_API_README.md"
+            ],
+            "scripts": {
+              "start": "node src/automation/cli.ts",
+              "auth:login": "node src/auth_cli.ts login",
+              "auth:relogin": "node src/auth_cli.ts relogin --confirm REAUTHORIZE_SCHWAB",
+              "auth:status": "node src/auth_cli.ts status",
+              "build:sdk": "tsc -p tsconfig.sdk.json",
+              "build:automation": "tsc -p tsconfig.automation.json",
+              "build": "npm run build:sdk && npm run build:automation",
+              "typecheck:sdk": "tsc -p tsconfig.sdk.json --noEmit",
+              "typecheck:automation": "tsc -p tsconfig.automation.json --noEmit",
+              "typecheck": "npm run typecheck:sdk && npm run typecheck:automation",
+              "typecheck:test": "npm run build && tsc -p tsconfig.test.json --noEmit",
+              "check": "npm run typecheck",
+              "test:unit": "npm run build && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs",
+              "test": "npm run typecheck:test && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs"
+            },
+            "dependencies": {
+              "dotenv": "^16.4.7",
+              "open": "^10.1.0",
+              "ws": "^8.18.0",
+              "zod": "^4.1.9"
+            },
+            "devDependencies": {
+              "@types/node": "^24.0.0",
+              "@types/ws": "^8.18.1",
+              "typescript": "^5.9.2"
+            }
+          }
+          JSON
+
+          cat > tsconfig.json <<'JSON'
+          {
+            "compilerOptions": {
+              "target": "ES2022",
+              "module": "NodeNext",
+              "moduleResolution": "NodeNext",
+              "rootDir": "src",
+              "outDir": "dist",
+              "strict": true,
+              "declaration": true,
+              "declarationMap": true,
+              "sourceMap": true,
+              "noEmitOnError": true,
+              "skipLibCheck": true,
+              "forceConsistentCasingInFileNames": true,
+              "allowImportingTsExtensions": true,
+              "rewriteRelativeImportExtensions": true
+            },
+            "exclude": [
+              "dist",
+              "node_modules"
+            ]
+          }
+          JSON
+
+          cat > tsconfig.sdk.json <<'JSON'
+          {
+            "extends": "./tsconfig.json",
+            "include": [
+              "src/accounts/**/*.ts",
+              "src/auth/**/*.ts",
+              "src/clients/**/*.ts",
+              "src/contracts/**/*.ts",
+              "src/gateway/**/*.ts",
+              "src/options/**/*.ts",
+              "src/orders/**/*.ts",
+              "src/streamer/**/*.ts",
+              "src/types/**/*.ts",
+              "src/utils/**/*.ts",
+              "src/validation/**/*.ts",
+              "src/index.ts",
+              "src/public.ts"
+            ]
+          }
+          JSON
+
+          cat > tsconfig.automation.json <<'JSON'
+          {
+            "extends": "./tsconfig.json",
+            "compilerOptions": {
+              "strict": true
+            },
+            "include": [
+              "src/*.ts",
+              "src/automation/**/*.ts"
+            ],
+            "exclude": [
+              "src/index.ts",
+              "src/public.ts",
+              "dist",
+              "node_modules"
+            ]
+          }
+          JSON
+
+          cat > tsconfig.test.json <<'JSON'
+          {
+            "extends": "./tsconfig.json",
+            "compilerOptions": {
+              "noEmit": true,
+              "rootDir": "."
+            },
+            "include": [
+              "src/**/*.ts",
+              "test/**/*.ts"
+            ],
+            "exclude": [
+              "dist",
+              "node_modules"
+            ]
+          }
+          JSON
+
+          mkdir -p src/automation
+          cat > src/automation/runtime.ts <<'TS'
+          /**
+           * Starts the guarded Schwab automation runtime using the current process arguments.
+           * The implementation keeps the existing fail-closed CLI semantics and does not
+           * bypass live confirmation, Preview, WAL, reconciliation, or serialized writes.
+           */
+          export async function runSchwabAutomationCli(): Promise<void> {
+            const entry = new URL(import.meta.url.endsWith('.ts') ? '../main.ts' : '../main.js', import.meta.url);
+            await import(entry.href);
+          }
+          TS
+
+          cat > src/automation/cli.ts <<'TS'
+          import { runSchwabAutomationCli } from './runtime.ts';
+
+          await runSchwabAutomationCli();
+          TS
+
+          cat > src/automation/public.ts <<'TS'
+          /** Stable module boundary for guarded automated Schwab order execution. */
+          export { runSchwabAutomationCli } from './runtime.js';
+          export { SchwabRestClient } from '../schwab_client.js';
+          export { SchwabTokenProvider, requireWeeklyReauthorization, status as authStatus } from '../auth.js';
+          export { BrokerWriteCoordinator } from '../broker_write_coordinator.js';
+          export { OrderSnapshotCoordinator, RuntimeStartupCoordinator } from '../order_snapshot_coordinator.js';
+          export { PriceExplorer, MAX_ACTIVE_ORDERS } from '../price_explorer.js';
+          export { parseRuntimePolicy } from '../runtime_policy.js';
+          export { orderWritePreflight, replacementSourceViolation, EXISTING_ORDER_REPLACE_NO_PREVIEW } from '../order_write_preflight.js';
+          export { orderPolicyViolation, orderInfo, EXIT_ORDER_PRICE } from '../order_policy.js';
+          export { UnknownWriteReconciliation, fingerprintOrder, safePath } from '../unknown_write_reconciliation.js';
+          export { ExecutionJournal } from '../execution_journal.js';
+          TS
+
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              Path('src/schwab_client.ts'): {
+                  '"../vendor/schwab-api-nodejs/src/utils/httpClient.ts"': '"./utils/httpClient.ts"',
+                  '"../vendor/schwab-api-nodejs/src/utils/logger.ts"': '"./utils/logger.ts"',
+              },
+              Path('src/main.ts'): {
+                  '"../vendor/schwab-api-nodejs/src/utils/errors.ts"': '"./utils/errors.ts"',
+              },
+              Path('test/schwab_client.test.ts'): {
+                  '"../vendor/schwab-api-nodejs/src/utils/errors.ts"': '"../src/utils/errors.ts"',
+              },
+          }
+          for path, mapping in replacements.items():
+              text = path.read_text(encoding='utf-8')
+              for old, new in mapping.items():
+                  text = text.replace(old, new)
+              path.write_text(text, encoding='utf-8')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          old = "# Schwab Auto Bot\n\n面向 Schwab 的 Node.js 24 自动化调度器。它的运行时只有一个入口：`src/main.ts`。\n\n项目已将 `vendor/schwab-api-nodejs` 中的 HTTP 传输层直接纳入主调用链：账户、订单、Preview、Submit、Replace 与 Cancel 都先经过同一配额准入，再使用 SDK 传输层发出一次物理请求。没有第二个 `node_vertical_cli` 运行入口，也不需要 Python、SQLite 或单独安装 vendor SDK。\n"
+          new = "# Schwab Automation & API Toolkit\n\n面向 Schwab 的 Node.js 24 / TypeScript 单包工程。API SDK、OAuth、Streamer、订单契约与自动下单运行时统一位于根 `src/`；自动执行通过稳定子模块 `schwab-owokit/automation` 暴露，CLI 仍保留 `src/main.ts` 的既有生命周期与安全语义。\n\n仓库只保留一个 npm 依赖图、一个测试入口和一套 CI。账户、订单、Preview、Submit、Replace 与 Cancel 继续经过同一配额准入和单次物理请求链路；无需单独安装或维护嵌套 SDK package。\n\n## 统一代码布局\n\n- `src/clients`、`src/auth/`、`src/streamer`、`src/orders`、`src/options`、`src/utils` 等目录承载 Schwab API/SDK 能力。\n- `src/automation/public.ts` 是自动下单模块边界；`src/automation/cli.ts` 是 `npm start` 入口。现有自动交易实现文件保留在同一 `src/` 中，降低结构迁移对实盘语义的影响。\n- `test/` 同时执行 SDK 契约测试与自动交易安全测试；`docs/SDK_API_README.md` 保存 SDK 专项使用说明。\n- 原嵌套 SDK 目录已移除，源码、依赖、TypeScript 配置与 CI 归一。\n\n结构迁移只调整代码所有权与模块边界；真实写入确认、Submit Preview、原生 Replace、单一最终写闸门、WAL/UnknownOutcome、权威订单快照和审计日志均保持原执行语义。\n"
+          if old not in text:
+              raise SystemExit('README_INTRO_EXPECTATION_NOT_MET')
+          readme.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          for path in [Path('docs/SDK_API_README.md'), Path('docs/SDK_DEBUG_FEATURES.md'), Path('docs/SDK_OPTIMIZATION_SUMMARY.md')]:
+              text = path.read_text(encoding='utf-8')
+              text = text.replace('npm --prefix vendor/schwab-api-nodejs ', 'npm ')
+              text = text.replace('./vendor/schwab-api-nodejs/', './')
+              text = text.replace('vendor/schwab-api-nodejs/', '')
+              path.write_text(text, encoding='utf-8')
+          PY
+
+          cat > .gitignore <<'EOF'
+          node_modules/
+          dist/
+          coverage/
+          .nyc_output/
+          .npm/
+          *.tsbuildinfo
+          .env
+          .env.*
+          !.env.example
+          state/
+          .state/
+          *.log
+          baseline-import/
+          baseline-node-vertical.zip
+          EOF
+
+          cat > .github/workflows/schwab-sdk-ci.yml <<'YAML'
+          name: Schwab Unified CI
+
+          on:
+            pull_request:
+              paths:
+                - 'src/**'
+                - 'test/**'
+                - 'docs/**'
+                - 'examples/**'
+                - 'scripts/**'
+                - 'package.json'
+                - 'package-lock.json'
+                - 'tsconfig*.json'
+                - '.github/workflows/schwab-sdk-ci.yml'
+
+          permissions:
+            contents: read
+
+          jobs:
+            contracts:
+              runs-on: ubuntu-latest
+              timeout-minutes: 20
+              steps:
+                - name: Checkout
+                  uses: actions/checkout@v7
+
+                - name: Setup Node.js 24
+                  uses: actions/setup-node@v7
+                  with:
+                    node-version: '24'
+                    cache: npm
+                    cache-dependency-path: package-lock.json
+
+                - name: Install dependencies
+                  run: npm ci
+
+                - name: Typecheck SDK and automation
+                  run: npm run typecheck
+
+                - name: Build and run unified contract tests
+                  run: npm test
+
+                - name: Verify single source tree
+                  run: |
+                    test ! -e vendor/schwab-api-nodejs
+                    ! git grep -n 'vendor/schwab-api-nodejs'
+          YAML
+
+          rm -rf vendor
+          rm .github/workflows/refactor-unify-source-tree.yml
+
+          if git grep -n 'vendor/schwab-api-nodejs'; then
+            echo 'stale nested SDK path remains' >&2
+            exit 1
+          fi
+
+          npm ci
+          npm run typecheck
+          npm test
+          git diff --check
+
+      - name: Commit refactor
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'refactor: unify Schwab SDK and automation source tree'
+          git push origin HEAD:refactor/unify-sdk-automation-module
