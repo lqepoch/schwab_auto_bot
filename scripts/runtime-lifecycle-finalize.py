@@ -35,7 +35,9 @@ text = text.replace(old_tail, new_tail, 1)
 
 if text.count('stopping = true;') != 1:
     raise SystemExit(f'UNEXPECTED_DIRECT_STOP_ASSIGNMENTS:{text.count("stopping = true;")}')
-if text.count('runtimeLock.release();') != 2:
-    raise SystemExit(f'UNEXPECTED_RUNTIME_LOCK_RELEASES:{text.count("runtimeLock.release();")}')
+if text.count('runtimeLock.release();') != 1:
+    raise SystemExit(f'UNEXPECTED_DIRECT_RUNTIME_LOCK_RELEASES:{text.count("runtimeLock.release();")}')
+if text.count('onExit: () => runtimeLock.release(),') != 1:
+    raise SystemExit('PROCESS_EXIT_LOCK_RELEASE_MISSING')
 
 path.write_text(text, encoding='utf-8')
