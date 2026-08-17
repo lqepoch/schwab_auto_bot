@@ -20,8 +20,6 @@ async function sourceFiles(root) {
   return result;
 }
 
-// Make runtime-transitive SDK imports explicit about type/value ownership so
-// Node 24 strip-types cannot accidentally request erased interfaces at runtime.
 await replaceInFile('src/auth/tokenManager.ts', [
   [
 `import {
@@ -118,8 +116,8 @@ await replaceInFile('src/streamer/commandTracker.ts', [[
   }`,
 ]]);
 
-// The automation auth adapter itself must also stay within Node's erasable TS subset.
-await replaceInFile('src/auth.ts', [[
+await replaceInFile('src/auth.ts', [
+  [
 `class AutomationAuthStore implements TokenStoreAdapter {
   readonly path = statePath;
 
@@ -136,18 +134,36 @@ await replaceInFile('src/auth.ts', [[
     this.credentials = credentials;
     this.markReauthorized = markReauthorized;
   }`,
-]]);
+  ],
+  [
+`    const tokenManager = manager(auth, new AutomationAuthStore());
+    try {
+      const token = force
+        ? await tokenManager.refreshAccessToken(auth.token.refreshToken)
+        : await tokenManager.requireAccessToken();
+      if (force || token.access_token !== auth.token.accessToken) {
+        this.report(\`Schwab Node OAuth token 已刷新 expiresAt=\${new Date(token.expires_at).toISOString()}\`);
+      }
+      return token.access_token;`,
+`    const tokenManager = manager(auth, new AutomationAuthStore());
+    const needsRefresh = force || Date.parse(auth.token.accessExpiresAt) <= Date.now() + 90_000;
+    try {
+      const token = needsRefresh
+        ? await tokenManager.refreshAccessToken(auth.token.refreshToken)
+        : await tokenManager.requireAccessToken();
+      if (needsRefresh || token.access_token !== auth.token.accessToken) {
+        this.report(\`Schwab Node OAuth token 已刷新 expiresAt=\${new Date(token.expires_at).toISOString()}\`);
+      }
+      return token.access_token;`,
+  ],
+]);
 
-// Node 24 strip-types executes the same source files that TypeScript compiles.
-// Keep relative source imports explicit as .ts; rewriteRelativeImportExtensions
-// emits .js references in dist, so source execution and package execution stay aligned.
 for (const path of await sourceFiles('src')) {
   const text = await readFile(path, 'utf8');
   const rewritten = text.replace(/(['"])(\.\.?\/[^'"]+)\.js\1/g, '$1$2.ts$1');
   if (rewritten !== text) await writeFile(path, rewritten, 'utf8');
 }
 
-// Bring the legacy characterization fake frames up to the strict SDK wire schema.
 await replaceInFile('test/activity_stream.test.ts', [
   [
     'this.emit("message", Buffer.from(JSON.stringify({ response: [{ requestid, service, command, content: { code } }] })));',
@@ -159,7 +175,6 @@ await replaceInFile('test/activity_stream.test.ts', [
   ],
 ]);
 
-// Split the stable executable boundary from the production lifecycle orchestrator.
 const mainPath = 'src/main.ts';
 const source = await readFile(mainPath, 'utf8');
 const lines = source.split(/\r?\n/);
