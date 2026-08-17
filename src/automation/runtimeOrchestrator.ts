@@ -63,7 +63,7 @@ import {
   UnknownWriteReconciliation,
   type UnknownWriteFailure,
 } from "./state/unknownWriteReconciliation.ts";
-import { bindRuntimeProcessHandlers } from "./runtimeProcess.ts";
+import { bindRuntimeAbortSignal, bindRuntimeProcessHandlers } from "./runtimeProcess.ts";
 import { defaultAutomationRuntimeEntryPath, repositoryRootFromAutomationModuleUrl } from "./repositoryPaths.ts";
 import { resolveAutomationRuntimeHost, type AutomationRuntimeOptions } from "./runtimeHost.ts";
 import { superviseBackgroundTask } from "./backgroundTask.ts";
@@ -111,6 +111,7 @@ if (!readOnly && !confirmedLive) {
 const policy = parseRuntimePolicy(host.argv);
 const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId, host.pid);
 let unbindRuntimeProcessHandlers = () => {};
+let unbindRuntimeAbortSignal = () => {};
 try {
 let sellOrderAutomationDisabledRecorded = false;
 let latestBrokerRateLimit: BrokerRateLimit | null = null;
@@ -2412,6 +2413,12 @@ function requestStop(reason: string): boolean {
   return true;
 }
 
+async function completeStoppedBeforeStartup(): Promise<void> {
+  await writeRuntimeState("stopped", stopReason);
+  executionJournal.record("run.stopped", { reason: stopReason, phase: "before-startup" });
+  await executionJournal.flush();
+}
+
 function launchRuntimeBackgroundTask(
   task: string,
   operation: () => void | Promise<unknown>,
@@ -2434,9 +2441,25 @@ unbindRuntimeProcessHandlers = bindRuntimeProcessHandlers(host.processEvents, {
   },
   onExit: () => runtimeLock.release(),
 });
+unbindRuntimeAbortSignal = bindRuntimeAbortSignal(host.signal, () => {
+  if (!requestStop("abort-signal")) return;
+  executionJournal.record("run.abort-requested", { source: "AutomationRuntimeOptions.signal" });
+});
 
+if (stopping) {
+  await completeStoppedBeforeStartup();
+  return;
+}
 if (!readOnly) await ensureWeeklyReauthorization();
+if (stopping) {
+  await completeStoppedBeforeStartup();
+  return;
+}
 await writeRuntimeState("running");
+if (stopping) {
+  await completeStoppedBeforeStartup();
+  return;
+}
 executionJournal.record("run.started", {
   readOnly,
   once,
@@ -2479,7 +2502,7 @@ const startupCoordinator = new RuntimeStartupCoordinator({
     requestStop(startupReason);
   },
   startActivityStream: async () => {
-    if (once) return;
+    if (once || stopping) return;
     activityStream = new SchwabActivityStream({
       loadContext: loadActivityStreamContext,
       onActivity: handleAccountActivity,
@@ -2490,7 +2513,7 @@ const startupCoordinator = new RuntimeStartupCoordinator({
   },
 });
 const startupReady = await startupCoordinator.start();
-if (startupReady && !readOnly) {
+if (startupReady && !readOnly && !stopping) {
   await reconcilePositions();
   stamp(policy.disableSellOrders
     ? "启动阶段：卖单自动化已禁用；仅执行买单与只读订单/持仓对账"
@@ -2500,8 +2523,8 @@ if (startupReady && !readOnly) {
   await evaluateExits(true);
   if (!policy.disableSellOrders) stamp("启动卖出评估已调度；成交监听、每策略卖单维护与整体刷新并行运行");
 }
-if (once || !startupReady) {
-  requestStop(once ? "once-complete" : "startup-blocked");
+if (once || !startupReady || stopping) {
+  if (!stopping) requestStop(once ? "once-complete" : "startup-blocked");
 } else {
   runtimeIntervals.push(setInterval(() => {
     const fallbackDue = Date.now() - lastFillPollAt >= 30_000;
@@ -2538,6 +2561,7 @@ executionJournal.record("run.stopped", { reason: stopReason });
 await executionJournal.flush();
 
 } finally {
+  unbindRuntimeAbortSignal();
   unbindRuntimeProcessHandlers();
   runtimeLock.release();
 }

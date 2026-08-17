@@ -37,3 +37,24 @@ export function bindRuntimeProcessHandlers(
     target.off("exit", handleExit);
   };
 }
+
+/** Bind an embeddable AbortSignal to the same controlled-stop path. */
+export function bindRuntimeAbortSignal(
+  signal: AbortSignal | undefined,
+  onAbort: () => void,
+): () => void {
+  if (!signal) return () => {};
+  if (signal.aborted) {
+    onAbort();
+    return () => {};
+  }
+
+  let bound = true;
+  const handleAbort = (): void => onAbort();
+  signal.addEventListener("abort", handleAbort, { once: true });
+  return () => {
+    if (!bound) return;
+    bound = false;
+    signal.removeEventListener("abort", handleAbort);
+  };
+}

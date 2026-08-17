@@ -23,6 +23,7 @@ function defaults() {
 
 test("runtime host accepts explicit process-independent invocation state", () => {
   const reauthorizeInteractively = async () => undefined;
+  const controller = new AbortController();
   const workspaceRoot = resolve("runtime-host-explicit-workspace");
   const host = resolveAutomationRuntimeHost({
     argv: ["node", "embedded", "--read-only", "--once"],
@@ -34,6 +35,7 @@ test("runtime host accepts explicit process-independent invocation state", () =>
     stderr: fakeStderr,
     processEvents: fakeEvents,
     reauthorizeInteractively,
+    signal: controller.signal,
   }, defaults());
 
   assert.deepEqual(host.argv, ["node", "embedded", "--read-only", "--once"]);
@@ -43,6 +45,7 @@ test("runtime host accepts explicit process-independent invocation state", () =>
   assert.equal(host.stderr, fakeStderr);
   assert.equal(host.processEvents, fakeEvents);
   assert.equal(host.reauthorizeInteractively, reauthorizeInteractively);
+  assert.equal(host.signal, controller.signal);
 });
 
 test("runtime host inherits supplied defaults without reading mutable caller options", () => {
@@ -63,6 +66,7 @@ test("runtime host inherits supplied defaults without reading mutable caller opt
   assert.equal(host.entryPath, defaultEntryPath);
   assert.equal(host.workspaceRoot, defaultWorkspaceRoot);
   assert.equal(host.reauthorizeInteractively, undefined);
+  assert.equal(host.signal, undefined);
 });
 
 test("runtime host rejects malformed injectable process metadata", () => {
@@ -88,5 +92,12 @@ test("runtime host rejects malformed injectable process metadata", () => {
       defaults(),
     ),
     /AUTOMATION_RUNTIME_REAUTH_CALLBACK_INVALID/,
+  );
+  assert.throws(
+    () => resolveAutomationRuntimeHost(
+      { signal: { aborted: false } as AbortSignal },
+      defaults(),
+    ),
+    /AUTOMATION_RUNTIME_ABORT_SIGNAL_INVALID/,
   );
 });
