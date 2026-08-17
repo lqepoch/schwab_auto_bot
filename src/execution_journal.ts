@@ -45,9 +45,9 @@ export class ExecutionJournal {
   private ensureDirectory(): Promise<void> {
     if (!this.directoryReady) {
       const pending = mkdir(dirname(this.path), { recursive: true }).then(() => undefined);
-      this.directoryReady = pending.catch((error) => {
+      this.directoryReady = pending;
+      void pending.catch(() => {
         if (this.directoryReady === pending) this.directoryReady = null;
-        throw error;
       });
     }
     return this.directoryReady;
