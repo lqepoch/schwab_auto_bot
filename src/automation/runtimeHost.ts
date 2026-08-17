@@ -13,6 +13,7 @@ export type AutomationRuntimeOptions = Readonly<{
   stderr?: RuntimeErrorOutput;
   processEvents?: RuntimeProcessEvents;
   reauthorizeInteractively?: () => Promise<void>;
+  signal?: AbortSignal;
 }>;
 
 export type AutomationRuntimeHost = Readonly<{
@@ -25,7 +26,16 @@ export type AutomationRuntimeHost = Readonly<{
   stderr: RuntimeErrorOutput;
   processEvents: RuntimeProcessEvents;
   reauthorizeInteractively?: () => Promise<void>;
+  signal?: AbortSignal;
 }>;
+
+function isAbortSignal(value: unknown): value is AbortSignal {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<AbortSignal>;
+  return typeof candidate.aborted === "boolean"
+    && typeof candidate.addEventListener === "function"
+    && typeof candidate.removeEventListener === "function";
+}
 
 /** Resolve process-global defaults once at the executable/module boundary. */
 export function resolveAutomationRuntimeHost(
@@ -50,6 +60,7 @@ export function resolveAutomationRuntimeHost(
   const stderr = options.stderr ?? defaults.stderr ?? process.stderr;
   const processEvents = options.processEvents ?? defaults.processEvents ?? process;
   const reauthorizeInteractively = options.reauthorizeInteractively;
+  const signal = options.signal;
 
   if (!Array.isArray(argv) || argv.some((value) => typeof value !== "string")) {
     throw new Error("AUTOMATION_RUNTIME_ARGV_INVALID");
@@ -73,6 +84,9 @@ export function resolveAutomationRuntimeHost(
   if (reauthorizeInteractively !== undefined && typeof reauthorizeInteractively !== "function") {
     throw new Error("AUTOMATION_RUNTIME_REAUTH_CALLBACK_INVALID");
   }
+  if (signal !== undefined && !isAbortSignal(signal)) {
+    throw new Error("AUTOMATION_RUNTIME_ABORT_SIGNAL_INVALID");
+  }
 
   return {
     argv,
@@ -84,5 +98,6 @@ export function resolveAutomationRuntimeHost(
     stderr,
     processEvents,
     reauthorizeInteractively,
+    signal,
   };
 }
