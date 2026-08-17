@@ -27,5 +27,5 @@ jobs:
       - name: Install locked project dependencies
         run: npm ci --ignore-scripts
 
-      - name: Inventory unused files, dependencies, and exports
-        run: npx --yes knip@6.31.0 --reporter compact
+      - name: Validate dead files and dependency graph
+        run: npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
