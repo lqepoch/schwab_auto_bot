@@ -1,4 +1,4 @@
-import { createSdk, handleExampleError } from './shared.js';
+import { createSdk, handleExampleError } from './shared.ts';
 
 /**
  * 下载指定标的的历史价格数据，默认请求 AAPL 的近 10 天 5 分钟蜡烛。

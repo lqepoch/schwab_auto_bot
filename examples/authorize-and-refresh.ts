@@ -1,4 +1,4 @@
-import { createSdk, formatTokenPreview, handleExampleError } from './shared.js';
+import { createSdk, formatTokenPreview, handleExampleError } from './shared.ts';
 import * as readline from 'readline';
 
 /**

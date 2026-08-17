@@ -167,7 +167,7 @@ export class SchwabOwokit {
     if (!redirectUri) missing.push('SCHWAB_REDIRECT_URI');
 
     if (missing.length && !optional) {
-      throw new Error(`环境变量缺失：${missing.join(', ')}。请运行 npm run setup 或手动配置后再试。`);
+      throw new Error(`环境变量缺失：${missing.join(', ')}。请在 .env 或进程环境中配置后再试。`);
     }
 
     const config: SchwabOwokitConfig = {

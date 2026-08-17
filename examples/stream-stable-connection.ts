@@ -1,4 +1,4 @@
-import { createSdk, handleExampleError } from './shared.js';
+import { createSdk, handleExampleError } from './shared.ts';
 
 /**
  * 稳定连接示例 - 使用优化的配置来减少心跳超时和连接问题
@@ -61,7 +61,7 @@ async function main(): Promise<void> {
     connectionStats.connectTime = Date.now();
   });
 
-  sdk.streamer.on('disconnected', () => {
+  sdk.streamer.on('close', () => {
     console.log(`\n🔴 [${new Date().toLocaleString('zh-CN')}] Streamer已断开`);
     const uptime = Math.round((Date.now() - connectionStats.connectTime) / 1000);
     console.log(`   连接持续时间: ${uptime}秒`);
@@ -147,7 +147,7 @@ async function main(): Promise<void> {
     console.log(`   心跳包总数: ${connectionStats.heartbeatCount}`);
     console.log(`   重连次数: ${connectionStats.reconnectCount}`);
     console.log(`   距离上次数据: ${timeSinceLastData}秒`);
-    console.log(`   连接状态: ${sdk.streamer.isConnected() ? '🟢 已连接' : '🔴 已断开'}`);
+    console.log(`   连接状态: ${sdk.streamer.status === 'connected' ? '🟢 已连接' : '🔴 已断开'}`);
     
     // 如果太久没收到数据，给出提醒
     if (timeSinceLastData > 60) {

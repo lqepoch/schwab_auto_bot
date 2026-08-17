@@ -79,10 +79,11 @@
     "typecheck:sdk": "tsc -p tsconfig.sdk.json --noEmit",
     "typecheck:automation": "tsc -p tsconfig.automation.json --noEmit",
     "typecheck": "npm run typecheck:sdk && npm run typecheck:automation",
-    "typecheck:test": "npm run build && tsc -p tsconfig.test.json --noEmit",
+    "typecheck:test": "npm run build && tsc -p tsconfig.test.json --noEmit && npm run typecheck:examples",
     "check": "npm run typecheck",
     "test:unit": "npm run build && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs",
-    "test": "npm run typecheck:test && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs"
+    "test": "npm run typecheck:test && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs",
+    "typecheck:examples": "tsc -p tsconfig.examples.json --noEmit"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

@@ -1,5 +1,5 @@
-import { createSdk, handleExampleError } from './shared.js';
-import { createQuickDebugger } from '../src/index.js';
+import { createSdk, handleExampleError } from './shared.ts';
+import { createQuickDebugger } from '../src/index.ts';
 
 /**
  * 多数据源综合监控 - 同时订阅多种数据流以获得更全面的市场信息

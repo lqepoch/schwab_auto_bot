@@ -1,5 +1,5 @@
-import { createSdk, handleExampleError } from './shared.js';
-import { createStreamerDebugger } from '../src/index.js';
+import { createSdk, handleExampleError } from './shared.ts';
+import { createStreamerDebugger } from '../src/index.ts';
 
 /**
  * 数据流调试工具 - 专门用来诊断各种数据流的问题

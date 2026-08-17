@@ -1,12 +1,10 @@
-#!/usr/bin/env tsx
-
 /**
  * Level II 数据调试脚本 - 详细版本
  * 使用高级 StreamerDebugger 进行专业的 NASDAQ_BOOK 和 NYSE_BOOK 数据分析
  */
 
-import { createSdk } from '../src/index.js';
-import { createStreamerDebugger } from '../src/index.js';
+import { createSdk } from './shared.ts';
+import { createStreamerDebugger } from '../src/index.ts';
 
 async function debugLevel2Data() {
   console.log('🔍 Level II 数据结构调试工具（增强版）');
