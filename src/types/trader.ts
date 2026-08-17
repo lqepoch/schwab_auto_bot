@@ -447,4 +447,4 @@ export interface CancelOrderRequest {
   id?: number;
   order?: Order;
 }
-import type { RateLimitMetadata } from '../utils/responseMetadata.js';
+import type { RateLimitMetadata } from '../utils/responseMetadata.ts';

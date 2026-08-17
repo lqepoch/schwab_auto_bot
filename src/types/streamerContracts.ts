@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEVELONE_EQUITIES_FIELDS } from './levelOneFields.js';
+import { LEVELONE_EQUITIES_FIELDS } from './levelOneFields.ts';
 
 export type StreamerFieldValueType = 'string' | 'number' | 'boolean' | 'array' | 'unknown';
 export type StreamerDeliveryMode = 'change' | 'whole' | 'all-sequence';

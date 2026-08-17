@@ -45,11 +45,11 @@ class FakeSocket extends EventEmitter {
   }
 
   response(requestid: string, service: string, command: string, code: unknown): void {
-    this.emit("message", Buffer.from(JSON.stringify({ response: [{ requestid, service, command, content: { code } }] })));
+    this.emit("message", Buffer.from(JSON.stringify({ response: [{ requestid, service, command, timestamp: Date.now(), content: { code, msg: "OK" } }] })));
   }
 
   activity(entries: any[]): void {
-    this.emit("message", Buffer.from(JSON.stringify({ data: entries })));
+    this.emit("message", Buffer.from(JSON.stringify({ data: entries.map((entry) => ({ timestamp: Date.now(), command: "SUBS", ...entry })) })));
   }
 }
 

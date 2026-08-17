@@ -15,7 +15,7 @@ permissions:
 jobs:
   deep-verification:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -36,11 +36,30 @@ jobs:
       - name: Audit production vulnerabilities
         run: npm audit --omit=dev --audit-level=high
 
-      - name: Run complete build, source-example typecheck, and test suite
+      - name: Run complete build, source compatibility, examples, benchmarks typecheck, and tests
         run: npm test
 
       - name: Audit dead files and dependency hygiene
         run: npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+
+      - name: Run scheduled runtime performance suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/runtime-benchmark
+          for run in 1 2 3; do
+            file=".artifacts/runtime-benchmark/run-${run}.json"
+            npm run benchmark:runtime -- --output "$file"
+            npm run benchmark:runtime:check -- --baseline bench/runtime-baseline.json --current "$file"
+          done
+
+      - name: Upload scheduled runtime performance evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scheduled-runtime-benchmark-${{ github.sha }}
+          path: .artifacts/runtime-benchmark
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Validate publishable artifact surface
         shell: bash
@@ -68,3 +87,7 @@ jobs:
           test ! -e .github/workflows/enterprise-runtime-refactor-once.yml
           test ! -e .github/workflows/enterprise-dead-code-audit-once.yml
           test ! -e .github/workflows/enterprise-examples-refactor-once.yml
+          test ! -e .github/workflows/enterprise-convergence-once.yml
+          test ! -e .github/workflows/enterprise-finish-once.yml
+          test ! -e scripts/enterprise-convergence-edit.mjs
+          test ! -e scripts/enterprise-finish-edit.mjs

@@ -1,13 +1,13 @@
-import { TokenManager, TokenManagerOptions } from './auth/tokenManager.js';
-import { TokenStore, type TokenStoreAdapter } from './auth/tokenStore.js';
-import { HttpClient } from './utils/httpClient.js';
-import { TraderApiClient, AccountsQuery, OrdersQuery, TransactionsParams } from './clients/trader.js';
-import { MarketDataApiClient } from './clients/marketData.js';
-import { SchwabGateway } from './gateway/schwabGateway.js';
-import { StreamerClient, StreamerClientOptions } from './streamer/streamerClient.js';
-import { MarketDataStreamClient } from './streamer/marketDataClient.js';
-import { SchwabAuthConfig } from './types/auth.js';
-import { Logger, LogLevel, createConsoleLogger } from './utils/logger.js';
+import { TokenManager, TokenManagerOptions } from './auth/tokenManager.ts';
+import { TokenStore, type TokenStoreAdapter } from './auth/tokenStore.ts';
+import { HttpClient } from './utils/httpClient.ts';
+import { TraderApiClient, AccountsQuery, OrdersQuery, TransactionsParams } from './clients/trader.ts';
+import { MarketDataApiClient } from './clients/marketData.ts';
+import { SchwabGateway } from './gateway/schwabGateway.ts';
+import { StreamerClient, StreamerClientOptions } from './streamer/streamerClient.ts';
+import { MarketDataStreamClient } from './streamer/marketDataClient.ts';
+import { SchwabAuthConfig } from './types/auth.ts';
+import { Logger, LogLevel, createConsoleLogger } from './utils/logger.ts';
 import { config as loadEnvConfig } from 'dotenv';
 import open from 'open';
 import {
@@ -21,7 +21,7 @@ import {
   Transaction,
   UserPreference,
   StreamerInfo,
-} from './types/trader.js';
+} from './types/trader.ts';
 import {
   QuotesResponse,
   QuoteItem,
@@ -32,7 +32,7 @@ import {
   MoversResponse,
   MarketHoursResponse,
   InstrumentsSearchResponse,
-} from './types/marketData.js';
+} from './types/marketData.ts';
 
 /**
  * SDK 初始化配置。`clientId`、`clientSecret`、`redirectUri` 必须与在 Schwab 开发者门户登记的应用保持一致。
@@ -368,18 +368,18 @@ export {
   expectedFieldIds,
   manifestServiceNames,
   MANIFEST_SERVICE_COUNT,
-} from './contracts/contractManifest.js';
+} from './contracts/contractManifest.ts';
 export type {
   RestClientName,
   RestContractManifestEntry,
   StreamerContractManifestEntry,
-} from './contracts/contractManifest.js';
-export type { TokenStoreAdapter, TokenStoreOptions } from './auth/tokenStore.js';
+} from './contracts/contractManifest.ts';
+export type { TokenStoreAdapter, TokenStoreOptions } from './auth/tokenStore.ts';
 export type {
   ReadOnlyGatewayMetadata,
   ReadOnlyGatewayResponse,
   SchwabGatewayOptions,
-} from './gateway/schwabGateway.js';
+} from './gateway/schwabGateway.ts';
 export { MarketDataStreamClient };
 export {
   LEVELONE_EQUITIES_SERVICE_FIELDS,
@@ -396,7 +396,7 @@ export {
   serializeStreamerServiceFields,
   decodeStreamerServicePayload,
   decodeStreamerServiceRow,
-} from './types/streamerContracts.js';
+} from './types/streamerContracts.ts';
 export type {
   StreamerFieldValueType,
   StreamerDeliveryMode,
@@ -406,7 +406,7 @@ export type {
   ServiceFieldSelection,
   StreamerServiceRow,
   TypedStreamerDataPayload,
-} from './types/streamerContracts.js';
+} from './types/streamerContracts.ts';
 export type {
   LevelOneOptionsSubscriptionOptions,
   LevelOneFuturesSubscriptionOptions,
@@ -420,12 +420,12 @@ export type {
   ScreenerEquitySubscriptionOptions,
   ScreenerOptionSubscriptionOptions,
   AccountActivitySubscriptionOptions,
-} from './streamer/marketDataClient.js';
+} from './streamer/marketDataClient.ts';
 export {
   StreamerSnapshotCache,
   BoundedAsyncQueue,
   StreamerSnapshotConsumer,
-} from './streamer/streamerSnapshot.js';
+} from './streamer/streamerSnapshot.ts';
 export type {
   SnapshotFreshness,
   SnapshotDiscardReason,
@@ -437,8 +437,8 @@ export type {
   QueueOverflowPolicy,
   QueuePushResult,
   StreamerSnapshotConsumerOptions,
-} from './streamer/streamerSnapshot.js';
-export type { TokenManagerOptions } from './auth/tokenManager.js';
+} from './streamer/streamerSnapshot.ts';
+export type { TokenManagerOptions } from './auth/tokenManager.ts';
 export type {
   HttpClientConfig,
   HttpResponse,
@@ -446,24 +446,24 @@ export type {
   RequestOptions,
   RetryConfig,
   RetryEvent,
-} from './utils/httpClient.js';
-export type { RateLimitMetadata, ResponseMetadata as HttpResponseMetadata } from './utils/responseMetadata.js';
-export type { StreamerClientOptions } from './streamer/streamerClient.js';
+} from './utils/httpClient.ts';
+export type { RateLimitMetadata, ResponseMetadata as HttpResponseMetadata } from './utils/responseMetadata.ts';
+export type { StreamerClientOptions } from './streamer/streamerClient.ts';
 export {
   StreamerCommandError,
   StreamerCommandTimeoutError,
   StreamerCommandNotSentError,
   StreamerConnectionError,
-} from './streamer/streamerErrors.js';
+} from './streamer/streamerErrors.ts';
 export {
   SchwabApiError,
   UnknownOutcomeError,
   ReauthRequiredError,
   UNKNOWN_OUTCOME_CODE,
   REAUTH_REQUIRED_CODE,
-} from './utils/errors.js';
-export type { MutationRequestOptions, PlaceOrderOptions } from './clients/trader.js';
-export type { MutationResult, OrderMutationResult } from './types/trader.js';
+} from './utils/errors.ts';
+export type { MutationRequestOptions, PlaceOrderOptions } from './clients/trader.ts';
+export type { MutationResult, OrderMutationResult } from './types/trader.ts';
 
 // 日志和调试工具
 export { 
@@ -474,8 +474,8 @@ export {
   createDebugLogger,
   withDuration,
   logExecutionTime
-} from './utils/logger.js';
-export type { Logger, LogLevel, ConsoleLoggerOptions } from './utils/logger.js';
+} from './utils/logger.ts';
+export type { Logger, LogLevel, ConsoleLoggerOptions } from './utils/logger.ts';
 
 // 调试和分析工具
 export {
@@ -495,12 +495,12 @@ export {
   CHART_EQUITY_FIELDS,
   BOOK_PRICE_LEVEL_FIELDS,
   MARKET_MAKER_FIELDS
-} from './utils/debugUtils.js';
+} from './utils/debugUtils.ts';
 
 // Streamer 专用调试工具
 export {
   StreamerDebugger,
   createStreamerDebugger,
   createQuickDebugger
-} from './utils/streamerDebugger.js';
-export type { StreamerDebugOptions } from './utils/streamerDebugger.js';
+} from './utils/streamerDebugger.ts';
+export type { StreamerDebugOptions } from './utils/streamerDebugger.ts';

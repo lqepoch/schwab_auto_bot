@@ -4,10 +4,16 @@ export const TokenResponseSchema = z.object({
   access_token: z.string().min(1),
   refresh_token: z.string().min(1),
   expires_in: z.number().int().positive(),
-  token_type: z.string().min(1),
+  refresh_expires_in: z.number().int().positive().optional(),
+  token_type: z.string().min(1).default('Bearer'),
+});
+
+export const RefreshTokenResponseSchema = TokenResponseSchema.extend({
+  refresh_token: z.string().min(1).optional(),
 });
 
 export type TokenResponse = z.infer<typeof TokenResponseSchema>;
+export type RefreshTokenResponse = z.infer<typeof RefreshTokenResponseSchema>;
 
 export const PersistedTokenSchema = TokenResponseSchema.extend({
   obtained_at: z.number().int(),

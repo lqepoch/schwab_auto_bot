@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TokenManager } from "./auth/tokenManager.ts";
+import type { TokenStoreAdapter } from "./auth/tokenStore.ts";
+import type { PersistedToken, SchwabAuthConfig } from "./types/auth.ts";
+import { ReauthRequiredError } from "./utils/errors.ts";
 import { atomicWriteJson } from "./utils/atomicJson.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const statePath = process.env.SCHWAB_BOT_AUTH_FILE || join(root, "state", "schwab-auth.json");
-const authorizeUrl = "https://api.schwabapi.com/v1/oauth/authorize";
-const tokenUrl = "https://api.schwabapi.com/v1/oauth/token";
 const weeklyReauthorizationFormatter = new Intl.DateTimeFormat("en-US", {
   timeZone: "Asia/Shanghai",
   weekday: "short",
@@ -36,12 +38,7 @@ type AuthFile = {
   reauthorizationWeek?: string;
 };
 
-type TokenResponse = {
-  access_token?: unknown;
-  refresh_token?: unknown;
-  expires_in?: unknown;
-  refresh_expires_in?: unknown;
-};
+type Credentials = Pick<AuthFile, "clientId" | "clientSecret" | "redirectUri">;
 
 function requiredString(value: unknown, code: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(code);
@@ -50,32 +47,6 @@ function requiredString(value: unknown, code: string): string {
 
 function validTimestamp(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && Number.isFinite(Date.parse(value));
-}
-
-function boundedSeconds(value: unknown, fallback: number, code: string): number {
-  if (value === undefined || value === null) return fallback;
-  if (!Number.isInteger(value) || (value as number) <= 0 || (value as number) > 31 * 24 * 60 * 60) {
-    throw new Error(code);
-  }
-  return value as number;
-}
-
-function fromResponse(response: TokenResponse, prior?: Token): Token {
-  const now = Date.now();
-  const accessSeconds = boundedSeconds(response.expires_in, 1_800, "AUTH_TOKEN_RESPONSE_INVALID");
-  const receivedRefresh = response.refresh_token === undefined
-    ? prior?.refreshToken
-    : requiredString(response.refresh_token, "AUTH_TOKEN_RESPONSE_INVALID");
-  if (!receivedRefresh) throw new Error("AUTH_TOKEN_RESPONSE_INVALID");
-  const refreshSeconds = boundedSeconds(response.refresh_expires_in, 7 * 24 * 60 * 60, "AUTH_TOKEN_RESPONSE_INVALID");
-  return {
-    accessToken: requiredString(response.access_token, "AUTH_TOKEN_RESPONSE_INVALID"),
-    refreshToken: receivedRefresh,
-    accessExpiresAt: new Date(now + accessSeconds * 1_000).toISOString(),
-    refreshExpiresAt: response.refresh_token === undefined && prior
-      ? prior.refreshExpiresAt
-      : new Date(now + refreshSeconds * 1_000).toISOString(),
-  };
 }
 
 async function load(): Promise<AuthFile | null> {
@@ -107,36 +78,97 @@ async function save(value: AuthFile): Promise<void> {
   await atomicWriteJson(statePath, value, { directoryMode: 0o700, fileMode: 0o600, pretty: true });
 }
 
-async function requestToken(
-  credentials: Pick<AuthFile, "clientId" | "clientSecret">,
-  form: URLSearchParams,
-): Promise<TokenResponse> {
-  const response = await fetch(tokenUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${credentials.clientId}:${credentials.clientSecret}`).toString("base64")}`,
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: form,
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) throw new Error(`AUTH_HTTP_${response.status}`);
-  try {
-    const value = await response.json();
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("AUTH_TOKEN_RESPONSE_INVALID");
-    return value as TokenResponse;
-  } catch (error) {
-    if (error instanceof Error && error.message === "AUTH_TOKEN_RESPONSE_INVALID") throw error;
-    throw new Error("AUTH_TOKEN_RESPONSE_INVALID", { cause: error });
-  }
-}
-
-function environmentCredentials(): Pick<AuthFile, "clientId" | "clientSecret" | "redirectUri"> {
+function environmentCredentials(): Credentials {
   const clientId = requiredString(process.env.SCHWAB_APP_KEY || process.env.SCHWAB_CLIENT_ID, "AUTH_APP_KEY_MISSING");
   const clientSecret = requiredString(process.env.SCHWAB_APP_SECRET || process.env.SCHWAB_CLIENT_SECRET, "AUTH_APP_SECRET_MISSING");
   const redirectUri = requiredString(process.env.SCHWAB_CALLBACK_URL || process.env.SCHWAB_REDIRECT_URI || "https://127.0.0.1", "AUTH_REDIRECT_URI_MISSING");
   return { clientId, clientSecret, redirectUri };
+}
+
+function authConfig(credentials: Credentials): SchwabAuthConfig {
+  return {
+    clientId: credentials.clientId,
+    clientSecret: credentials.clientSecret,
+    redirectUri: credentials.redirectUri,
+    tokenSafetyWindowMs: 90_000,
+  };
+}
+
+/**
+ * Compatibility adapter for the production v1 auth file. OAuth transport,
+ * validation, invalid_grant handling and refresh single-flight are owned by
+ * TokenManager. This boundary only translates the approved on-disk schema and
+ * preserves weekly reauthorization metadata.
+ */
+class AutomationAuthStore implements TokenStoreAdapter {
+  readonly path = statePath;
+  private readonly credentials: Credentials | undefined;
+  private readonly markReauthorized: boolean;
+
+  constructor(credentials?: Credentials, markReauthorized = false) {
+    this.credentials = credentials;
+    this.markReauthorized = markReauthorized;
+  }
+
+  async load(): Promise<unknown | null> {
+    const auth = await load();
+    if (!auth) return null;
+    if (Date.parse(auth.token.refreshExpiresAt) <= Date.now()) return null;
+    const accessExpiresAt = Date.parse(auth.token.accessExpiresAt);
+    const refreshExpiresAt = Date.parse(auth.token.refreshExpiresAt);
+    return {
+      access_token: auth.token.accessToken,
+      refresh_token: auth.token.refreshToken,
+      expires_in: Math.max(1, Math.ceil((accessExpiresAt - Date.now()) / 1_000)),
+      refresh_expires_in: Math.max(1, Math.ceil((refreshExpiresAt - Date.now()) / 1_000)),
+      token_type: "Bearer",
+      obtained_at: Math.min(Date.now(), accessExpiresAt - 1),
+      expires_at: accessExpiresAt,
+    } satisfies PersistedToken;
+  }
+
+  async save(token: PersistedToken): Promise<void> {
+    const current = await load();
+    const credentials: Credentials | undefined = current ?? this.credentials;
+    if (!credentials) throw new Error("AUTH_APP_CREDENTIALS_MISSING");
+    const refreshRotated = current?.token.refreshToken !== token.refresh_token;
+    const refreshExpiresAt = token.refresh_expires_in !== undefined && (refreshRotated || !current)
+      ? new Date(Date.now() + token.refresh_expires_in * 1_000).toISOString()
+      : current?.token.refreshExpiresAt ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
+    const value: AuthFile = {
+      version: 1,
+      clientId: credentials.clientId,
+      clientSecret: credentials.clientSecret,
+      redirectUri: credentials.redirectUri,
+      token: {
+        accessToken: token.access_token,
+        refreshToken: token.refresh_token,
+        accessExpiresAt: new Date(token.expires_at).toISOString(),
+        refreshExpiresAt,
+      },
+      reauthorizedAt: this.markReauthorized ? new Date().toISOString() : current?.reauthorizedAt,
+      reauthorizationWeek: this.markReauthorized ? weeklyReauthorizationWeek() : current?.reauthorizationWeek,
+    };
+    await save(value);
+  }
+}
+
+function manager(credentials: Credentials, store: TokenStoreAdapter): TokenManager {
+  return new TokenManager(authConfig(credentials), store, { safetyWindowMs: 90_000 });
+}
+
+function compatibilityError(error: unknown): Error {
+  if (error instanceof ReauthRequiredError) return new Error("AUTH_LOGIN_REQUIRED", { cause: error });
+  if (error instanceof SyntaxError || (error instanceof Error && error.name === "ZodError")) {
+    return new Error("AUTH_TOKEN_RESPONSE_INVALID", { cause: error });
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const status = message.match(/Schwab token request failed:\s*(\d{3})/i)?.[1];
+  if (status) return new Error(`AUTH_HTTP_${status}`, { cause: error });
+  if (message.includes("refresh response omitted refresh_token")) {
+    return new Error("AUTH_TOKEN_RESPONSE_INVALID", { cause: error });
+  }
+  return error instanceof Error ? error : new Error(message);
 }
 
 export type AuthStatus = {
@@ -151,7 +183,6 @@ export type AuthStatus = {
 };
 
 export class SchwabTokenProvider {
-  private cached: AuthFile | null = null;
   private pending: Promise<string> | null = null;
   private pendingForce = false;
   private readonly report: (message: string) => void;
@@ -174,21 +205,25 @@ export class SchwabTokenProvider {
       }
     });
     this.pending = pending;
-    return this.pending;
+    return pending;
   }
 
   private async resolve(force: boolean): Promise<string> {
-    const auth = this.cached || await load();
-    if (!auth) throw new Error("AUTH_LOGIN_REQUIRED");
-    if (Date.parse(auth.token.refreshExpiresAt) <= Date.now()) throw new Error("AUTH_LOGIN_REQUIRED");
-    if (!force && Date.parse(auth.token.accessExpiresAt) - Date.now() > 90_000) return auth.token.accessToken;
-    const refreshed = fromResponse(await requestToken(auth, new URLSearchParams({
-      grant_type: "refresh_token", refresh_token: auth.token.refreshToken,
-    })), auth.token);
-    this.cached = { ...auth, token: refreshed };
-    await save(this.cached);
-    this.report(`Schwab Node OAuth token 已刷新 expiresAt=${refreshed.accessExpiresAt}`);
-    return refreshed.accessToken;
+    const auth = await load();
+    if (!auth || Date.parse(auth.token.refreshExpiresAt) <= Date.now()) throw new Error("AUTH_LOGIN_REQUIRED");
+    const tokenManager = manager(auth, new AutomationAuthStore());
+    const needsRefresh = force || Date.parse(auth.token.accessExpiresAt) <= Date.now() + 90_000;
+    try {
+      const token = needsRefresh
+        ? await tokenManager.refreshAccessToken(auth.token.refreshToken)
+        : await tokenManager.requireAccessToken();
+      if (needsRefresh || token.access_token !== auth.token.accessToken) {
+        this.report(`Schwab Node OAuth token 已刷新 expiresAt=${new Date(token.expires_at).toISOString()}`);
+      }
+      return token.access_token;
+    } catch (error) {
+      throw compatibilityError(error);
+    }
   }
 }
 
@@ -227,31 +262,22 @@ export async function login(callbackUrl: string, state: string): Promise<void> {
     callback.origin !== redirect.origin
     || callback.pathname !== redirect.pathname
     || callback.searchParams.get("state") !== state
-  ) {
-    throw new Error("AUTH_CALLBACK_INVALID");
-  }
+  ) throw new Error("AUTH_CALLBACK_INVALID");
   const code = requiredString(callback.searchParams.get("code"), "AUTH_CALLBACK_INVALID");
-  const token = fromResponse(await requestToken(credentials, new URLSearchParams({
-    grant_type: "authorization_code", code, redirect_uri: credentials.redirectUri,
-  })));
-  await save({
-    version: 1,
-    ...credentials,
-    token,
-    reauthorizedAt: new Date().toISOString(),
-    reauthorizationWeek: weeklyReauthorizationWeek(),
-  });
+  try {
+    await manager(credentials, new AutomationAuthStore(credentials, true)).exchangeCodeForToken(code);
+  } catch (error) {
+    throw compatibilityError(error);
+  }
 }
 
 export function beginLogin(): { state: string; authorizationUrl: string } {
   const credentials = environmentCredentials();
   const state = randomUUID();
-  const url = new URL(authorizeUrl);
-  url.searchParams.set("client_id", credentials.clientId);
-  url.searchParams.set("redirect_uri", credentials.redirectUri);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("state", state);
-  return { state, authorizationUrl: url.toString() };
+  return {
+    state,
+    authorizationUrl: manager(credentials, new AutomationAuthStore(credentials, true)).createAuthorizeUrl({ state }),
+  };
 }
 
 export function weeklyReauthorizationWeek(now = new Date()): string {

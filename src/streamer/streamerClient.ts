@@ -1,27 +1,30 @@
 import EventEmitter from 'node:events';
 import WebSocket, { type RawData } from 'ws';
-import { StreamerInfo } from '../types/trader.js';
-import { Logger, createConsoleLogger } from '../utils/logger.js';
-import { redactSensitive } from '../utils/redact.js';
+import type { StreamerInfo } from '../types/trader.ts';
+import { createConsoleLogger } from '../utils/logger.ts';
+import type { Logger } from '../utils/logger.ts';
+import { redactSensitive } from '../utils/redact.ts';
 import {
+  StreamerMessageSchema,
+  isSuccessfulStreamerCommand,
+} from '../types/streamer.ts';
+import type {
   StreamerCommandResponse,
   StreamerMessage,
-  StreamerMessageSchema,
   StreamerNotifyPayload,
   StreamerRequestEnvelope,
   StreamerServiceRequest,
-  isSuccessfulStreamerCommand,
-} from '../types/streamer.js';
+} from '../types/streamer.ts';
 import {
   applySubscriptionMutation,
   cloneParameters,
   cloneState,
   parametersForState,
-} from './subscriptionState.js';
-import type { CanonicalSubscriptionState, SubscriptionMutation } from './subscriptionState.js';
-import { StreamerCommandTracker } from './commandTracker.js';
-import { StreamerCommandError, StreamerCommandNotSentError, StreamerConnectionError } from './streamerErrors.js';
-import { createLifecycle, toError, type PendingLifecycle } from './streamerLifecycle.js';
+} from './subscriptionState.ts';
+import type { CanonicalSubscriptionState, SubscriptionMutation } from './subscriptionState.ts';
+import { StreamerCommandTracker } from './commandTracker.ts';
+import { StreamerCommandError, StreamerCommandNotSentError, StreamerConnectionError } from './streamerErrors.ts';
+import { createLifecycle, toError, type PendingLifecycle } from './streamerLifecycle.ts';
 export interface StreamerClientOptions {
   autoReconnect?: boolean;
   reconnectDelayMs?: number;
@@ -103,7 +106,7 @@ export class StreamerClient extends EventEmitter {
     this.logger = options.logger ?? createConsoleLogger({ scope: 'StreamerClient' });
     this.reconnectStrategy = this.resolveReconnectStrategy(options);
     this.commandTracker = new StreamerCommandTracker(Math.max(1, options.commandAckTimeoutMs ?? 15_000));
-    this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));
+    this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url, { handshakeTimeout: 15_000, perMessageDeflate: false }));
   }
   get status(): StreamerConnectionStatus {
     return this.connectionStatus;

@@ -7,7 +7,7 @@
  * 参考文档：schwab-api-document/schwab-Data-api-document.md
  */
 
-import type { Logger } from '../utils/logger.js';
+import type { Logger } from '../utils/logger.ts';
 
 // ================================================================================
 // LEVELONE_EQUITIES 字段定义 (基于官方文档)

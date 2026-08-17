@@ -1,4 +1,4 @@
-import type { RateLimitMetadata } from './responseMetadata.js';
+import type { RateLimitMetadata } from './responseMetadata.ts';
 
 export interface SchwabApiErrorOptions {
   status: number;

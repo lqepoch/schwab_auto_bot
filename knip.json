@@ -7,10 +7,12 @@
     "src/automation/public.ts",
     "src/automation/cli.ts",
     "src/auth_cli.ts",
-    "examples/**/*.ts"
+    "examples/**/*.ts",
+    "bench/**/*.ts"
   ],
   "project": [
     "src/**/*.ts",
-    "examples/**/*.ts"
+    "examples/**/*.ts",
+    "bench/**/*.ts"
   ]
 }

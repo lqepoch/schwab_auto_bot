@@ -10,7 +10,7 @@ import type {
   QuoteItem,
   QuotesResponse,
   SingleQuoteResponse,
-} from '../types/marketData.js';
+} from '../types/marketData.ts';
 
 const finiteNumber = z.number().finite();
 const finiteNumberOptional = finiteNumber.optional();

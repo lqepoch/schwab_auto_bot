@@ -78,12 +78,17 @@
     "build": "npm run build:sdk && npm run build:automation",
     "typecheck:sdk": "tsc -p tsconfig.sdk.json --noEmit",
     "typecheck:automation": "tsc -p tsconfig.automation.json --noEmit",
-    "typecheck": "npm run typecheck:sdk && npm run typecheck:automation",
-    "typecheck:test": "npm run build && tsc -p tsconfig.test.json --noEmit && npm run typecheck:examples",
+    "typecheck:runtime-native": "tsc -p tsconfig.automation.json --noEmit --verbatimModuleSyntax --erasableSyntaxOnly",
+    "typecheck:examples": "tsc -p tsconfig.examples.json --noEmit",
+    "typecheck:bench": "tsc -p tsconfig.bench.json --noEmit",
+    "typecheck": "npm run typecheck:sdk && npm run typecheck:automation && npm run typecheck:runtime-native",
+    "typecheck:test": "npm run build && tsc -p tsconfig.test.json --noEmit && npm run typecheck:examples && npm run typecheck:runtime-native && npm run typecheck:bench",
     "check": "npm run typecheck",
     "test:unit": "npm run build && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs",
     "test": "npm run typecheck:test && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs",
-    "typecheck:examples": "tsc -p tsconfig.examples.json --noEmit"
+    "benchmark:runtime": "node --experimental-strip-types bench/runtime-benchmark.ts",
+    "benchmark:runtime:baseline": "node --experimental-strip-types bench/build-runtime-baseline.ts",
+    "benchmark:runtime:check": "node --experimental-strip-types bench/check-runtime-benchmark.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

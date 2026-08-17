@@ -1,5 +1,5 @@
-import { isSuccessfulStreamerCommand, type StreamerCommandResponse } from '../types/streamer.js';
-import { StreamerCommandError, StreamerCommandTimeoutError } from './streamerErrors.js';
+import { isSuccessfulStreamerCommand, type StreamerCommandResponse } from '../types/streamer.ts';
+import { StreamerCommandError, StreamerCommandTimeoutError } from './streamerErrors.ts';
 
 type PendingCommand = {
   service: string;
@@ -24,8 +24,11 @@ export type CommandTrackerRequest = {
  */
 export class StreamerCommandTracker {
   private readonly pending = new Map<string, PendingCommand>();
+  private readonly timeoutMs: number;
 
-  constructor(private readonly timeoutMs: number) {}
+  constructor(timeoutMs: number) {
+    this.timeoutMs = timeoutMs;
+  }
 
   track(request: CommandTrackerRequest): Promise<StreamerCommandResponse> {
     const existing = this.pending.get(request.requestid);

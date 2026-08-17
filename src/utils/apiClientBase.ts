@@ -1,8 +1,8 @@
-import { HttpClient } from './httpClient.js';
-import type { HttpResponse, RequestOptions } from './httpClient.js';
-import { TokenManager } from '../auth/tokenManager.js';
-import { SchwabApiError } from './errors.js';
-import { Logger, createConsoleLogger } from './logger.js';
+import { HttpClient } from './httpClient.ts';
+import type { HttpResponse, RequestOptions } from './httpClient.ts';
+import { TokenManager } from '../auth/tokenManager.ts';
+import { SchwabApiError } from './errors.ts';
+import { Logger, createConsoleLogger } from './logger.ts';
 
 type QueryValue = string | number | boolean | undefined | null;
 

@@ -5,9 +5,11 @@ on:
     paths:
       - 'src/**'
       - 'test/**'
+      - 'bench/**'
       - 'docs/**'
       - 'examples/**'
       - 'scripts/**'
+      - 'knip.json'
       - 'package.json'
       - 'package-lock.json'
       - 'tsconfig*.json'
@@ -19,9 +21,11 @@ on:
     paths:
       - 'src/**'
       - 'test/**'
+      - 'bench/**'
       - 'docs/**'
       - 'examples/**'
       - 'scripts/**'
+      - 'knip.json'
       - 'package.json'
       - 'package-lock.json'
       - 'tsconfig*.json'
@@ -38,7 +42,7 @@ permissions:
 jobs:
   contracts:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -56,8 +60,25 @@ jobs:
       - name: Audit production dependency vulnerabilities
         run: npm audit --omit=dev --audit-level=high
 
-      - name: Build, typecheck, and run unified contract tests
+      - name: Build, typecheck, native-runtime audit, and unified contract tests
         run: npm test
+
+      - name: Gate deterministic runtime benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts
+          npm run benchmark:runtime -- --output .artifacts/runtime-benchmark.json
+          npm run benchmark:runtime:check -- --baseline bench/runtime-baseline.json --current .artifacts/runtime-benchmark.json
+
+      - name: Upload runtime benchmark evidence
+        if: ${{ always() && hashFiles('.artifacts/runtime-benchmark.json') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-benchmark-${{ github.sha }}
+          path: .artifacts/runtime-benchmark.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Verify package export surface
         shell: bash
@@ -83,6 +104,10 @@ jobs:
           set -euo pipefail
           git diff --check
           test ! -d vendor
+          test ! -e .github/workflows/enterprise-convergence-once.yml
+          test ! -e .github/workflows/enterprise-finish-once.yml
+          test ! -e scripts/enterprise-convergence-edit.mjs
+          test ! -e scripts/enterprise-finish-edit.mjs
           if git grep -n 'vendor/schwab-api-nodejs' -- src test docs README.md package.json package-lock.json; then
             echo 'stale nested SDK path remains' >&2
             exit 1
