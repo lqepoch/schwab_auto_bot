@@ -7,7 +7,6 @@ import type { PersistedToken, SchwabAuthConfig } from "../../types/auth.ts";
 import { ReauthRequiredError } from "../../utils/errors.ts";
 import { atomicWriteJson } from "../../utils/atomicJson.ts";
 
-const statePath = process.env.SCHWAB_BOT_AUTH_FILE || defaultAutomationAuthStatePath(import.meta.url);
 const weeklyReauthorizationFormatter = new Intl.DateTimeFormat("en-US", {
   timeZone: "Asia/Shanghai",
   weekday: "short",
@@ -18,6 +17,20 @@ const weeklyReauthorizationFormatter = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
   hourCycle: "h23",
 });
+
+export type AutomationAuthOptions = Readonly<{
+  env?: NodeJS.ProcessEnv;
+  statePath?: string;
+}>;
+
+function authEnvironment(options: AutomationAuthOptions = {}): NodeJS.ProcessEnv {
+  return options.env ?? process.env;
+}
+
+function authStatePath(options: AutomationAuthOptions = {}): string {
+  const env = authEnvironment(options);
+  return options.statePath || env.SCHWAB_BOT_AUTH_FILE || defaultAutomationAuthStatePath(import.meta.url);
+}
 
 type Token = {
   accessToken: string;
@@ -47,7 +60,7 @@ function validTimestamp(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && Number.isFinite(Date.parse(value));
 }
 
-async function load(): Promise<AuthFile | null> {
+async function load(statePath: string): Promise<AuthFile | null> {
   try {
     const value = JSON.parse(await readFile(statePath, "utf8")) as Partial<AuthFile>;
     const token = value.token as Partial<Token> | undefined;
@@ -72,14 +85,15 @@ async function load(): Promise<AuthFile | null> {
   }
 }
 
-async function save(value: AuthFile): Promise<void> {
+async function save(statePath: string, value: AuthFile): Promise<void> {
   await atomicWriteJson(statePath, value, { directoryMode: 0o700, fileMode: 0o600, pretty: true });
 }
 
-function environmentCredentials(): Credentials {
-  const clientId = requiredString(process.env.SCHWAB_APP_KEY || process.env.SCHWAB_CLIENT_ID, "AUTH_APP_KEY_MISSING");
-  const clientSecret = requiredString(process.env.SCHWAB_APP_SECRET || process.env.SCHWAB_CLIENT_SECRET, "AUTH_APP_SECRET_MISSING");
-  const redirectUri = requiredString(process.env.SCHWAB_CALLBACK_URL || process.env.SCHWAB_REDIRECT_URI || "https://127.0.0.1", "AUTH_REDIRECT_URI_MISSING");
+function environmentCredentials(options: AutomationAuthOptions = {}): Credentials {
+  const env = authEnvironment(options);
+  const clientId = requiredString(env.SCHWAB_APP_KEY || env.SCHWAB_CLIENT_ID, "AUTH_APP_KEY_MISSING");
+  const clientSecret = requiredString(env.SCHWAB_APP_SECRET || env.SCHWAB_CLIENT_SECRET, "AUTH_APP_SECRET_MISSING");
+  const redirectUri = requiredString(env.SCHWAB_CALLBACK_URL || env.SCHWAB_REDIRECT_URI || "https://127.0.0.1", "AUTH_REDIRECT_URI_MISSING");
   return { clientId, clientSecret, redirectUri };
 }
 
@@ -99,17 +113,18 @@ function authConfig(credentials: Credentials): SchwabAuthConfig {
  * preserves weekly reauthorization metadata.
  */
 class AutomationAuthStore implements TokenStoreAdapter {
-  readonly path = statePath;
+  readonly path: string;
   private readonly credentials: Credentials | undefined;
   private readonly markReauthorized: boolean;
 
-  constructor(credentials?: Credentials, markReauthorized = false) {
+  constructor(statePath: string, credentials?: Credentials, markReauthorized = false) {
+    this.path = statePath;
     this.credentials = credentials;
     this.markReauthorized = markReauthorized;
   }
 
   async load(): Promise<unknown | null> {
-    const auth = await load();
+    const auth = await load(this.path);
     if (!auth) return null;
     if (Date.parse(auth.token.refreshExpiresAt) <= Date.now()) return null;
     const accessExpiresAt = Date.parse(auth.token.accessExpiresAt);
@@ -126,7 +141,7 @@ class AutomationAuthStore implements TokenStoreAdapter {
   }
 
   async save(token: PersistedToken): Promise<void> {
-    const current = await load();
+    const current = await load(this.path);
     const credentials: Credentials | undefined = current ?? this.credentials;
     if (!credentials) throw new Error("AUTH_APP_CREDENTIALS_MISSING");
     const refreshRotated = current?.token.refreshToken !== token.refresh_token;
@@ -147,7 +162,7 @@ class AutomationAuthStore implements TokenStoreAdapter {
       reauthorizedAt: this.markReauthorized ? new Date().toISOString() : current?.reauthorizedAt,
       reauthorizationWeek: this.markReauthorized ? weeklyReauthorizationWeek() : current?.reauthorizationWeek,
     };
-    await save(value);
+    await save(this.path, value);
   }
 }
 
@@ -184,9 +199,11 @@ export class SchwabTokenProvider {
   private pending: Promise<string> | null = null;
   private pendingForce = false;
   private readonly report: (message: string) => void;
+  private readonly statePath: string;
 
-  constructor(report: (message: string) => void) {
+  constructor(report: (message: string) => void, options: AutomationAuthOptions = {}) {
     this.report = report;
+    this.statePath = authStatePath(options);
   }
 
   async get(force = false): Promise<string> {
@@ -207,9 +224,9 @@ export class SchwabTokenProvider {
   }
 
   private async resolve(force: boolean): Promise<string> {
-    const auth = await load();
+    const auth = await load(this.statePath);
     if (!auth || Date.parse(auth.token.refreshExpiresAt) <= Date.now()) throw new Error("AUTH_LOGIN_REQUIRED");
-    const tokenManager = manager(auth, new AutomationAuthStore());
+    const tokenManager = manager(auth, new AutomationAuthStore(this.statePath));
     const needsRefresh = force || Date.parse(auth.token.accessExpiresAt) <= Date.now() + 90_000;
     try {
       const token = needsRefresh
@@ -225,8 +242,8 @@ export class SchwabTokenProvider {
   }
 }
 
-export async function status(): Promise<AuthStatus> {
-  const auth = await load();
+export async function status(options: AutomationAuthOptions = {}): Promise<AuthStatus> {
+  const auth = await load(authStatePath(options));
   const reauthorizationWeek = weeklyReauthorizationWeek();
   return {
     configured: auth !== null,
@@ -240,15 +257,23 @@ export async function status(): Promise<AuthStatus> {
   };
 }
 
-export async function requireWeeklyReauthorization(now = new Date()): Promise<void> {
-  const auth = await load();
+export async function requireWeeklyReauthorization(
+  now = new Date(),
+  options: AutomationAuthOptions = {},
+): Promise<void> {
+  const auth = await load(authStatePath(options));
   if (!auth || auth.reauthorizationWeek !== weeklyReauthorizationWeek(now)) {
     throw new Error("AUTH_WEEKLY_REAUTH_REQUIRED");
   }
 }
 
-export async function login(callbackUrl: string, state: string): Promise<void> {
-  const credentials = environmentCredentials();
+export async function login(
+  callbackUrl: string,
+  state: string,
+  options: AutomationAuthOptions = {},
+): Promise<void> {
+  const credentials = environmentCredentials(options);
+  const statePath = authStatePath(options);
   const redirect = new URL(credentials.redirectUri);
   let callback: URL;
   try {
@@ -263,18 +288,19 @@ export async function login(callbackUrl: string, state: string): Promise<void> {
   ) throw new Error("AUTH_CALLBACK_INVALID");
   const code = requiredString(callback.searchParams.get("code"), "AUTH_CALLBACK_INVALID");
   try {
-    await manager(credentials, new AutomationAuthStore(credentials, true)).exchangeCodeForToken(code);
+    await manager(credentials, new AutomationAuthStore(statePath, credentials, true)).exchangeCodeForToken(code);
   } catch (error) {
     throw compatibilityError(error);
   }
 }
 
-export function beginLogin(): { state: string; authorizationUrl: string } {
-  const credentials = environmentCredentials();
+export function beginLogin(options: AutomationAuthOptions = {}): { state: string; authorizationUrl: string } {
+  const credentials = environmentCredentials(options);
+  const statePath = authStatePath(options);
   const state = randomUUID();
   return {
     state,
-    authorizationUrl: manager(credentials, new AutomationAuthStore(credentials, true)).createAuthorizeUrl({ state }),
+    authorizationUrl: manager(credentials, new AutomationAuthStore(statePath, credentials, true)).createAuthorizeUrl({ state }),
   };
 }
 
