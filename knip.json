@@ -1,0 +1,16 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/index.ts",
+    "src/public.ts",
+    "src/main.ts",
+    "src/automation/public.ts",
+    "src/automation/cli.ts",
+    "src/auth_cli.ts",
+    "examples/**/*.ts"
+  ],
+  "project": [
+    "src/**/*.ts",
+    "examples/**/*.ts"
+  ]
+}

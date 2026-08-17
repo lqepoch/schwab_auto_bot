@@ -1,4 +1,4 @@
-import { createSdk, handleExampleError } from './shared.js';
+import { createSdk, handleExampleError } from './shared.ts';
 
 /**
  * 订阅图表数据流 - 提供更高频率的K线数据，比Level 1更详细

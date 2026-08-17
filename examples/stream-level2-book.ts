@@ -1,5 +1,5 @@
-import { createSdk, handleExampleError } from './shared.js';
-import { createStreamerDebugger } from '../src/index.js';
+import { createSdk, handleExampleError } from './shared.ts';
+import { createStreamerDebugger } from '../src/index.ts';
 
 /**
  * 订阅Level II买卖盘深度数据 - 显示完整的买卖队列

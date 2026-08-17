@@ -1,5 +1,5 @@
-import { createSdk, handleExampleError } from './shared.js';
-import { formatLevelOneData, addFieldNames, LEVEL_ONE_FIELD_NAMES, TRADING_STATUS_CODES, EXCHANGE_CODES } from '../src/types/levelOneFields.js';
+import { createSdk, handleExampleError } from './shared.ts';
+import { formatLevelOneData, addFieldNames, LEVEL_ONE_FIELD_NAMES, TRADING_STATUS_CODES, EXCHANGE_CODES } from '../src/types/levelOneFields.ts';
 
 /**
  * 分析数据更新类型，帮助理解为什么某些字段存在而某些不存在

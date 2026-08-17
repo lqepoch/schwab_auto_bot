@@ -1,4 +1,4 @@
-import { createSdk, handleExampleError } from './shared.js';
+import { createSdk, handleExampleError } from './shared.ts';
 
 /**
  * 快速查询批量行情，默认拉取 AAPL 与 QQQ，可通过命令行参数自定义：

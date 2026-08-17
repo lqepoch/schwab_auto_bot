@@ -1,6 +1,6 @@
-﻿import { createSdk, handleExampleError } from './shared.js';
-import type { SchwabOwokit } from '../src/index.js';
-import type { StreamerCommandResponse, StreamerDataPayload } from '../src/types/streamer.js';
+import { createSdk, handleExampleError } from './shared.ts';
+import type { SchwabOwokit } from '../src/index.ts';
+import type { StreamerCommandResponse, StreamerDataPayload } from '../src/types/streamer.ts';
 
 const STREAM_PROBE_TIMEOUT_MS = 10_000;
 

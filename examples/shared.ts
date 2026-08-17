@@ -1,4 +1,5 @@
-import { SchwabOwokit, SchwabOwokitOptions, SchwabApiError, createConsoleLogger } from '../src/index.js';
+import { SchwabOwokit, SchwabApiError, createConsoleLogger } from '../src/index.ts';
+import type { SchwabOwokitOptions } from '../src/index.ts';
 
 const exampleLogger = createConsoleLogger({ scope: 'Examples', level: 'info' });
 

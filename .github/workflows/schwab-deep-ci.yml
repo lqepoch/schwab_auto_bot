@@ -36,8 +36,11 @@ jobs:
       - name: Audit production vulnerabilities
         run: npm audit --omit=dev --audit-level=high
 
-      - name: Run complete build and test suite
+      - name: Run complete build, source-example typecheck, and test suite
         run: npm test
+
+      - name: Audit dead files and dependency hygiene
+        run: npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
 
       - name: Validate publishable artifact surface
         shell: bash
@@ -63,3 +66,5 @@ jobs:
           git diff --check
           test ! -d vendor
           test ! -e .github/workflows/enterprise-runtime-refactor-once.yml
+          test ! -e .github/workflows/enterprise-dead-code-audit-once.yml
+          test ! -e .github/workflows/enterprise-examples-refactor-once.yml

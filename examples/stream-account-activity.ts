@@ -1,4 +1,4 @@
-import { createSdk, handleExampleError } from './shared.js';
+import { createSdk, handleExampleError } from './shared.ts';
 
 /**
  * 订阅账户活动推送，自动获取首个账户的 `hashValue` 并打印收到的通知。
