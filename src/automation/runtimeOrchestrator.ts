@@ -60,6 +60,7 @@ import {
   UnknownWriteReconciliation,
   type UnknownWriteFailure,
 } from "./state/unknownWriteReconciliation.ts";
+import { bindRuntimeProcessHandlers } from "./runtimeProcess.ts";
 
 /**
  * Production automation composition and lifecycle orchestrator.
@@ -94,7 +95,8 @@ if (!readOnly && !confirmedLive) {
 }
 const policy = parseRuntimePolicy(process.argv);
 const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId);
-process.once("exit", () => runtimeLock.release());
+let unbindRuntimeProcessHandlers = () => {};
+try {
 let sellOrderAutomationDisabledRecorded = false;
 let latestBrokerRateLimit: BrokerRateLimit | null = null;
 const singaporeLogFormatter = new Intl.DateTimeFormat("sv-SE", {
@@ -1803,9 +1805,7 @@ function recordRefreshRoundCompleted(mode: "fixed-price" | "price-explorer") {
 async function finishRefreshLimitedRun(state: ReturnType<typeof refreshRoundLimit.completeRound>): Promise<void> {
   executionJournal.record("run.refresh-round-limit-draining", state);
   await writer.waitIdle();
-  if (stopping) return;
-  stopReason = "max-refresh-rounds";
-  stopping = true;
+  if (!requestStop("max-refresh-rounds")) return;
   executionJournal.record("run.refresh-round-limit-completed", state);
   stamp(`REFRESH_ROUND_LIMIT_COMPLETED completed=${state.completedRounds}; queued refresh work is settled and the runtime is stopping`);
 }
@@ -2422,8 +2422,7 @@ async function checkControlRequest(): Promise<void> {
     if ((request.command !== "stop" && request.command !== "stop-for-restart") || typeof request.requestId !== "string" || !request.requestId) {
       return;
     }
-    stopReason = String(request.command);
-    stopping = true;
+    if (!requestStop(String(request.command))) return;
     executionJournal.record("run.control-requested", { command: request.command, requestId: request.requestId });
     stamp(`RUNTIME_CONTROL_ACCEPTED command=${request.command} requestId=${request.requestId}`);
     await writeRuntimeState("stopping", stopReason);
@@ -2439,14 +2438,20 @@ async function checkControlRequest(): Promise<void> {
   }
 }
 
-function stop(): void {
-  if (stopping) return;
-  stopReason = "signal";
+function requestStop(reason: string): boolean {
+  if (stopping) return false;
+  stopReason = reason;
   stopping = true;
-  executionJournal.record("run.signal-received", { signal: "SIGINT_OR_SIGTERM" });
+  return true;
 }
-process.on("SIGINT", stop);
-process.on("SIGTERM", stop);
+
+unbindRuntimeProcessHandlers = bindRuntimeProcessHandlers(process, {
+  onSignal: (signal) => {
+    if (!requestStop("signal")) return;
+    executionJournal.record("run.signal-received", { signal });
+  },
+  onExit: () => runtimeLock.release(),
+});
 
 if (!readOnly) await ensureWeeklyReauthorization();
 await writeRuntimeState("running");
@@ -2489,7 +2494,7 @@ const startupCoordinator = new RuntimeStartupCoordinator({
     stamp(reason === "bootstrap-failed"
       ? `启动停止：账户 bootstrap 失败 error=${String(error)}`
       : "启动停止：初始完整订单快照或未知写入只读对账失败，未启动任何交易循环");
-    stop();
+    requestStop(startupReason);
   },
   startActivityStream: async () => {
     if (once) return;
@@ -2514,7 +2519,7 @@ if (startupReady && !readOnly) {
   if (!policy.disableSellOrders) stamp("启动卖出评估已调度；成交监听、每策略卖单维护与整体刷新并行运行");
 }
 if (once || !startupReady) {
-  stop();
+  requestStop(once ? "once-complete" : "startup-blocked");
 } else {
   runtimeIntervals.push(setInterval(() => {
     const fallbackDue = Date.now() - lastFillPollAt >= 30_000;
@@ -2543,6 +2548,9 @@ await exitTemplateSavePending;
 await writeRuntimeState("stopped", stopReason);
 executionJournal.record("run.stopped", { reason: stopReason });
 await executionJournal.flush();
-runtimeLock.release();
 
+} finally {
+  unbindRuntimeProcessHandlers();
+  runtimeLock.release();
+}
 }
