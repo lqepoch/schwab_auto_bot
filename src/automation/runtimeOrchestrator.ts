@@ -20,6 +20,7 @@ import {
 import { completeNetDebitFill, completeOrderLimitFill } from "./execution/fillPrice.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./execution/priceExplorer.ts";
 import { ExecutionJournal } from "./observability/executionJournal.ts";
+import { safeRuntimeError } from "./observability/runtimeError.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "./policy/exit.ts";
 import { acquireRuntimeLock } from "./state/runtimeLock.ts";
 import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./execution/fixedPriceCycle.ts";
@@ -85,7 +86,7 @@ const runId = randomUUID();
 const runtimeStartedAt = Date.now();
 const PREVIEW_REJECTION_COOLDOWN_MS = 30_000;
 const executionJournal = new ExecutionJournal(root, runId, (error) => {
-  process.stderr.write(`${new Date().toISOString()} EXECUTION_JOURNAL_WRITE_FAILED error=${String(error)}\n`);
+  process.stderr.write(`${new Date().toISOString()} EXECUTION_JOURNAL_WRITE_FAILED error=${safeRuntimeError(error)}\n`);
 });
 const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
 const readOnly = process.argv.includes("--read-only");
@@ -198,7 +199,7 @@ function persistExplorer(): void {
   const snapshot = explorer.snapshot();
   explorerSavePending = explorerSavePending
     .then(() => atomicWriteJson(explorerStatePath, snapshot))
-    .catch((error) => stamp(`PRICE_EXPLORER_STATE_SAVE_FAILED error=${String(error)}`));
+    .catch((error) => stamp(`PRICE_EXPLORER_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`));
 }
 
 function persistFixedPriceCycle(): void {
@@ -206,7 +207,7 @@ function persistFixedPriceCycle(): void {
   const snapshot = [...fixedPriceCycleConsumedFills].slice(-1_000);
   fixedPriceCycleSavePending = fixedPriceCycleSavePending
     .then(() => atomicWriteJson(fixedPriceCycleStatePath, snapshot))
-    .catch((error) => stamp(`FIXED_PRICE_CYCLE_STATE_SAVE_FAILED error=${String(error)}`));
+    .catch((error) => stamp(`FIXED_PRICE_CYCLE_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`));
 }
 
 class ExplorerActionPacer {
@@ -728,7 +729,7 @@ const orderSnapshotCoordinator = new OrderSnapshotCoordinator<Json>({
   onFailure: (scope, error) => {
     if (scope === "full") fullSnapshotReconciled = false;
     if (!String(error).includes("REFRESH_QUOTA_HEADROOM")) {
-      stamp(`订单快照失败 full=${scope === "full"} error=${String(error)}`);
+      stamp(`订单快照失败 full=${scope === "full"} error=${safeRuntimeError(error)}`);
     }
   },
   isStopping: () => stopping,
@@ -887,7 +888,7 @@ function requestLiquidityExit(payload: Json): void {
   });
   scheduleExitWorker(meta.key, payload, sellAt, "insufficient-funds-countdown");
   void reconcilePositions(false)
-    .catch((error) => stamp(`LIQUIDITY_EXIT_POSITION_REFRESH_FAILED strategy=${meta.key} error=${String(error)}`))
+    .catch((error) => stamp(`LIQUIDITY_EXIT_POSITION_REFRESH_FAILED strategy=${meta.key} error=${safeRuntimeError(error)}`))
     .finally(() => evaluateExits());
 }
 
@@ -916,7 +917,7 @@ function reportPolicyAlert(source: string, order: Json, code: string, message: s
   stamp(`POLICY_ALERT code=${code} source=${source} order=${id} price=${String(order.price ?? "unknown")} detail=${message}`);
   void mkdir(dirname(policyAlertPath), { recursive: true })
     .then(() => appendFile(policyAlertPath, `${JSON.stringify(record)}\n`))
-    .catch((error) => stamp(`POLICY_ALERT_AUDIT_FAILED error=${String(error)}`));
+    .catch((error) => stamp(`POLICY_ALERT_AUDIT_FAILED error=${safeRuntimeError(error)}`));
 }
 
 function reportWorkingOrderPolicyViolations(): void {
@@ -1293,7 +1294,7 @@ function rememberExitTemplate(strategy: string, order: Json): void {
   const snapshot = Object.fromEntries(exitTemplatesByStrategy);
   exitTemplateSavePending = exitTemplateSavePending
     .then(() => atomicWriteJson(exitTemplateStatePath, snapshot))
-    .catch((error) => stamp(`EXIT_TEMPLATE_STATE_SAVE_FAILED error=${String(error)}`));
+    .catch((error) => stamp(`EXIT_TEMPLATE_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`));
 }
 
 function reconcileExplorerSnapshot(): void {
@@ -1481,7 +1482,7 @@ function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template
         applyLocalSubmit(payload, brokerOrderId);
         executionJournal.record("order.stale-recreate.submitted", { direction: "closing", strategy, sourceOrderId: id, brokerOrderId, order: payloadAuditData(payload) });
       } catch (error) {
-        executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: String(error) });
+        executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: safeRuntimeError(error) });
       } finally {
         staleExitRecreateInFlight.delete(id);
       }
@@ -2042,8 +2043,8 @@ async function runRefreshPreflight(): Promise<boolean> {
     }
     return admitted;
   } catch (error) {
-    executionJournal.record("refresh.preflight.failed", { error: String(error) });
-    stamp(`刷新前订单或持仓对账失败 error=${String(error)}`);
+    executionJournal.record("refresh.preflight.failed", { error: safeRuntimeError(error) });
+    stamp(`刷新前订单或持仓对账失败 error=${safeRuntimeError(error)}`);
     return false;
   }
 }
@@ -2160,8 +2161,8 @@ async function runExitWorker(strategy: string, template: Json, reason: string): 
     await refreshExitInventory(strategy, template);
     await evaluateExitStrategy(strategy, template, false);
   } catch (error) {
-    stamp(`独立卖出 worker 失败 strategy=${strategy} error=${String(error)}`);
-    executionJournal.record("exit.worker.failed", { strategy, reason, error: String(error) });
+    stamp(`独立卖出 worker 失败 strategy=${strategy} error=${safeRuntimeError(error)}`);
+    executionJournal.record("exit.worker.failed", { strategy, reason, error: safeRuntimeError(error) });
   } finally {
     evaluatingExitStrategies.delete(strategy);
     if (!stopping && exitStrategyNeedsWorker(strategy)) {
@@ -2445,7 +2446,7 @@ async function checkControlRequest(): Promise<void> {
     });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      stamp(`RUNTIME_CONTROL_READ_FAILED error=${String(error)}`);
+      stamp(`RUNTIME_CONTROL_READ_FAILED error=${safeRuntimeError(error)}`);
     }
   } finally {
     controlCheckRunning = false;
@@ -2518,10 +2519,10 @@ const startupCoordinator = new RuntimeStartupCoordinator({
       : "initial-full-order-reconciliation-failed";
     executionJournal.record("run.start-blocked", {
       reason: startupReason,
-      error: error === undefined ? null : String(error),
+      error: error === undefined ? null : safeRuntimeError(error),
     });
     stamp(reason === "bootstrap-failed"
-      ? `启动停止：账户 bootstrap 失败 error=${String(error)}`
+      ? `启动停止：账户 bootstrap 失败 error=${safeRuntimeError(error)}`
       : "启动停止：初始完整订单快照或未知写入只读对账失败，未启动任何交易循环");
     requestStop(startupReason);
   },
