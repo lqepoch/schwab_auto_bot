@@ -34,6 +34,7 @@ import {
   SchwabRestClient as AutomationSchwabRestClient,
   UnknownWriteReconciliation as AutomationUnknownWriteReconciliation,
   parseRuntimePolicy as automationParseRuntimePolicy,
+  runAutomationRuntime,
   runSchwabAutomationCli,
 } from 'schwab-owokit/automation';
 
@@ -82,7 +83,8 @@ test('new streamer, gateway, and token-store contracts stay identical across roo
 });
 
 test('automation subpath exposes the stable guarded execution boundary without import side effects', () => {
-  assert.equal(typeof runSchwabAutomationCli, 'function');
+  assert.equal(typeof runAutomationRuntime, 'function');
+  assert.equal(runSchwabAutomationCli, runAutomationRuntime);
   assert.equal(typeof AutomationSchwabRestClient, 'function');
   assert.equal(typeof AutomationBrokerWriteCoordinator, 'function');
   assert.equal(typeof AutomationExecutionJournal, 'function');
