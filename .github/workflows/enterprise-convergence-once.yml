@@ -32,6 +32,12 @@ jobs:
       - name: Apply deterministic convergence edit
         run: node scripts/enterprise-convergence-edit.mjs
 
+      - name: Audit Node native TypeScript compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsc -p tsconfig.automation.json --noEmit --verbatimModuleSyntax --erasableSyntaxOnly
+
       - name: Validate convergence
         shell: bash
         run: |
