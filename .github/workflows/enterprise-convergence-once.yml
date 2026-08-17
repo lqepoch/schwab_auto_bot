@@ -12,7 +12,7 @@ jobs:
   convergence:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -29,37 +29,676 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
 
-      - name: Inventory runtime structure
+      - name: Converge OAuth and account activity transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          # TokenManager accepts Schwab refresh responses that legitimately omit
+          # a rotated refresh_token, while keeping the persisted schema strict.
+          auth_types = Path('src/types/auth.ts')
+          text = auth_types.read_text(encoding='utf-8')
+          text = text.replace(
+          "export const TokenResponseSchema = z.object({\n  access_token: z.string().min(1),\n  refresh_token: z.string().min(1),\n  expires_in: z.number().int().positive(),\n  token_type: z.string().min(1),\n});\n\nexport type TokenResponse = z.infer<typeof TokenResponseSchema>;\n\nexport const PersistedTokenSchema = TokenResponseSchema.extend({",
+          "export const TokenResponseSchema = z.object({\n  access_token: z.string().min(1),\n  refresh_token: z.string().min(1),\n  expires_in: z.number().int().positive(),\n  refresh_expires_in: z.number().int().positive().optional(),\n  token_type: z.string().min(1),\n});\n\nexport const RefreshTokenResponseSchema = TokenResponseSchema.extend({\n  refresh_token: z.string().min(1).optional(),\n});\n\nexport type TokenResponse = z.infer<typeof TokenResponseSchema>;\nexport type RefreshTokenResponse = z.infer<typeof RefreshTokenResponseSchema>;\n\nexport const PersistedTokenSchema = TokenResponseSchema.extend({"
+          )
+          auth_types.write_text(text, encoding='utf-8')
+
+          manager = Path('src/auth/tokenManager.ts')
+          text = manager.read_text(encoding='utf-8')
+          text = text.replace(
+          "  PersistedTokenSchema,\n  SchwabAuthConfig,\n  TokenResponse,\n  TokenResponseSchema,",
+          "  PersistedTokenSchema,\n  RefreshTokenResponseSchema,\n  SchwabAuthConfig,\n  TokenResponse,\n  TokenResponseSchema,"
+          )
+          text = text.replace(
+          "    const pending = this.requestToken(body, true)",
+          "    const pending = this.requestToken(body, true, refreshToken)"
+          )
+          text = text.replace(
+          "  private async requestToken(body: URLSearchParams, isRefresh: boolean): Promise<PersistedToken> {",
+          "  private async requestToken(\n    body: URLSearchParams,\n    isRefresh: boolean,\n    priorRefreshToken?: string,\n  ): Promise<PersistedToken> {"
+          )
+          old = """    let token: TokenResponse;
+    try {
+      token = TokenResponseSchema.parse(payload);
+    } catch (error) {
+      this.logger.error('OAuth 响应结构验证失败', {
+        error: safeErrorMessage(error),
+        payload: redactSensitive(payload),
+      });
+      throw error;
+    }
+"""
+          new = """    let token: TokenResponse;
+    try {
+      if (isRefresh) {
+        const refreshed = RefreshTokenResponseSchema.parse(payload);
+        const refreshToken = refreshed.refresh_token ?? priorRefreshToken;
+        if (!refreshToken) throw new Error('Schwab refresh response omitted refresh_token without a prior credential');
+        token = { ...refreshed, refresh_token: refreshToken };
+      } else {
+        token = TokenResponseSchema.parse(payload);
+      }
+    } catch (error) {
+      this.logger.error('OAuth 响应结构验证失败', {
+        error: safeErrorMessage(error),
+        payload: redactSensitive(payload),
+      });
+      throw error;
+    }
+"""
+          if old not in text:
+              raise SystemExit('TokenManager parse block not found')
+          text = text.replace(old, new)
+          manager.write_text(text, encoding='utf-8')
+          PY
+
+          cat > src/auth.ts <<'EOF'
+          import { randomUUID } from "node:crypto";
+          import { readFile } from "node:fs/promises";
+          import { dirname, join } from "node:path";
+          import { fileURLToPath } from "node:url";
+          import { TokenManager } from "./auth/tokenManager.ts";
+          import type { TokenStoreAdapter } from "./auth/tokenStore.ts";
+          import type { PersistedToken, SchwabAuthConfig } from "./types/auth.ts";
+          import { ReauthRequiredError } from "./utils/errors.ts";
+          import { atomicWriteJson } from "./utils/atomicJson.ts";
+
+          const root = dirname(dirname(fileURLToPath(import.meta.url)));
+          const statePath = process.env.SCHWAB_BOT_AUTH_FILE || join(root, "state", "schwab-auth.json");
+          const weeklyReauthorizationFormatter = new Intl.DateTimeFormat("en-US", {
+            timeZone: "Asia/Shanghai",
+            weekday: "short",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            hourCycle: "h23",
+          });
+
+          type Token = {
+            accessToken: string;
+            refreshToken: string;
+            accessExpiresAt: string;
+            refreshExpiresAt: string;
+          };
+
+          type Credentials = Pick<AuthFile, "clientId" | "clientSecret" | "redirectUri">;
+
+          type AuthFile = {
+            version: 1;
+            clientId: string;
+            clientSecret: string;
+            redirectUri: string;
+            token: Token;
+            reauthorizedAt?: string;
+            reauthorizationWeek?: string;
+          };
+
+          function requiredString(value: unknown, code: string): string {
+            if (typeof value !== "string" || !value.trim()) throw new Error(code);
+            return value.trim();
+          }
+
+          function validTimestamp(value: unknown): value is string {
+            return typeof value === "string" && value.trim().length > 0 && Number.isFinite(Date.parse(value));
+          }
+
+          async function load(): Promise<AuthFile | null> {
+            try {
+              const value = JSON.parse(await readFile(statePath, "utf8")) as Partial<AuthFile>;
+              const token = value.token as Partial<Token> | undefined;
+              if (
+                value.version !== 1 ||
+                !value.clientId?.trim() ||
+                !value.clientSecret?.trim() ||
+                !value.redirectUri?.trim() ||
+                !token ||
+                !token.accessToken?.trim() ||
+                !token.refreshToken?.trim() ||
+                !validTimestamp(token.accessExpiresAt) ||
+                !validTimestamp(token.refreshExpiresAt)
+              ) throw new Error("AUTH_FILE_INVALID");
+              if (value.reauthorizedAt !== undefined && !validTimestamp(value.reauthorizedAt)) throw new Error("AUTH_FILE_INVALID");
+              if (value.reauthorizationWeek !== undefined && typeof value.reauthorizationWeek !== "string") throw new Error("AUTH_FILE_INVALID");
+              return value as AuthFile;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+              if (error instanceof Error && error.message === "AUTH_FILE_INVALID") throw error;
+              throw new Error("AUTH_FILE_INVALID", { cause: error });
+            }
+          }
+
+          async function save(value: AuthFile): Promise<void> {
+            await atomicWriteJson(statePath, value, { directoryMode: 0o700, fileMode: 0o600, pretty: true });
+          }
+
+          function environmentCredentials(): Credentials {
+            const clientId = requiredString(process.env.SCHWAB_APP_KEY || process.env.SCHWAB_CLIENT_ID, "AUTH_APP_KEY_MISSING");
+            const clientSecret = requiredString(process.env.SCHWAB_APP_SECRET || process.env.SCHWAB_CLIENT_SECRET, "AUTH_APP_SECRET_MISSING");
+            const redirectUri = requiredString(process.env.SCHWAB_CALLBACK_URL || process.env.SCHWAB_REDIRECT_URI || "https://127.0.0.1", "AUTH_REDIRECT_URI_MISSING");
+            return { clientId, clientSecret, redirectUri };
+          }
+
+          function authConfig(credentials: Credentials): SchwabAuthConfig {
+            return {
+              clientId: credentials.clientId,
+              clientSecret: credentials.clientSecret,
+              redirectUri: credentials.redirectUri,
+              tokenSafetyWindowMs: 90_000,
+            };
+          }
+
+          /**
+           * Compatibility adapter for the production v1 auth file. OAuth wire
+           * semantics and refresh single-flight live in TokenManager; this adapter
+           * only translates the approved on-disk schema and weekly authorization metadata.
+           */
+          class AutomationAuthStore implements TokenStoreAdapter {
+            readonly path = statePath;
+
+            constructor(
+              private readonly credentials?: Credentials,
+              private readonly markReauthorized = false,
+            ) {}
+
+            async load(): Promise<unknown | null> {
+              const auth = await load();
+              if (!auth) return null;
+              if (Date.parse(auth.token.refreshExpiresAt) <= Date.now()) return null;
+              const accessExpiresAt = Date.parse(auth.token.accessExpiresAt);
+              const refreshExpiresAt = Date.parse(auth.token.refreshExpiresAt);
+              return {
+                access_token: auth.token.accessToken,
+                refresh_token: auth.token.refreshToken,
+                expires_in: Math.max(1, Math.ceil((accessExpiresAt - Date.now()) / 1_000)),
+                refresh_expires_in: Math.max(1, Math.ceil((refreshExpiresAt - Date.now()) / 1_000)),
+                token_type: "Bearer",
+                obtained_at: Math.min(Date.now(), accessExpiresAt - 1),
+                expires_at: accessExpiresAt,
+              } satisfies PersistedToken;
+            }
+
+            async save(token: PersistedToken): Promise<void> {
+              const current = await load();
+              const credentials = current ?? this.credentials;
+              if (!credentials) throw new Error("AUTH_APP_CREDENTIALS_MISSING");
+              const refreshRotated = current?.token.refreshToken !== token.refresh_token;
+              const refreshExpiresAt = token.refresh_expires_in !== undefined && (refreshRotated || !current)
+                ? new Date(Date.now() + token.refresh_expires_in * 1_000).toISOString()
+                : current?.token.refreshExpiresAt ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
+              const value: AuthFile = {
+                version: 1,
+                clientId: credentials.clientId,
+                clientSecret: credentials.clientSecret,
+                redirectUri: credentials.redirectUri,
+                token: {
+                  accessToken: token.access_token,
+                  refreshToken: token.refresh_token,
+                  accessExpiresAt: new Date(token.expires_at).toISOString(),
+                  refreshExpiresAt,
+                },
+                reauthorizedAt: this.markReauthorized ? new Date().toISOString() : current?.reauthorizedAt,
+                reauthorizationWeek: this.markReauthorized ? weeklyReauthorizationWeek() : current?.reauthorizationWeek,
+              };
+              await save(value);
+            }
+          }
+
+          function manager(credentials: Credentials, store: TokenStoreAdapter): TokenManager {
+            return new TokenManager(authConfig(credentials), store, { safetyWindowMs: 90_000 });
+          }
+
+          export type AuthStatus = {
+            configured: boolean;
+            tokenPresent: boolean;
+            accessExpiresAt: string | null;
+            refreshExpiresAt: string | null;
+            reauthorizedAt: string | null;
+            weeklyReauthRequired: boolean;
+            reauthorizationWeek: string;
+            storage: "plain-json";
+          };
+
+          export class SchwabTokenProvider {
+            private pending: Promise<string> | null = null;
+            private pendingForce = false;
+            private readonly report: (message: string) => void;
+
+            constructor(report: (message: string) => void) {
+              this.report = report;
+            }
+
+            async get(force = false): Promise<string> {
+              if (this.pending) {
+                if (!force || this.pendingForce) return this.pending;
+                await this.pending;
+                return this.get(true);
+              }
+              this.pendingForce = force;
+              const pending = this.resolve(force).finally(() => {
+                if (this.pending === pending) {
+                  this.pending = null;
+                  this.pendingForce = false;
+                }
+              });
+              this.pending = pending;
+              return pending;
+            }
+
+            private async resolve(force: boolean): Promise<string> {
+              const auth = await load();
+              if (!auth || Date.parse(auth.token.refreshExpiresAt) <= Date.now()) throw new Error("AUTH_LOGIN_REQUIRED");
+              const tokenManager = manager(auth, new AutomationAuthStore());
+              try {
+                const token = force
+                  ? await tokenManager.refreshAccessToken(auth.token.refreshToken)
+                  : await tokenManager.requireAccessToken();
+                if (force || token.access_token !== auth.token.accessToken) {
+                  this.report(`Schwab Node OAuth token 已刷新 expiresAt=${new Date(token.expires_at).toISOString()}`);
+                }
+                return token.access_token;
+              } catch (error) {
+                if (error instanceof ReauthRequiredError) throw new Error("AUTH_LOGIN_REQUIRED", { cause: error });
+                throw error;
+              }
+            }
+          }
+
+          export async function status(): Promise<AuthStatus> {
+            const auth = await load();
+            const reauthorizationWeek = weeklyReauthorizationWeek();
+            return {
+              configured: auth !== null,
+              tokenPresent: auth !== null,
+              accessExpiresAt: auth?.token.accessExpiresAt ?? null,
+              refreshExpiresAt: auth?.token.refreshExpiresAt ?? null,
+              reauthorizedAt: auth?.reauthorizedAt ?? null,
+              weeklyReauthRequired: auth?.reauthorizationWeek !== reauthorizationWeek,
+              reauthorizationWeek,
+              storage: "plain-json",
+            };
+          }
+
+          export async function requireWeeklyReauthorization(now = new Date()): Promise<void> {
+            const auth = await load();
+            if (!auth || auth.reauthorizationWeek !== weeklyReauthorizationWeek(now)) {
+              throw new Error("AUTH_WEEKLY_REAUTH_REQUIRED");
+            }
+          }
+
+          export async function login(callbackUrl: string, state: string): Promise<void> {
+            const credentials = environmentCredentials();
+            const redirect = new URL(credentials.redirectUri);
+            let callback: URL;
+            try {
+              callback = new URL(callbackUrl);
+            } catch (error) {
+              throw new Error("AUTH_CALLBACK_INVALID", { cause: error });
+            }
+            if (
+              callback.origin !== redirect.origin
+              || callback.pathname !== redirect.pathname
+              || callback.searchParams.get("state") !== state
+            ) throw new Error("AUTH_CALLBACK_INVALID");
+            const code = requiredString(callback.searchParams.get("code"), "AUTH_CALLBACK_INVALID");
+            await manager(credentials, new AutomationAuthStore(credentials, true)).exchangeCodeForToken(code);
+          }
+
+          export function beginLogin(): { state: string; authorizationUrl: string } {
+            const credentials = environmentCredentials();
+            const state = randomUUID();
+            return {
+              state,
+              authorizationUrl: manager(credentials, new AutomationAuthStore(credentials, true)).createAuthorizeUrl({ state }),
+            };
+          }
+
+          export function weeklyReauthorizationWeek(now = new Date()): string {
+            const parts = Object.fromEntries(weeklyReauthorizationFormatter
+              .formatToParts(now)
+              .map((part) => [part.type, part.value]));
+            const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(parts.weekday);
+            if (weekday < 0) throw new Error("AUTH_REAUTH_CLOCK_INVALID");
+            const localDate = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)));
+            let daysSinceMonday = (weekday + 6) % 7;
+            if (weekday === 1 && Number(parts.hour) * 60 + Number(parts.minute) < 6 * 60) daysSinceMonday = 7;
+            localDate.setUTCDate(localDate.getUTCDate() - daysSinceMonday);
+            return localDate.toISOString().slice(0, 10);
+          }
+          EOF
+
+          cat > src/activity_stream.ts <<'EOF'
+          import type WebSocket from "ws";
+          import { StreamerClient } from "./streamer/streamerClient.ts";
+          import type { StreamerDataPayload } from "./types/streamer.ts";
+          import type { StreamerInfo } from "./types/trader.ts";
+
+          export type StreamContext = {
+            accessToken: string;
+            socketUrl: string;
+            customerId: string;
+            correlationId: string;
+            channel: string;
+            functionId: string;
+          };
+
+          export type ActivityHint = {
+            orderId: string;
+            status: string;
+            filledQuantity: number | null;
+          };
+
+          export type ActivityBatch = {
+            hints: ActivityHint[];
+            complete: boolean;
+          };
+
+          export type ActivityStreamOptions = {
+            loadContext: () => Promise<StreamContext>;
+            onActivity: (batch: ActivityBatch) => void;
+            onState: (message: string) => void;
+            createWebSocket?: (url: string, options: { handshakeTimeout: number; perMessageDeflate: boolean }) => WebSocket;
+            openTimeoutMs?: number;
+            ackTimeoutMs?: number;
+            activityDebounceMs?: number;
+            reconnectDelayMs?: number;
+          };
+
+          /**
+           * Production account-activity adapter. StreamerClient owns socket lifecycle,
+           * LOGIN/SUBS acknowledgements, canonical subscription state and reconnect replay.
+           * This class retains only automation-specific batching and message interpretation.
+           */
+          export class SchwabActivityStream {
+            private readonly options: ActivityStreamOptions;
+            private client: StreamerClient | null = null;
+            private starting: Promise<void> | null = null;
+            private stopping = false;
+            private subscribed = false;
+            private activityTimer: NodeJS.Timeout | null = null;
+            private queuedHints: ActivityHint[] = [];
+            private queuedComplete = true;
+            ready = false;
+
+            constructor(options: ActivityStreamOptions) {
+              this.options = options;
+            }
+
+            start(): void {
+              if (!this.starting) this.starting = this.startUntilConnected();
+            }
+
+            async stop(): Promise<void> {
+              this.stopping = true;
+              this.ready = false;
+              this.subscribed = false;
+              if (this.activityTimer) clearTimeout(this.activityTimer);
+              this.activityTimer = null;
+              this.queuedHints = [];
+              this.queuedComplete = true;
+              this.client?.disconnect();
+              await this.starting?.catch(() => undefined);
+            }
+
+            private async startUntilConnected(): Promise<void> {
+              let delayMs = Math.max(1, this.options.reconnectDelayMs ?? 500);
+              while (!this.stopping && !this.subscribed) {
+                try {
+                  await this.connect();
+                  return;
+                } catch (error) {
+                  this.ready = false;
+                  this.options.onState(`ACCT_ACTIVITY订阅断开 error=${safeError(error)} reconnectInMs=${delayMs}`);
+                  this.client?.disconnect();
+                  this.client = null;
+                  if (!this.stopping) await delay(delayMs);
+                  delayMs = Math.min(30_000, delayMs * 2);
+                }
+              }
+            }
+
+            private async connect(): Promise<void> {
+              const context = await this.options.loadContext();
+              const client = new StreamerClient({
+                autoReconnect: true,
+                reconnectDelayMs: this.options.reconnectDelayMs,
+                commandAckTimeoutMs: this.options.ackTimeoutMs ?? 15_000,
+                heartbeatCheckIntervalMs: 5_000,
+                heartbeatTimeoutMs: 20_000,
+                webSocketFactory: this.options.createWebSocket
+                  ? (url) => this.options.createWebSocket!(url, { handshakeTimeout: 15_000, perMessageDeflate: false })
+                  : undefined,
+              });
+              this.client = client;
+              client.on("data", (payload) => this.onData(payload));
+              client.on("close", (code) => {
+                if (client !== this.client || this.stopping) return;
+                this.ready = false;
+                this.options.onState(`ACCT_ACTIVITY订阅断开 error=STREAM_CLOSED_${code}`);
+              });
+              client.on("reconnecting", ({ attempt, delayMs }) => {
+                if (client !== this.client || this.stopping) return;
+                this.options.onState(`ACCT_ACTIVITY准备重连 attempt=${attempt} reconnectInMs=${delayMs}`);
+              });
+              client.on("ready", () => {
+                if (client === this.client && this.subscribed && !this.stopping) this.ready = true;
+              });
+              client.on("error", (error) => {
+                if (client === this.client && !this.stopping) this.options.onState(`ACCT_ACTIVITY Streamer error=${safeError(error)}`);
+              });
+              const info: StreamerInfo = {
+                streamerSocketUrl: context.socketUrl,
+                schwabClientCustomerId: context.customerId,
+                schwabClientCorrelId: context.correlationId,
+                schwabClientChannel: context.channel,
+                schwabClientFunctionId: context.functionId,
+              };
+              await client.connect(context.accessToken, info, async () => (await this.options.loadContext()).accessToken);
+              if (client !== this.client || this.stopping) return;
+              await client.subscribe({
+                service: "ACCT_ACTIVITY",
+                parameters: { keys: "Account Activity", fields: "0,1,2,3" },
+              });
+              if (client !== this.client || this.stopping) return;
+              this.subscribed = true;
+              this.ready = true;
+              this.options.onState("ACCT_ACTIVITY WebSocket订阅已建立；账户活动将立即唤醒一次REST订单确认");
+            }
+
+            private onData(payload: StreamerDataPayload): void {
+              if (payload.service !== "ACCT_ACTIVITY" || this.stopping) return;
+              const batch = decodeActivityBatch(payload.content);
+              this.queuedHints.push(...batch.hints);
+              this.queuedComplete = this.queuedComplete && batch.complete;
+              if (this.activityTimer) return;
+              this.activityTimer = setTimeout(() => {
+                this.activityTimer = null;
+                const queued = { hints: this.queuedHints.splice(0), complete: this.queuedComplete };
+                this.queuedComplete = true;
+                if (!this.stopping) this.options.onActivity(queued);
+              }, this.options.activityDebounceMs ?? 50);
+            }
+          }
+
+          function decodeActivityBatch(rows: Array<Record<string, unknown> & { key?: string }>): ActivityBatch {
+            const hints: ActivityHint[] = [];
+            let messages = 0;
+            for (const content of rows) {
+              messages += 1;
+              const message = content["3"] ?? content.messageData;
+              const decoded = decodeMessageData(message);
+              if (decoded) hints.push(decoded);
+            }
+            return { hints, complete: messages > 0 && hints.length === messages };
+          }
+
+          function decodeMessageData(message: unknown): ActivityHint | null {
+            if (message && typeof message === "object") return decodeStructured(message as Record<string, unknown>);
+            if (typeof message !== "string" || message.length > 200_000) return null;
+            const trimmed = message.trim();
+            if (trimmed.startsWith("{")) {
+              try {
+                const parsed = JSON.parse(trimmed);
+                if (parsed && typeof parsed === "object") {
+                  const decoded = decodeStructured(parsed as Record<string, unknown>);
+                  if (decoded) return decoded;
+                }
+              } catch {
+                // Schwab account activity may use XML.
+              }
+            }
+            const orderId = xmlValue(trimmed, ["OrderId", "OrderID", "OrderKey", "OrderNumber"]);
+            const status = xmlValue(trimmed, ["OrderStatus", "Status"]);
+            if (!orderId || !status) return null;
+            const filled = xmlValue(trimmed, ["FilledQuantity", "QuantityFilled", "FilledQty", "CumulativeQuantity"]);
+            const filledQuantity = filled === null ? null : Number(filled);
+            return { orderId, status: status.toUpperCase().replaceAll(" ", "_"), filledQuantity: Number.isFinite(filledQuantity) ? filledQuantity : null };
+          }
+
+          function decodeStructured(value: Record<string, unknown>): ActivityHint | null {
+            const flattened = flattenObject(value);
+            const orderId = firstString(flattened, ["orderid", "orderkey", "ordernumber"]);
+            const status = firstString(flattened, ["orderstatus", "status"]);
+            if (!orderId || !status) return null;
+            const filled = firstString(flattened, ["filledquantity", "quantityfilled", "filledqty", "cumulativequantity"]);
+            const filledQuantity = filled === null ? null : Number(filled);
+            return { orderId, status: status.toUpperCase().replaceAll(" ", "_"), filledQuantity: Number.isFinite(filledQuantity) ? filledQuantity : null };
+          }
+
+          function flattenObject(value: Record<string, unknown>): Map<string, string> {
+            const result = new Map<string, string>();
+            const visit = (current: unknown): void => {
+              if (!current || typeof current !== "object") return;
+              for (const [key, child] of Object.entries(current)) {
+                const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+                if (typeof child === "string" || typeof child === "number") result.set(normalized, String(child));
+                else visit(child);
+              }
+            };
+            visit(value);
+            return result;
+          }
+
+          function firstString(values: Map<string, string>, names: string[]): string | null {
+            for (const name of names) {
+              const value = values.get(name);
+              if (value) return value;
+            }
+            return null;
+          }
+
+          function xmlValue(source: string, names: string[]): string | null {
+            for (const name of names) {
+              const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              const tag = source.match(new RegExp(`<${escaped}(?:\\s[^>]*)?>([^<]+)</${escaped}>`, "i"));
+              if (tag?.[1]) return decodeXml(tag[1].trim());
+              const attribute = source.match(new RegExp(`\\b${escaped}\\s*=\\s*["']([^"']+)["']`, "i"));
+              if (attribute?.[1]) return decodeXml(attribute[1].trim());
+            }
+            return null;
+          }
+
+          function decodeXml(value: string): string {
+            return value.replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", "\"").replaceAll("&#39;", "'");
+          }
+
+          function delay(ms: number): Promise<void> {
+            return new Promise((resolve) => setTimeout(resolve, ms));
+          }
+
+          function safeError(error: unknown): string {
+            const message = error instanceof Error ? error.message : String(error);
+            return message.replace(/[^A-Z0-9_=-]/gi, "_").slice(0, 120) || "UNKNOWN";
+          }
+          EOF
+
+          python - <<'PY'
+          from pathlib import Path
+
+          # Harden the SDK default socket with the same production transport
+          # settings that the automation-specific socket previously owned.
+          path = Path('src/streamer/streamerClient.ts')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace(
+              "this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));",
+              "this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url, { handshakeTimeout: 15_000, perMessageDeflate: false }));",
+          )
+          path.write_text(text, encoding='utf-8')
+
+          # Bring the legacy characterization fake frames up to the strict SDK
+          # wire schema. The behavioral assertions remain unchanged.
+          path = Path('test/activity_stream.test.ts')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace(
+              'this.emit("message", Buffer.from(JSON.stringify({ response: [{ requestid, service, command, content: { code } }] })));',
+              'this.emit("message", Buffer.from(JSON.stringify({ response: [{ requestid, service, command, timestamp: Date.now(), content: { code, msg: "OK" } }] })));',
+          )
+          text = text.replace(
+              'this.emit("message", Buffer.from(JSON.stringify({ data: entries })));',
+              'this.emit("message", Buffer.from(JSON.stringify({ data: entries.map((entry) => ({ timestamp: Date.now(), command: "SUBS", ...entry })) })));',
+          )
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Split executable entry from runtime orchestrator
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
           import re
-          p=Path('src/main.ts')
-          lines=p.read_text().splitlines()
-          print(f'MAIN_LINES={len(lines)} MAIN_BYTES={p.stat().st_size}')
-          patterns=[
-            re.compile(r'^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)'),
-            re.compile(r'^class\s+([A-Za-z0-9_]+)'),
-            re.compile(r'^const\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\('),
-          ]
-          for i,line in enumerate(lines,1):
-            for pat in patterns:
-              m=pat.search(line)
-              if m:
-                print(f'{i:5d} {m.group(1):48s} {line[:140]}')
-                break
-          print('\n=== imports ===')
-          for i,line in enumerate(lines[:80],1): print(f'{i:4d}: {line}')
-          PY
-          echo '=== auth/activity references ==='
-          grep -R -nE "from ['\"]\./auth|activity_stream|TokenManager|TokenStore|StreamerClient|AccountActivity" src test | head -n 300 || true
-          echo '=== main hotspots ==='
-          grep -nE "persist|refresh|reconcile|fixedPrice|fixed-price|explorer|exit|Opening|opening|shutdown|startup|main\(" src/main.ts | head -n 500 || true
 
-      - name: Baseline validation
+          main = Path('src/main.ts')
+          source = main.read_text(encoding='utf-8')
+          lines = source.splitlines()
+          import_end = 0
+          # Current source has one contiguous import section ending before root constants.
+          for index, line in enumerate(lines):
+              if line.startswith('const root = '):
+                  import_end = index
+                  break
+          if not import_end:
+              raise SystemExit('main import boundary not found')
+          imports = '\n'.join(lines[:import_end]).rstrip()
+          body = '\n'.join(lines[import_end:])
+          imports = re.sub(r'from "\./', 'from "../', imports)
+          body = body.replace(
+              'const root = dirname(dirname(fileURLToPath(import.meta.url)));',
+              'const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));',
+              1,
+          )
+          body = body.replace(
+              'entryPath: fileURLToPath(import.meta.url),',
+              'entryPath: join(root, "src", "main.ts"),',
+              1,
+          )
+          orchestrator = imports + '\n\n/**\n * Production automation composition and lifecycle orchestrator.\n * Broker mutation invariants remain delegated to the existing coordinators;\n * src/main.ts is intentionally a stable executable boundary.\n */\nexport async function runAutomationRuntime(): Promise<void> {\n' + body + '\n}\n'
+          Path('src/automation/runtimeOrchestrator.ts').write_text(orchestrator, encoding='utf-8')
+          main.write_text('import { runAutomationRuntime } from "./automation/runtimeOrchestrator.ts";\n\nawait runAutomationRuntime();\n', encoding='utf-8')
+          Path('src/automation/runtime.ts').write_text("export { runAutomationRuntime as runSchwabAutomationCli } from './runtimeOrchestrator.ts';\n", encoding='utf-8')
+          PY
+
+      - name: Validate convergence
+        shell: bash
         run: |
+          set -euo pipefail
           npm test
           npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
           git diff --check
+          test "$(wc -l < src/main.ts)" -le 10
+          ! grep -q 'new WebSocket' src/activity_stream.ts
+          ! grep -q 'api.schwabapi.com/v1/oauth/token' src/auth.ts
+
+      - name: Commit convergence
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src test/activity_stream.test.ts
+          git commit -m 'refactor: converge runtime auth and activity transport'
+          git push origin HEAD:refactor/enterprise-convergence-20260817
