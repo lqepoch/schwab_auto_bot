@@ -202,7 +202,7 @@ test("execution fingerprints include stop price, special instructions, asset typ
     { ...base, specialInstruction: "ALL_OR_NONE" },
     {
       ...base,
-      orderLegCollection: base.orderLegCollection.map((leg) => ({
+      orderLegCollection: base.orderLegCollection.map((leg: Record<string, any>) => ({
         ...leg,
         instrument: { ...leg.instrument, assetType: "EQUITY" },
       })),
@@ -248,7 +248,7 @@ test("broker response metadata does not make a request and its order snapshot di
     accountNumber: "hashed-account",
     replacingOrderCollection: ["old-order"],
     orderActivityCollection: [],
-    orderLegCollection: request.orderLegCollection.map((leg) => ({
+    orderLegCollection: request.orderLegCollection.map((leg: Record<string, any>) => ({
       ...leg,
       legId: 1,
       instrument: {

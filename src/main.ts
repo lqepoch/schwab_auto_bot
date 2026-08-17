@@ -8,7 +8,7 @@ import { runInteractiveLogin } from "./auth_cli.ts";
 import { createWeeklyReauthorizationEnsurer } from "./weekly_reauthorization.ts";
 import { PriorityGate, PriorityWriter, type Priority } from "./priority_runtime.ts";
 import { SchwabRestClient } from "./schwab_client.ts";
-import { SchwabApiError } from "../vendor/schwab-api-nodejs/src/utils/errors.ts";
+import { SchwabApiError } from "./utils/errors.ts";
 import { parseRuntimePolicy } from "./runtime_policy.ts";
 import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./order_policy.ts";
 import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
@@ -1254,7 +1254,7 @@ async function runActivityRestConfirmation(): Promise<void> {
   }
 }
 
-function managedOpening(order: Json): Json | null {
+function managedOpening(order: Json): ReturnType<typeof orderInfo> {
   const meta = info(order);
   if (
     !meta?.opening || meta.expiration !== newYorkDate() || !policy.underlyings.has(meta.underlying)
@@ -2149,127 +2149,6 @@ async function runExitWorker(strategy: string, template: Json, reason: string): 
   }
 }
 
-async function evaluateExitStrategyLegacy(strategy: string, template: Json, forceStartup: boolean): Promise<void> {
-  const inventory = inventoryByStrategy.get(strategy) ?? 0;
-  const active = orders.filter((order) => {
-    const meta = info(order);
-    return working.has(String(order.status)) && meta?.closing && meta.key === strategy
-      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
-  }).sort((left, right) => eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)));
-  if (inventory <= 0) {
-    for (const staleSell of active) {
-      const staleId = orderId(staleSell);
-      if (cancelingSells.has(staleId)) continue;
-      cancelingSells.add(staleId);
-      writer.enqueue({
-        key: `sell-cancel-empty:${staleId}`,
-        priority: 2,
-        run: async () => {
-          await cancelOrder(`sell-cancel-empty:${staleId}`, staleId);
-          sellDue.delete(staleId);
-          stamp(`库存为零，残留卖单已取消 strategy=${strategy} order=${staleId}`);
-        },
-      });
-    }
-    return;
-  }
-  const knownFillLots = openingFillLots.get(strategy)?.size ?? 0;
-  const maturedFills = maturedOpeningFillCount(strategy);
-  const unattributedInventory = Math.max(0, inventory - knownFillLots);
-  const observedAt = inventoryObservedAt.get(strategy) ?? Date.now();
-  const eligibility = exitEligibility(inventory, maturedFills, unattributedInventory, observedAt);
-  const liquidityRefresh = liquidityExitRefreshes.get(strategy);
-  const targetUnitSells = liquidityRefresh ? inventory : eligibility.targetUnitSells;
-  const gateState = `${inventory}:${targetUnitSells}:${eligibility.reason}:${liquidityRefresh?.remainingRounds ?? 0}`;
-  if (exitGateStates.get(strategy) !== gateState) {
-    exitGateStates.set(strategy, gateState);
-    executionJournal.record("exit.gate", {
-      strategy,
-      inventory,
-      knownFillLots,
-      maturedFills,
-      unattributedInventory,
-      unattributedObservedAt: new Date(observedAt).toISOString(),
-      liquidityRefresh: liquidityRefresh ?? null,
-      ...eligibility,
-      targetUnitSells,
-    });
-  }
-  if (forceStartup) {
-    stamp(`启动独立卖出 worker strategy=${strategy} inventory=${inventory} activeSells=${active.length}`);
-  }
-  const unitSells = active.filter((order) => quantity(order) === 1 && remaining(order) === 1);
-  if (unitSells.length !== active.length) {
-    return;
-  }
-  for (const excess of unitSells.slice(targetUnitSells)) {
-    const id = orderId(excess);
-    if (cancelingSells.has(id)) continue;
-    cancelingSells.add(id);
-    writer.enqueue({
-      key: `sell-cancel-excess:${id}`, priority: 2,
-      run: async () => cancelOrder(`sell-cancel-excess:${id}`, id),
-    });
-  }
-  const liquidityRefreshDue = liquidityRefresh !== undefined && Date.now() >= liquidityRefresh.nextAt
-    && unitSells.length >= targetUnitSells && targetUnitSells > 0;
-  let forcedRefreshCount = 0;
-  for (const sell of unitSells.slice(0, targetUnitSells)) {
-    const id = orderId(sell);
-    const due = sellDue.get(id) ?? 0;
-    if (!liquidityRefreshDue && Date.now() < due && Number(sell.price) === EXIT_ORDER_PRICE) continue;
-    const nextDelay = liquidityRefreshDue && liquidityRefresh.remainingRounds === 1
-      ? EXIT_REFRESH_MS : liquidityRefreshDue ? LIQUIDITY_EXIT_REFRESH_MS : EXIT_REFRESH_MS;
-    sellDue.set(id, Date.now() + nextDelay);
-    if (liquidityRefreshDue) forcedRefreshCount += 1;
-    writer.enqueue({
-      key: `sell-refresh:${id}`, priority: 2,
-      run: async () => {
-        const liveSell = orders.find((order) => orderId(order) === id);
-        if (!liveSell || !working.has(String(liveSell.status)) || quantity(liveSell) !== 1) return;
-        const payload = payloadFrom(template, 1, true);
-        const replacement = await writeOrder(
-          `sell-refresh:${id}:${Date.now()}`, "PUT",
-          `/trader/v1/accounts/${accountHash}/orders/${id}`, payload, 2,
-        );
-        applyLocalReplace(id, payload, replacement);
-        stamp(`卖单 Replace strategy=${strategy} quantity=1 replacement=${replacement}`);
-      },
-    });
-  }
-  if (liquidityRefreshDue && forcedRefreshCount > 0 && liquidityRefresh) {
-    liquidityRefresh.remainingRounds -= 1;
-    if (liquidityRefresh.remainingRounds <= 0) {
-      liquidityExitRefreshes.delete(strategy);
-      executionJournal.record("exit.liquidity-refresh-complete", { strategy, refreshedOrders: forcedRefreshCount });
-    } else {
-      liquidityRefresh.nextAt = Date.now() + LIQUIDITY_EXIT_REFRESH_MS;
-      executionJournal.record("exit.liquidity-refresh-round", { strategy, refreshedOrders: forcedRefreshCount, remainingRounds: liquidityRefresh.remainingRounds, nextAt: new Date(liquidityRefresh.nextAt).toISOString() });
-    }
-  }
-  const deficit = Math.max(0, targetUnitSells - unitSells.length);
-  if (deficit === 0) return;
-  const nextSubmitAt = sellSubmitDue.get(strategy) ?? 0;
-  if (Date.now() < nextSubmitAt && eligibility.reason !== "inventory-threshold" && !liquidityRefresh) return;
-  if (Date.now() - lastFullOrderPollAt >= 5_000 && !await ensureFreshOrdersForExit()) return;
-  sellSubmitDue.set(strategy, Date.now() + EXIT_REFRESH_MS);
-  for (let index = 0; index < deficit; index += 1) {
-    writer.enqueue({
-      key: `sell-submit:${strategy}:${index}`, priority: 2,
-      run: async () => {
-        if ((inventoryByStrategy.get(strategy) ?? 0) <= 0) return;
-        const payload = payloadFrom(template, 1, true);
-        const newId = await writeOrder(
-          `sell-submit:${strategy}:${index}:${Date.now()}`, "POST",
-          `/trader/v1/accounts/${accountHash}/orders`, payload, 2,
-        );
-        applyLocalSubmit(payload, newId);
-        stamp(`自动卖出 strategy=${strategy} quantity=1 newOrder=${newId}`);
-      },
-    });
-  }
-}
-
 async function evaluateExitStrategy(strategy: string, template: Json, forceStartup: boolean): Promise<void> {
   if (policy.disableSellOrders) return;
   const now = Date.now();
@@ -2648,7 +2527,8 @@ exitWorkerTimers.clear();
 if (activityRestTimer) clearTimeout(activityRestTimer);
 executionJournal.record("run.stopping", { reason: stopReason });
 if (!readOnly) persistExplorer();
-await activityStream?.stop();
+const streamToStop = activityStream as SchwabActivityStream | null;
+if (streamToStop) await streamToStop.stop();
 await writer.waitIdle();
 await explorerSavePending;
 await fixedPriceCycleSavePending;

@@ -1,23 +1,98 @@
 {
-  "name": "schwab_auto_bot",
-  "private": true,
+  "name": "schwab-owokit",
+  "version": "1.0.0",
+  "description": "TypeScript Charles Schwab API toolkit with a guarded automated order-execution module.",
   "type": "module",
-  "scripts": {
-    "start": "node src/main.ts",
-    "auth:login": "node src/auth_cli.ts login",
-    "auth:relogin": "node src/auth_cli.ts relogin --confirm REAUTHORIZE_SCHWAB",
-    "auth:status": "node src/auth_cli.ts status",
-    "check": "node --check src/main.ts && node --check src/auth.ts && node --check src/auth_cli.ts && node --check src/weekly_reauthorization.ts && node --check src/schwab_client.ts && node --check src/runtime_policy.ts && node --check src/entry_price_policy.ts && node --check src/business_log.ts && node --check src/broker_rate_limit.ts && node --check src/fixed_price_round_guard.ts && node --check src/refresh_preflight.ts && node --check src/refresh_order_policy.ts && node --check src/order_write_preflight.ts && node --check src/order_policy.ts && node --check src/price_explorer.ts && node --check src/fill_price.ts && node --check src/execution_journal.ts && node --check src/exit_policy.ts && node --check src/runtime_lock.ts && node --check src/fixed_price_cycle.ts && node --check src/refresh_pacer.ts && node --check src/refresh_round_limit.ts && node --check src/preview_rejection.ts && node --check src/activity_pacer.ts && node --check src/activity_stream.ts && node --check src/priority_runtime.ts && node --check src/unknown_write_reconciliation.ts && node --check src/full_snapshot_freshness.ts && node --check src/broker_write_coordinator.ts && node --check src/order_snapshot_coordinator.ts",
-    "test": "node --test test/*.test.ts test/*.test.mjs"
-  },
+  "private": true,
   "engines": {
     "node": ">=24"
   },
+  "main": "./dist/public.js",
+  "types": "./dist/public.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/public.d.ts",
+      "import": "./dist/public.js"
+    },
+    "./accounts": {
+      "types": "./dist/accounts/accountHashResolver.d.ts",
+      "import": "./dist/accounts/accountHashResolver.js"
+    },
+    "./orders": {
+      "types": "./dist/orders/orderBuilders.d.ts",
+      "import": "./dist/orders/orderBuilders.js"
+    },
+    "./options": {
+      "types": "./dist/options/optionSymbol.d.ts",
+      "import": "./dist/options/optionSymbol.js"
+    },
+    "./normalized-quotes": {
+      "types": "./dist/types/normalizedQuotes.d.ts",
+      "import": "./dist/types/normalizedQuotes.js"
+    },
+    "./streamer-fields": {
+      "types": "./dist/types/levelOneFields.d.ts",
+      "import": "./dist/types/levelOneFields.js"
+    },
+    "./streamer-market-data": {
+      "types": "./dist/streamer/marketDataClient.d.ts",
+      "import": "./dist/streamer/marketDataClient.js"
+    },
+    "./streamer-contracts": {
+      "types": "./dist/types/streamerContracts.d.ts",
+      "import": "./dist/types/streamerContracts.js"
+    },
+    "./streamer-snapshot": {
+      "types": "./dist/streamer/streamerSnapshot.d.ts",
+      "import": "./dist/streamer/streamerSnapshot.js"
+    },
+    "./gateway": {
+      "types": "./dist/gateway/schwabGateway.d.ts",
+      "import": "./dist/gateway/schwabGateway.js"
+    },
+    "./token-store": {
+      "types": "./dist/auth/tokenStore.d.ts",
+      "import": "./dist/auth/tokenStore.js"
+    },
+    "./contract-manifest": {
+      "types": "./dist/contracts/contractManifest.d.ts",
+      "import": "./dist/contracts/contractManifest.js"
+    },
+    "./automation": {
+      "types": "./dist/automation/public.d.ts",
+      "import": "./dist/automation/public.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "docs/SDK_API_README.md"
+  ],
+  "scripts": {
+    "start": "node src/automation/cli.ts",
+    "auth:login": "node src/auth_cli.ts login",
+    "auth:relogin": "node src/auth_cli.ts relogin --confirm REAUTHORIZE_SCHWAB",
+    "auth:status": "node src/auth_cli.ts status",
+    "build:sdk": "tsc -p tsconfig.sdk.json",
+    "build:automation": "tsc -p tsconfig.automation.json",
+    "build": "npm run build:sdk && npm run build:automation",
+    "typecheck:sdk": "tsc -p tsconfig.sdk.json --noEmit",
+    "typecheck:automation": "tsc -p tsconfig.automation.json --noEmit",
+    "typecheck": "npm run typecheck:sdk && npm run typecheck:automation",
+    "typecheck:test": "npm run build && tsc -p tsconfig.test.json --noEmit",
+    "check": "npm run typecheck",
+    "test:unit": "npm run build && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs",
+    "test": "npm run typecheck:test && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs"
+  },
   "dependencies": {
-    "ws": "^8.21.1",
+    "dotenv": "^16.4.7",
+    "open": "^10.1.0",
+    "ws": "^8.18.0",
     "zod": "^4.1.9"
   },
   "devDependencies": {
-    "@types/ws": "^8.18.1"
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.2"
   }
 }

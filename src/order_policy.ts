@@ -28,9 +28,11 @@ export type OrderPolicyViolation = {
 export function orderInfo(order: Json): OptionOrderInfo | null {
   const legs = order.orderLegCollection;
   if (!Array.isArray(legs) || legs.length !== 2) return null;
-  const parsed = legs.map((leg: Json) => parseOcc(String(leg.instrument?.symbol ?? "")));
-  if (parsed.some((value: Json | null) => value === null)) return null;
-  if (parsed[0].underlying !== parsed[1].underlying || parsed[0].expiration !== parsed[1].expiration) return null;
+  const first = parseOcc(String(legs[0]?.instrument?.symbol ?? ""));
+  const second = parseOcc(String(legs[1]?.instrument?.symbol ?? ""));
+  if (!first || !second) return null;
+  const parsed: [Json, Json] = [first, second];
+  if (first.underlying !== second.underlying || first.expiration !== second.expiration) return null;
   const instructions = legs.map((leg: Json) => String(leg.instruction ?? ""));
   const opening = instructions.every((value: string) => value.endsWith("_TO_OPEN"));
   const closing = instructions.every((value: string) => value.endsWith("_TO_CLOSE"));

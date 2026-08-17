@@ -3,8 +3,8 @@ import {
   type HttpMethod,
   type HttpResponse,
   type RequestOptions,
-} from "../vendor/schwab-api-nodejs/src/utils/httpClient.ts";
-import { createNullLogger } from "../vendor/schwab-api-nodejs/src/utils/logger.ts";
+} from "./utils/httpClient.ts";
+import { createNullLogger } from "./utils/logger.ts";
 
 const apiBase = "https://api.schwabapi.com";
 
