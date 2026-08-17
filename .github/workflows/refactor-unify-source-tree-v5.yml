@@ -46,12 +46,21 @@ jobs:
           )
           script = script.replace(
               "rm .github/workflows/refactor-unify-source-tree.yml",
-              "rm .github/workflows/refactor-unify-source-tree.yml\nrm .github/workflows/refactor-unify-source-tree-v2.yml\nrm .github/workflows/refactor-unify-source-tree-v3.yml\nrm .github/workflows/refactor-unify-source-tree-v4.yml\nrm .github/workflows/refactor-unify-source-tree-v5.yml",
+              "echo 'workflow cleanup deferred to GitHub API commit'",
           )
           script = script.replace(
               "if git grep -n 'vendor/schwab-api-nodejs'; then",
               "if git grep -n 'vendor/schwab-api-nodejs' -- src test docs README.md package.json package-lock.json; then",
           )
+
+          ci_start = script.find("cat > .github/workflows/schwab-sdk-ci.yml <<'YAML'\n")
+          if ci_start < 0:
+              raise SystemExit('UNIFIED_CI_BLOCK_START_MISSING')
+          ci_end = script.find("\nYAML\n", ci_start)
+          if ci_end < 0:
+              raise SystemExit('UNIFIED_CI_BLOCK_END_MISSING')
+          ci_end += len("\nYAML\n")
+          script = script[:ci_start] + "echo 'unified CI update deferred to GitHub API commit'\n" + script[ci_end:]
 
           cleanup = r"""python - <<'PYFIX'
           from pathlib import Path
