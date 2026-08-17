@@ -2,7 +2,7 @@ import { appendFile, mkdir, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { SchwabActivityStream, type ActivityBatch } from "./stream/activityStream.ts";
-import { requireWeeklyReauthorization, SchwabTokenProvider } from "./auth/provider.ts";
+import { beginLogin, login, requireWeeklyReauthorization, SchwabTokenProvider, type AutomationAuthOptions } from "./auth/provider.ts";
 import { UnauthorizedRefreshCoordinator } from "./auth/unauthorizedRefresh.ts";
 import { runInteractiveLogin } from "./auth/cli.ts";
 import { createWeeklyReauthorizationEnsurer } from "./auth/weeklyReauthorization.ts";
@@ -79,6 +79,7 @@ const host = resolveAutomationRuntimeHost(options, {
   entryPath: defaultAutomationRuntimeEntryPath(import.meta.url),
 });
 const root = repositoryRootFromAutomationModuleUrl(import.meta.url);
+const automationAuthOptions: AutomationAuthOptions = { env: host.env };
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
 const policyAlertPath = join(root, ".state", "policy-alerts.jsonl");
 const explorerStatePath = join(root, ".state", "net-price-explorer.json");
@@ -126,8 +127,11 @@ function stamp(message: string): void {
 }
 
 const ensureWeeklyReauthorization = createWeeklyReauthorizationEnsurer({
-  requireWeeklyReauthorization,
-  reauthorizeInteractively: runInteractiveLogin,
+  requireWeeklyReauthorization: () => requireWeeklyReauthorization(new Date(), automationAuthOptions),
+  reauthorizeInteractively: () => runInteractiveLogin({
+    beginLogin: () => beginLogin(automationAuthOptions),
+    login: (callbackUrl, state) => login(callbackUrl, state, automationAuthOptions),
+  }),
   onReauthorizationRequired: () => {
     executionJournal.record("auth.weekly-reauth-required", { action: "interactive-login" });
     stamp("AUTH_WEEKLY_REAUTH_REQUIRED: interactive OAuth login is required before broker writes; browser opening now");
@@ -216,7 +220,7 @@ function persistFixedPriceCycle(): void {
     .catch((error) => stamp(`FIXED_PRICE_CYCLE_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`));
 }
 
-const tokens = new SchwabTokenProvider(stamp);
+const tokens = new SchwabTokenProvider(stamp, automationAuthOptions);
 const unauthorizedRefresh = new UnauthorizedRefreshCoordinator({
   refresh: () => tokens.get(true),
   onFailure: (code) => {

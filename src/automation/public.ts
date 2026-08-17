@@ -3,6 +3,7 @@ export { runAutomationRuntime, runSchwabAutomationCli } from './runtime.ts';
 export type { AutomationRuntimeOptions } from './runtime.ts';
 export { SchwabRestClient } from './broker/schwabClient.ts';
 export { SchwabTokenProvider, requireWeeklyReauthorization, status as authStatus } from './auth/provider.ts';
+export type { AutomationAuthOptions } from './auth/provider.ts';
 export { BrokerWriteCoordinator } from './broker/writeCoordinator.ts';
 export { OrderSnapshotCoordinator, RuntimeStartupCoordinator } from './broker/orderSnapshotCoordinator.ts';
 export { PriceExplorer, MAX_ACTIVE_ORDERS } from './execution/priceExplorer.ts';
