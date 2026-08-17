@@ -35,7 +35,7 @@ function baseline() {
   };
 }
 
-function sample(overrides: { orderIndex?: number; eventLoop?: number } = {}) {
+function sample(overrides: { orderIndex?: number; atomicPersistence?: number; eventLoop?: number } = {}) {
   return {
     schemaVersion: 1,
     generatedAt: "2026-08-17T00:00:00.000Z",
@@ -46,7 +46,7 @@ function sample(overrides: { orderIndex?: number; eventLoop?: number } = {}) {
     corpusSize: 2500,
     metrics: {
       orderIndex: { operations: 1, wallMs: overrides.orderIndex ?? 10, operationsPerSecond: 1 },
-      atomicPersistence: { operations: 1, wallMs: 10, operationsPerSecond: 1 },
+      atomicPersistence: { operations: 1, wallMs: overrides.atomicPersistence ?? 10, operationsPerSecond: 1 },
       executionJournal: { operations: 1, wallMs: 10, operationsPerSecond: 1 },
       streamerDecodeDispatch: { operations: 1, wallMs: 10, operationsPerSecond: 1 },
       eventLoop: { p50Ms: 5, p95Ms: 8, p99Ms: overrides.eventLoop ?? 10, maxMs: overrides.eventLoop ?? 10 },
@@ -101,6 +101,42 @@ test("PR profile still fails a deterministic hot-path regression", async () => {
   }
 });
 
+test("PR multi-sample profile tolerates one filesystem outlier while gating the median", async () => {
+  const root = await mkdtemp(join(tmpdir(), "schwab-bench-gate-"));
+  try {
+    const baselinePath = join(root, "baseline.json");
+    const samplesPath = join(root, "samples");
+    await mkdir(samplesPath);
+    await writeFile(baselinePath, JSON.stringify(baseline()), "utf8");
+    for (const [index, value] of [10, 250, 12].entries()) {
+      await writeFile(join(samplesPath, `${index}.json`), JSON.stringify(sample({ atomicPersistence: value })), "utf8");
+    }
+    const result = run(["--baseline", baselinePath, "--current-dir", samplesPath, "--min-samples", "3"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /PASS atomicPersistence\.wallMs sampleCount=3 currentMedian=12ms/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("minimum sample contract rejects an accidentally undersized benchmark directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "schwab-bench-gate-"));
+  try {
+    const baselinePath = join(root, "baseline.json");
+    const samplesPath = join(root, "samples");
+    await mkdir(samplesPath);
+    await writeFile(baselinePath, JSON.stringify(baseline()), "utf8");
+    for (const index of [0, 1]) {
+      await writeFile(join(samplesPath, `${index}.json`), JSON.stringify(sample()), "utf8");
+    }
+    const result = run(["--baseline", baselinePath, "--current-dir", samplesPath, "--min-samples", "3"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /BENCHMARK_SAMPLE_SET_TOO_SMALL:2<3/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("scheduled profile requires at least five samples and gates the median event-loop p99", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-bench-gate-"));
   try {
@@ -111,7 +147,7 @@ test("scheduled profile requires at least five samples and gates the median even
     for (const [index, value] of [10, 20, 50, 60, 70].entries()) {
       await writeFile(join(samplesPath, `${index}.json`), JSON.stringify(sample({ eventLoop: value })), "utf8");
     }
-    const result = run(["--baseline", baselinePath, "--current-dir", samplesPath, "--gate-event-loop"]);
+    const result = run(["--baseline", baselinePath, "--current-dir", samplesPath, "--min-samples", "5", "--gate-event-loop"]);
     assert.notEqual(result.status, 0);
     assert.match(result.stdout, /FAIL eventLoop\.p99Ms sampleCount=5 currentMedian=50ms/);
   } finally {
@@ -129,7 +165,7 @@ test("scheduled profile tolerates isolated noisy-neighbor spikes when the five-s
     for (const [index, value] of [10, 20, 25, 50, 100].entries()) {
       await writeFile(join(samplesPath, `${index}.json`), JSON.stringify(sample({ eventLoop: value })), "utf8");
     }
-    const result = run(["--baseline", baselinePath, "--current-dir", samplesPath, "--gate-event-loop"]);
+    const result = run(["--baseline", baselinePath, "--current-dir", samplesPath, "--min-samples", "5", "--gate-event-loop"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /PASS eventLoop\.p99Ms sampleCount=5 currentMedian=25ms/);
   } finally {

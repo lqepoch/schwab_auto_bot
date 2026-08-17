@@ -12,6 +12,16 @@ function hasFlag(name: string): boolean {
   return process.argv.includes(name);
 }
 
+function positiveIntegerArg(name: string, fallback: number): number {
+  const raw = arg(name);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`BENCHMARK_MIN_SAMPLES_INVALID:${raw}`);
+  }
+  return value;
+}
+
 function round(value: number): number {
   return Number(value.toFixed(3));
 }
@@ -61,8 +71,12 @@ function validateSample(
 
 async function main(): Promise<void> {
   const baselinePath = arg("--baseline") ?? "bench/runtime-baseline.json";
+  const minimumSamples = positiveIntegerArg("--min-samples", 1);
   const baseline = JSON.parse(await readFile(baselinePath, "utf8")) as RuntimeBenchmarkBaseline;
   const samples = await loadCurrentSamples();
+  if (samples.length < minimumSamples) {
+    throw new Error(`BENCHMARK_SAMPLE_SET_TOO_SMALL:${samples.length}<${minimumSamples}`);
+  }
   for (const sample of samples) validateSample(baseline, sample);
 
   const values: Record<keyof RuntimeBenchmarkBaseline["metrics"], number[]> = {

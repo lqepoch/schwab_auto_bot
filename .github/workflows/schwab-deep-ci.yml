@@ -53,6 +53,7 @@ jobs:
           npm run benchmark:runtime:check -- \
             --baseline bench/runtime-baseline.json \
             --current-dir .artifacts/runtime-benchmark \
+            --min-samples 5 \
             --gate-event-loop
 
       - name: Upload scheduled runtime performance evidence
