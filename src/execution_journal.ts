@@ -16,6 +16,7 @@ export class ExecutionJournal {
   readonly path: string;
   readonly runId: string;
   private tail = Promise.resolve();
+  private directoryReady: Promise<void> | null = null;
   private readonly onFailure: (error: unknown) => void;
 
   constructor(root: string, runId: string, onFailure: (error: unknown) => void) {
@@ -33,12 +34,23 @@ export class ExecutionJournal {
       data: sanitizeJournalValue(data, "", new WeakSet<object>()) as Record<string, unknown>,
     } satisfies ExecutionEvent)}\n`;
     const write = this.tail.then(async () => {
-      await mkdir(dirname(this.path), { recursive: true });
+      await this.ensureDirectory();
       await appendFile(this.path, line, "utf8");
     });
     this.tail = write.catch((error) => {
       this.onFailure(error);
     });
+  }
+
+  private ensureDirectory(): Promise<void> {
+    if (!this.directoryReady) {
+      const pending = mkdir(dirname(this.path), { recursive: true }).then(() => undefined);
+      this.directoryReady = pending.catch((error) => {
+        if (this.directoryReady === pending) this.directoryReady = null;
+        throw error;
+      });
+    }
+    return this.directoryReady;
   }
 
   async flush(): Promise<void> {

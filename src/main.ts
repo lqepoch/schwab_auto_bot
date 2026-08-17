@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
@@ -9,6 +9,7 @@ import { createWeeklyReauthorizationEnsurer } from "./weekly_reauthorization.ts"
 import { PriorityGate, PriorityWriter, type Priority } from "./priority_runtime.ts";
 import { SchwabRestClient } from "./schwab_client.ts";
 import { SchwabApiError } from "./utils/errors.ts";
+import { atomicWriteJson } from "./utils/atomicJson.ts";
 import { parseRuntimePolicy } from "./runtime_policy.ts";
 import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./order_policy.ts";
 import { completeNetDebitFill, completeOrderLimitFill } from "./fill_price.ts";
@@ -85,11 +86,15 @@ const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId);
 process.once("exit", () => runtimeLock.release());
 let sellOrderAutomationDisabledRecorded = false;
 let latestBrokerRateLimit: BrokerRateLimit | null = null;
+const singaporeLogFormatter = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: "Asia/Singapore", dateStyle: "short", timeStyle: "medium", hour12: false,
+});
+const newYorkDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+});
 
 function stamp(message: string): void {
-  const value = new Intl.DateTimeFormat("sv-SE", {
-    timeZone: "Asia/Singapore", dateStyle: "short", timeStyle: "medium", hour12: false,
-  }).format(new Date());
+  const value = singaporeLogFormatter.format(new Date());
   const renderedMessage = appendBrokerRateLimit(message, latestBrokerRateLimit);
   process.stderr.write(`${value} ${renderedMessage}\n`);
   executionJournal.record("console", {
@@ -142,10 +147,7 @@ async function writeRuntimeState(state: "running" | "stopping" | "stopped", reas
     journalPath: executionJournal.path,
     updatedAt: new Date().toISOString(),
   };
-  await mkdir(dirname(runtimeStatePath), { recursive: true });
-  const temporary = `${runtimeStatePath}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(value), "utf8");
-  await rename(temporary, runtimeStatePath);
+  await atomicWriteJson(runtimeStatePath, value);
 }
 
 function wait(ms: number): Promise<void> {
@@ -179,23 +181,17 @@ async function loadFixedPriceCycle(): Promise<Set<string>> {
 function persistExplorer(): void {
   if (readOnly) return;
   const snapshot = explorer.snapshot();
-  explorerSavePending = explorerSavePending.then(async () => {
-    await mkdir(dirname(explorerStatePath), { recursive: true });
-    const temporary = `${explorerStatePath}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(snapshot), "utf8");
-    await rename(temporary, explorerStatePath);
-  }).catch((error) => stamp(`PRICE_EXPLORER_STATE_SAVE_FAILED error=${String(error)}`));
+  explorerSavePending = explorerSavePending
+    .then(() => atomicWriteJson(explorerStatePath, snapshot))
+    .catch((error) => stamp(`PRICE_EXPLORER_STATE_SAVE_FAILED error=${String(error)}`));
 }
 
 function persistFixedPriceCycle(): void {
   if (readOnly) return;
   const snapshot = [...fixedPriceCycleConsumedFills].slice(-1_000);
-  fixedPriceCycleSavePending = fixedPriceCycleSavePending.then(async () => {
-    await mkdir(dirname(fixedPriceCycleStatePath), { recursive: true });
-    const temporary = `${fixedPriceCycleStatePath}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(snapshot), "utf8");
-    await rename(temporary, fixedPriceCycleStatePath);
-  }).catch((error) => stamp(`FIXED_PRICE_CYCLE_STATE_SAVE_FAILED error=${String(error)}`));
+  fixedPriceCycleSavePending = fixedPriceCycleSavePending
+    .then(() => atomicWriteJson(fixedPriceCycleStatePath, snapshot))
+    .catch((error) => stamp(`FIXED_PRICE_CYCLE_STATE_SAVE_FAILED error=${String(error)}`));
 }
 
 class ExplorerActionPacer {
@@ -219,10 +215,16 @@ class RequestBudget {
   private lastHeadroomLogAt = 0;
   private lastPriorityActivityAt = Date.now();
 
+  private pruneAttempts(now: number): void {
+    let expired = 0;
+    while (expired < this.attempts.length && now - this.attempts[expired] >= 60_000) expired += 1;
+    if (expired > 0) this.attempts.splice(0, expired);
+  }
+
   async admit(priority: Priority): Promise<void> {
     for (;;) {
       const now = Date.now();
-      this.attempts = this.attempts.filter((value) => now - value < 60_000);
+      this.pruneAttempts(now);
       if (now < this.blockedUntil) {
         await wait(Math.min(1_000, this.blockedUntil - now));
         continue;
@@ -249,7 +251,7 @@ class RequestBudget {
 
   fixedPriceRefreshIntervalMs(): number {
     const now = Date.now();
-    this.attempts = this.attempts.filter((value) => now - value < 60_000);
+    this.pruneAttempts(now);
     return fixedPriceRefreshIntervalMs(this.attempts.length);
   }
 
@@ -753,9 +755,7 @@ function recordOrderTransitions(source: "full" | "fills", values: readonly Json[
   if (inventoryMayHaveChanged) invalidateExitPositionSnapshot();
 }
 function newYorkDate(): string {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(new Date());
+  const parts = newYorkDateFormatter.formatToParts(new Date());
   const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${value.year}-${value.month}-${value.day}`;
 }
@@ -1256,11 +1256,12 @@ async function runActivityRestConfirmation(): Promise<void> {
 
 function managedOpening(order: Json): ReturnType<typeof orderInfo> {
   const meta = info(order);
+  const today = newYorkDate();
   if (
-    !meta?.opening || meta.expiration !== newYorkDate() || !policy.underlyings.has(meta.underlying)
+    !meta?.opening || meta.expiration !== today || !policy.underlyings.has(meta.underlying)
     || !policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
     || !isRefreshSpreadEligible(meta)
-    || quantity(order) !== 1 || orderPolicyViolation(order, policy, newYorkDate())
+    || quantity(order) !== 1 || orderPolicyViolation(order, policy, today)
   ) return null;
   return meta;
 }
@@ -1270,12 +1271,10 @@ function rememberExitTemplate(strategy: string, order: Json): void {
   const current = exitTemplatesByStrategy.get(strategy);
   if (current && orderId(current) === orderId(order)) return;
   exitTemplatesByStrategy.set(strategy, structuredClone(order));
-  exitTemplateSavePending = exitTemplateSavePending.then(async () => {
-    await mkdir(dirname(exitTemplateStatePath), { recursive: true });
-    const temporary = `${exitTemplateStatePath}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(Object.fromEntries(exitTemplatesByStrategy)), "utf8");
-    await rename(temporary, exitTemplateStatePath);
-  }).catch((error) => stamp(`EXIT_TEMPLATE_STATE_SAVE_FAILED error=${String(error)}`));
+  const snapshot = Object.fromEntries(exitTemplatesByStrategy);
+  exitTemplateSavePending = exitTemplateSavePending
+    .then(() => atomicWriteJson(exitTemplateStatePath, snapshot))
+    .catch((error) => stamp(`EXIT_TEMPLATE_STATE_SAVE_FAILED error=${String(error)}`));
 }
 
 function reconcileExplorerSnapshot(): void {
@@ -1296,7 +1295,8 @@ function reconcileExplorerSnapshot(): void {
   // A full broker response is the authority. Recalculate eligibility from it;
   // do not infer current work from a previous snapshot delta.
   if (policy.repeatBuyAtOrderPrice && fixedPriceRefreshRoundActive) {
-    for (const order of orders) queueFixedPriceRefresh(order, "full-order-reconciliation");
+    const primaryOpeningIds = primaryActiveOpeningOrderIds();
+    for (const order of orders) queueFixedPriceRefresh(order, "full-order-reconciliation", primaryOpeningIds);
   }
   reconcileCurrentExitStrategies();
   persistExplorer();
@@ -1349,20 +1349,42 @@ function queueExplorerActions(groupKey: string, actions: ExplorerAction[]): void
   }
 }
 
+function compareOpeningOrders(left: Json, right: Json): number {
+  return Number(left.price) - Number(right.price)
+    || eventTime(left) - eventTime(right)
+    || orderId(left).localeCompare(orderId(right));
+}
+
 function activeOpeningOrders(groupKey: string): Json[] {
+  const today = newYorkDate();
   return orders.filter((order) => {
     const meta = info(order);
     return working.has(String(order.status)) && meta?.opening && meta.key === groupKey
-      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
-  }).sort((left, right) => Number(left.price) - Number(right.price) || eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)));
+      && meta.expiration === today && policy.underlyings.has(meta.underlying);
+  }).sort(compareOpeningOrders);
 }
 
-function queueFixedPriceRefresh(candidate: Json, source: "round-start" | "full-order-reconciliation"): void {
+function primaryActiveOpeningOrderIds(): Map<string, string> {
+  const primary = new Map<string, Json>();
+  for (const order of orders) {
+    const meta = managedOpening(order);
+    if (!meta || !working.has(String(order.status))) continue;
+    const current = primary.get(meta.key);
+    if (!current || compareOpeningOrders(order, current) < 0) primary.set(meta.key, order);
+  }
+  return new Map([...primary].map(([strategy, order]) => [strategy, orderId(order)]));
+}
+
+function queueFixedPriceRefresh(
+  candidate: Json,
+  source: "round-start" | "full-order-reconciliation",
+  primaryOpeningIds: ReadonlyMap<string, string>,
+): void {
   const meta = managedOpening(candidate);
   const id = orderId(candidate);
   if (
     !meta || !working.has(String(candidate.status))
-    || orderId(activeOpeningOrders(meta.key)[0] ?? {}) !== id
+    || primaryOpeningIds.get(meta.key) !== id
   ) return;
   if (fixedPriceRefreshRoundActive && !fixedPriceRefreshRoundGuard.reserveStrategy(meta.key)) return;
   writer.enqueue({
@@ -1727,7 +1749,6 @@ async function explorerTick(): Promise<void> {
     const actions = explorer.due(groupKey, Date.now());
     if (actions.length > 0) queueExplorerActions(groupKey, actions);
   }
-  persistExplorer();
 }
 
 function shuffled<T>(values: readonly T[]): T[] {
@@ -1817,16 +1838,17 @@ async function fixedPriceRefreshRound(): Promise<boolean> {
       return false;
     }
     fixedPriceRefreshRoundActive = true;
+    const primaryOpeningIds = primaryActiveOpeningOrderIds();
     const candidates = shuffled(orders.filter((order) => {
       const meta = managedOpening(order);
       if (meta === null || !working.has(String(order.status))) return false;
       // Existing external duplicates are left untouched, but fixed-price mode
       // maintains and refreshes only one working opening order per strategy.
-      return orderId(activeOpeningOrders(meta.key)[0]) === orderId(order);
+      return primaryOpeningIds.get(meta.key) === orderId(order);
     }));
     for (const candidate of candidates) {
       if (stopping) break;
-      queueFixedPriceRefresh(candidate, "round-start");
+      queueFixedPriceRefresh(candidate, "round-start", primaryOpeningIds);
     }
     await writer.waitIdle();
     if (stopping) return false;
