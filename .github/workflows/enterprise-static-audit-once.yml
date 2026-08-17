@@ -1,0 +1,51 @@
+name: Enterprise Static Audit Once
+
+on:
+  push:
+    branches:
+      - refactor/enterprise-convergence-20260817
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Static convergence inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== largest automation sources ==='
+          find src/automation -type f -name '*.ts' -printf '%s %p\n' | sort -nr | head -20
+          echo '=== fire-and-forget void calls ==='
+          rg -n '\bvoid\s+[A-Za-z_$][A-Za-z0-9_$.]*\(' src/automation || true
+          echo '=== raw String(error) rendering ==='
+          rg -n 'String\(error\)' src/automation || true
+          echo '=== process-global coupling ==='
+          rg -n 'process\.(argv|env|on|once|off|stdin|stdout|stderr|exit|execPath|pid)' src/automation || true
+          echo '=== depth-sensitive module paths ==='
+          rg -n 'fileURLToPath\(import\.meta\.url\)|dirname\(dirname' src/automation || true
+          echo '=== timers ==='
+          rg -n '(setInterval|setTimeout)\(' src/automation || true
+          echo '=== suppressed catches ==='
+          rg -n 'catch\s*\{\s*\}|catch\s*\([^)]*\)\s*\{\s*\}' src/automation || true
+          echo '=== TODO/FIXME/HACK/legacy/deprecated ==='
+          rg -ni '\b(TODO|FIXME|HACK|legacy|deprecated)\b' src test docs || true
+
+      - name: Dead-code and dependency audit
+        run: npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
