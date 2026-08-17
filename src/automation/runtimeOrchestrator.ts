@@ -1,6 +1,5 @@
 import { appendFile, mkdir, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { SchwabActivityStream, type ActivityBatch } from "./stream/activityStream.ts";
 import { requireWeeklyReauthorization, SchwabTokenProvider } from "./auth/provider.ts";
@@ -62,6 +61,7 @@ import {
   type UnknownWriteFailure,
 } from "./state/unknownWriteReconciliation.ts";
 import { bindRuntimeProcessHandlers } from "./runtimeProcess.ts";
+import { repositoryRootFromAutomationModuleUrl } from "./repositoryPaths.ts";
 
 /**
  * Production automation composition and lifecycle orchestrator.
@@ -70,7 +70,7 @@ import { bindRuntimeProcessHandlers } from "./runtimeProcess.ts";
  * executable boundary for process management and hot-switch tooling.
  */
 export async function runAutomationRuntime(): Promise<void> {
-const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+const root = repositoryRootFromAutomationModuleUrl(import.meta.url);
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
 const policyAlertPath = join(root, ".state", "policy-alerts.jsonl");
 const explorerStatePath = join(root, ".state", "net-price-explorer.json");

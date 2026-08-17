@@ -1,15 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { defaultAutomationAuthStatePath } from "../repositoryPaths.ts";
 import { TokenManager } from "../../auth/tokenManager.ts";
 import type { TokenStoreAdapter } from "../../auth/tokenStore.ts";
 import type { PersistedToken, SchwabAuthConfig } from "../../types/auth.ts";
 import { ReauthRequiredError } from "../../utils/errors.ts";
 import { atomicWriteJson } from "../../utils/atomicJson.ts";
 
-const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const statePath = process.env.SCHWAB_BOT_AUTH_FILE || join(root, "state", "schwab-auth.json");
+const statePath = process.env.SCHWAB_BOT_AUTH_FILE || defaultAutomationAuthStatePath(import.meta.url);
 const weeklyReauthorizationFormatter = new Intl.DateTimeFormat("en-US", {
   timeZone: "Asia/Shanghai",
   weekday: "short",
