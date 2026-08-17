@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -72,17 +72,28 @@ test("redacts token, authorization, secret, and account identifiers at the journ
   }
 });
 
-test("reports mkdir or append failures through onFailure while flush remains observable and non-throwing", async () => {
+test("reports a directory failure and retries directory creation on a later record", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-journal-"));
   try {
-    await (await import("node:fs/promises")).writeFile(join(root, ".state"), "not-a-directory", "utf8");
+    const statePath = join(root, ".state");
+    await writeFile(statePath, "not-a-directory", "utf8");
     const failures: unknown[] = [];
     const journal = new ExecutionJournal(root, "run-failure", (error) => failures.push(error));
+
     journal.record("will-fail", { value: 1 });
     await journal.flush();
     assert.equal(failures.length, 1);
     assert.ok(failures[0] instanceof Error);
+
+    await rm(statePath, { force: true });
+    journal.record("recovered", { value: 2 });
     await journal.flush();
+
+    const events = (await readFile(journal.path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(events.length, 1);
+    assert.equal(events[0].event, "recovered");
+    assert.equal(events[0].data.value, 2);
+    assert.equal(failures.length, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

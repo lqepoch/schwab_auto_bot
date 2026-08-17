@@ -1,12 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { atomicWriteJson } from "./utils/atomicJson.ts";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const statePath = process.env.SCHWAB_BOT_AUTH_FILE || join(root, "state", "schwab-auth.json");
 const authorizeUrl = "https://api.schwabapi.com/v1/oauth/authorize";
 const tokenUrl = "https://api.schwabapi.com/v1/oauth/token";
+const weeklyReauthorizationFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "Asia/Shanghai",
+  weekday: "short",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
 
 type Token = {
   accessToken: string;
@@ -93,15 +104,7 @@ async function load(): Promise<AuthFile | null> {
 }
 
 async function save(value: AuthFile): Promise<void> {
-  await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
-  const temporary = `${statePath}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporary, JSON.stringify(value, null, 2), { encoding: "utf8", mode: 0o600 });
-    await rename(temporary, statePath);
-  } catch (error) {
-    await unlink(temporary).catch(() => undefined);
-    throw error;
-  }
+  await atomicWriteJson(statePath, value, { directoryMode: 0o700, fileMode: 0o600, pretty: true });
 }
 
 async function requestToken(
@@ -252,16 +255,9 @@ export function beginLogin(): { state: string; authorizationUrl: string } {
 }
 
 export function weeklyReauthorizationWeek(now = new Date()): string {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Shanghai",
-    weekday: "short",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(now).map((part) => [part.type, part.value]));
+  const parts = Object.fromEntries(weeklyReauthorizationFormatter
+    .formatToParts(now)
+    .map((part) => [part.type, part.value]));
   const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(parts.weekday);
   if (weekday < 0) throw new Error("AUTH_REAUTH_CLOCK_INVALID");
   const localDate = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)));
