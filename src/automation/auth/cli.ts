@@ -1,11 +1,10 @@
-import { spawn } from "node:child_process";
+import open from "open";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beginLogin, login, status } from "./provider.ts";
 
-function openBrowser(url: string): void {
-  const child = spawn("rundll32.exe", ["url.dll,FileProtocolHandler", url], { detached: true, stdio: "ignore", windowsHide: true });
-  child.unref();
+async function openBrowser(url: string): Promise<void> {
+  await open(url);
 }
 
 type CallbackInput = NodeJS.ReadableStream & { unref?: () => void };
@@ -13,7 +12,7 @@ type CallbackInput = NodeJS.ReadableStream & { unref?: () => void };
 export type InteractiveLoginDependencies = {
   beginLogin?: typeof beginLogin;
   login?: typeof login;
-  openBrowser?: (url: string) => void;
+  openBrowser?: (url: string) => void | Promise<void>;
   readCallbackUrl?: () => Promise<string>;
   output?: Pick<NodeJS.WritableStream, "write">;
 };
@@ -52,8 +51,17 @@ export async function runInteractiveLogin({
   output = process.stdout,
 }: InteractiveLoginDependencies = {}): Promise<void> {
   const { state, authorizationUrl } = startLogin();
-  output.write("OAuth 授权已打开浏览器；完成后请将完整回调 URL 粘贴到此终端。\n");
-  launchBrowser(authorizationUrl);
+  // Always show the one-time authorization URL. Headless Linux, SSH sessions,
+  // containers and locked-down desktops may have no usable GUI opener even
+  // when the process itself is otherwise fully functional.
+  output.write(`OAuth 授权地址: ${authorizationUrl}\n`);
+  try {
+    await launchBrowser(authorizationUrl);
+    output.write("已尝试使用系统默认浏览器打开 OAuth 授权页。\n");
+  } catch {
+    output.write("自动打开浏览器失败；请手动打开上面的 OAuth 授权地址。\n");
+  }
+  output.write("完成授权后，请将完整回调 URL 粘贴到此终端。\n");
   await completeLogin(await readCallback(), state);
   output.write("登录完成；Token 已写入本机 state/schwab-auth.json。\n");
 }
