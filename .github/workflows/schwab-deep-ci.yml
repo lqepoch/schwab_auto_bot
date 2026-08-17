@@ -47,11 +47,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .artifacts/runtime-benchmark
-          for run in 1 2 3; do
-            file=".artifacts/runtime-benchmark/run-${run}.json"
-            npm run benchmark:runtime -- --output "$file"
-            npm run benchmark:runtime:check -- --baseline bench/runtime-baseline.json --current "$file"
+          for run in 1 2 3 4 5; do
+            npm run benchmark:runtime -- --output ".artifacts/runtime-benchmark/run-${run}.json"
           done
+          npm run benchmark:runtime:check -- \
+            --baseline bench/runtime-baseline.json \
+            --current-dir .artifacts/runtime-benchmark \
+            --gate-event-loop
 
       - name: Upload scheduled runtime performance evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
