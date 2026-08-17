@@ -1,0 +1,59 @@
+name: Runtime Lifecycle Finalize Once
+
+on:
+  push:
+    branches:
+      - refactor/enterprise-convergence-20260817
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Apply final lifecycle cleanup
+        run: |
+          set -euo pipefail
+          python3 scripts/runtime-lifecycle-finalize.py
+          rm scripts/runtime-lifecycle-finalize.py
+
+      - name: Validate exception-safe cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+          git diff --check
+          grep -q '^let unbindRuntimeProcessHandlers = () => {};$' src/automation/runtimeOrchestrator.ts
+          grep -q '^try {$' src/automation/runtimeOrchestrator.ts
+          grep -q '^} finally {$' src/automation/runtimeOrchestrator.ts
+          grep -q 'if (!requestStop("max-refresh-rounds")) return;' src/automation/runtimeOrchestrator.ts
+          grep -q 'if (!requestStop(String(request.command))) return;' src/automation/runtimeOrchestrator.ts
+
+      - name: Commit finalized runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'LQ'
+          git config user.email 'lqepoch@126.com'
+          git add -A
+          git status --short
+          git commit -m 'fix: guarantee runtime lock and listener cleanup'
+          git push origin HEAD:refactor/enterprise-convergence-20260817
