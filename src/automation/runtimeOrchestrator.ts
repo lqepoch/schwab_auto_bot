@@ -95,6 +95,8 @@ if (!readOnly && !confirmedLive) {
 }
 const policy = parseRuntimePolicy(process.argv);
 const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId);
+let unbindRuntimeProcessHandlers = () => {};
+try {
 let sellOrderAutomationDisabledRecorded = false;
 let latestBrokerRateLimit: BrokerRateLimit | null = null;
 const singaporeLogFormatter = new Intl.DateTimeFormat("sv-SE", {
@@ -1803,9 +1805,7 @@ function recordRefreshRoundCompleted(mode: "fixed-price" | "price-explorer") {
 async function finishRefreshLimitedRun(state: ReturnType<typeof refreshRoundLimit.completeRound>): Promise<void> {
   executionJournal.record("run.refresh-round-limit-draining", state);
   await writer.waitIdle();
-  if (stopping) return;
-  stopReason = "max-refresh-rounds";
-  stopping = true;
+  if (!requestStop("max-refresh-rounds")) return;
   executionJournal.record("run.refresh-round-limit-completed", state);
   stamp(`REFRESH_ROUND_LIMIT_COMPLETED completed=${state.completedRounds}; queued refresh work is settled and the runtime is stopping`);
 }
@@ -2422,8 +2422,7 @@ async function checkControlRequest(): Promise<void> {
     if ((request.command !== "stop" && request.command !== "stop-for-restart") || typeof request.requestId !== "string" || !request.requestId) {
       return;
     }
-    stopReason = String(request.command);
-    stopping = true;
+    if (!requestStop(String(request.command))) return;
     executionJournal.record("run.control-requested", { command: request.command, requestId: request.requestId });
     stamp(`RUNTIME_CONTROL_ACCEPTED command=${request.command} requestId=${request.requestId}`);
     await writeRuntimeState("stopping", stopReason);
@@ -2446,7 +2445,7 @@ function requestStop(reason: string): boolean {
   return true;
 }
 
-const unbindRuntimeProcessHandlers = bindRuntimeProcessHandlers(process, {
+unbindRuntimeProcessHandlers = bindRuntimeProcessHandlers(process, {
   onSignal: (signal) => {
     if (!requestStop("signal")) return;
     executionJournal.record("run.signal-received", { signal });
@@ -2549,7 +2548,9 @@ await exitTemplateSavePending;
 await writeRuntimeState("stopped", stopReason);
 executionJournal.record("run.stopped", { reason: stopReason });
 await executionJournal.flush();
-unbindRuntimeProcessHandlers();
-runtimeLock.release();
 
+} finally {
+  unbindRuntimeProcessHandlers();
+  runtimeLock.release();
+}
 }
