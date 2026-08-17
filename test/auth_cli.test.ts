@@ -44,6 +44,63 @@ test("interactive login opens the authorization page and completes with the past
     "callback",
     "login:expected-state:https://127.0.0.1/?code=test&state=expected-state",
   ]);
-  assert.match(output, /OAuth/);
+  assert.match(output, /OAuth 授权地址: https:\/\/example\.test\/authorize/);
+  assert.match(output, /默认浏览器/);
   assert.match(output, /Token/);
+});
+
+test("headless browser launch failure falls back to the printed authorization URL", async () => {
+  const calls: string[] = [];
+  let output = "";
+
+  await runInteractiveLogin({
+    beginLogin: () => ({ state: "headless-state", authorizationUrl: "https://example.test/headless" }),
+    openBrowser: async (url) => {
+      calls.push(`browser:${url}`);
+      throw new Error("xdg-open unavailable");
+    },
+    readCallbackUrl: async () => {
+      calls.push("callback");
+      return "https://127.0.0.1/?code=headless&state=headless-state";
+    },
+    login: async (callbackUrl, state) => { calls.push(`login:${state}:${callbackUrl}`); },
+    output: { write(chunk: string): boolean { output += chunk; return true; } },
+  });
+
+  assert.deepEqual(calls, [
+    "browser:https://example.test/headless",
+    "callback",
+    "login:headless-state:https://127.0.0.1/?code=headless&state=headless-state",
+  ]);
+  assert.match(output, /OAuth 授权地址: https:\/\/example\.test\/headless/);
+  assert.match(output, /自动打开浏览器失败/);
+  assert.match(output, /手动打开/);
+  assert.doesNotMatch(output, /xdg-open unavailable/);
+});
+
+test("interactive login waits for an asynchronous browser launcher before reading callback input", async () => {
+  let releaseBrowser!: () => void;
+  const browserReady = new Promise<void>((resolve) => { releaseBrowser = resolve; });
+  const calls: string[] = [];
+
+  const loginFlow = runInteractiveLogin({
+    beginLogin: () => ({ state: "wait-state", authorizationUrl: "https://example.test/wait" }),
+    openBrowser: async () => {
+      calls.push("browser-start");
+      await browserReady;
+      calls.push("browser-ready");
+    },
+    readCallbackUrl: async () => {
+      calls.push("callback");
+      return "https://127.0.0.1/?code=wait&state=wait-state";
+    },
+    login: async () => { calls.push("login"); },
+    output: { write(): boolean { return true; } },
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["browser-start"]);
+  releaseBrowser();
+  await loginFlow;
+  assert.deepEqual(calls, ["browser-start", "browser-ready", "callback", "login"]);
 });
