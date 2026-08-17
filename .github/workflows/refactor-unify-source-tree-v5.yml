@@ -94,6 +94,16 @@ jobs:
               raise SystemExit('RUNTIME_LOCK_PID_GUARD_MISSING')
           text = text.replace(old_line, '      || typeof value.pid !== "number"\n      || !Number.isInteger(value.pid)', 1)
           lock.write_text(text, encoding='utf-8')
+
+          reconciliation_test = Path('test/unknown_write_reconciliation.test.ts')
+          text = reconciliation_test.read_text(encoding='utf-8')
+          marker = '.map((leg) => ({'
+          if text.count(marker) != 2:
+              raise SystemExit('UNKNOWN_WRITE_TEST_LEG_CALLBACK_COUNT_CHANGED')
+          reconciliation_test.write_text(
+              text.replace(marker, '.map((leg: Record<string, any>) => ({'),
+              encoding='utf-8',
+          )
           PYFIX
 
           """
