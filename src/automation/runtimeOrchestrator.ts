@@ -64,7 +64,8 @@ import {
   type UnknownWriteFailure,
 } from "./state/unknownWriteReconciliation.ts";
 import { bindRuntimeProcessHandlers } from "./runtimeProcess.ts";
-import { repositoryRootFromAutomationModuleUrl } from "./repositoryPaths.ts";
+import { defaultAutomationRuntimeEntryPath, repositoryRootFromAutomationModuleUrl } from "./repositoryPaths.ts";
+import { resolveAutomationRuntimeHost, type AutomationRuntimeOptions } from "./runtimeHost.ts";
 import { superviseBackgroundTask } from "./backgroundTask.ts";
 
 /**
@@ -73,7 +74,10 @@ import { superviseBackgroundTask } from "./backgroundTask.ts";
  * reconciliation and snapshot-freshness gates. src/main.ts remains a stable
  * executable boundary for process management and hot-switch tooling.
  */
-export async function runAutomationRuntime(): Promise<void> {
+export async function runAutomationRuntime(options: AutomationRuntimeOptions = {}): Promise<void> {
+const host = resolveAutomationRuntimeHost(options, {
+  entryPath: defaultAutomationRuntimeEntryPath(import.meta.url),
+});
 const root = repositoryRootFromAutomationModuleUrl(import.meta.url);
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
 const policyAlertPath = join(root, ".state", "policy-alerts.jsonl");
@@ -88,17 +92,17 @@ const runId = randomUUID();
 const runtimeStartedAt = Date.now();
 const PREVIEW_REJECTION_COOLDOWN_MS = 30_000;
 const executionJournal = new ExecutionJournal(root, runId, (error) => {
-  process.stderr.write(`${new Date().toISOString()} EXECUTION_JOURNAL_WRITE_FAILED error=${safeRuntimeError(error)}\n`);
+  host.stderr.write(`${new Date().toISOString()} EXECUTION_JOURNAL_WRITE_FAILED error=${safeRuntimeError(error)}\n`);
 });
 const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
-const readOnly = process.argv.includes("--read-only");
-const once = process.argv.includes("--once");
-const confirmIndex = process.argv.indexOf("--confirm-live");
-const confirmedLive = confirmIndex >= 0 && process.argv[confirmIndex + 1] === "I_UNDERSTAND";
+const readOnly = host.argv.includes("--read-only");
+const once = host.argv.includes("--once");
+const confirmIndex = host.argv.indexOf("--confirm-live");
+const confirmedLive = confirmIndex >= 0 && host.argv[confirmIndex + 1] === "I_UNDERSTAND";
 if (!readOnly && !confirmedLive) {
   throw new Error("真实写入必须显式传入 --confirm-live I_UNDERSTAND");
 }
-const policy = parseRuntimePolicy(process.argv);
+const policy = parseRuntimePolicy(host.argv);
 const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId);
 let unbindRuntimeProcessHandlers = () => {};
 try {
@@ -114,7 +118,7 @@ const newYorkDateFormatter = new Intl.DateTimeFormat("en-CA", {
 function stamp(message: string): void {
   const value = singaporeLogFormatter.format(new Date());
   const renderedMessage = appendBrokerRateLimit(message, latestBrokerRateLimit);
-  process.stderr.write(`${value} ${renderedMessage}\n`);
+  host.stderr.write(`${value} ${renderedMessage}\n`);
   executionJournal.record("console", {
     message: renderedMessage,
     brokerRateLimit: latestBrokerRateLimit,
@@ -156,12 +160,12 @@ async function writeRuntimeState(state: "running" | "stopping" | "stopped", reas
     state,
     reason: reason ?? null,
     runId,
-    pid: process.pid,
+    pid: host.pid,
     workspaceRoot: root,
-    nodePath: process.execPath,
-    entryPath: join(root, "src", "main.ts"),
-    buildId: process.env.SCHWAB_BOT_BUILD_ID ?? null,
-    args: process.argv.slice(2),
+    nodePath: host.execPath,
+    entryPath: host.entryPath,
+    buildId: host.env.SCHWAB_BOT_BUILD_ID ?? null,
+    args: host.argv.slice(2),
     journalPath: executionJournal.path,
     updatedAt: new Date().toISOString(),
   };
@@ -2414,7 +2418,7 @@ function launchRuntimeBackgroundTask(
   });
 }
 
-unbindRuntimeProcessHandlers = bindRuntimeProcessHandlers(process, {
+unbindRuntimeProcessHandlers = bindRuntimeProcessHandlers(host.processEvents, {
   onSignal: (signal) => {
     if (!requestStop("signal")) return;
     executionJournal.record("run.signal-received", { signal });
@@ -2436,7 +2440,7 @@ executionJournal.record("run.started", {
   maxRefreshRounds: policy.maxRefreshRounds,
   repeatBuyAtOrderPrice: policy.repeatBuyAtOrderPrice,
   disableSellOrders: policy.disableSellOrders,
-  buildId: process.env.SCHWAB_BOT_BUILD_ID ?? null,
+  buildId: host.env.SCHWAB_BOT_BUILD_ID ?? null,
 });
 const strikeRangesSummary = [...policy.strikeRanges.entries()]
   .flatMap(([underlying, ranges]) => ranges.map((range) => `${underlying}:${range.minimum}:${range.maximum}`))

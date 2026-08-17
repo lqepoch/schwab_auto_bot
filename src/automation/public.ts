@@ -1,5 +1,6 @@
 /** Stable module boundary for guarded automated Schwab order execution. */
-export { runSchwabAutomationCli } from './runtime.ts';
+export { runAutomationRuntime, runSchwabAutomationCli } from './runtime.ts';
+export type { AutomationRuntimeOptions } from './runtime.ts';
 export { SchwabRestClient } from './broker/schwabClient.ts';
 export { SchwabTokenProvider, requireWeeklyReauthorization, status as authStatus } from './auth/provider.ts';
 export { BrokerWriteCoordinator } from './broker/writeCoordinator.ts';

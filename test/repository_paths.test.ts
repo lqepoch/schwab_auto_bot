@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import {
   defaultAutomationAuthStatePath,
+  defaultAutomationRuntimeEntryPath,
   repositoryRootFromAutomationModuleUrl,
 } from "../src/automation/repositoryPaths.ts";
 
@@ -33,6 +34,17 @@ test("default automation auth state remains in repository state directory", () =
   assert.equal(
     defaultAutomationAuthStatePath(fileUrl("dist", "automation", "auth", "provider.js")),
     join(repoRoot, "state", "schwab-auth.json"),
+  );
+});
+
+test("runtime entry path follows source or compiled automation tree", () => {
+  assert.equal(
+    defaultAutomationRuntimeEntryPath(fileUrl("src", "automation", "runtimeOrchestrator.ts")),
+    join(repoRoot, "src", "main.ts"),
+  );
+  assert.equal(
+    defaultAutomationRuntimeEntryPath(fileUrl("dist", "automation", "auth", "provider.js")),
+    join(repoRoot, "dist", "main.js"),
   );
 });
 
