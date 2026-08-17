@@ -5,7 +5,7 @@ export const TokenResponseSchema = z.object({
   refresh_token: z.string().min(1),
   expires_in: z.number().int().positive(),
   refresh_expires_in: z.number().int().positive().optional(),
-  token_type: z.string().min(1),
+  token_type: z.string().min(1).default('Bearer'),
 });
 
 export const RefreshTokenResponseSchema = TokenResponseSchema.extend({
