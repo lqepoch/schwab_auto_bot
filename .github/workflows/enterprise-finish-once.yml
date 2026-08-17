@@ -1,0 +1,88 @@
+name: Enterprise convergence finalization one-shot
+
+on:
+  push:
+    branches:
+      - refactor/enterprise-convergence-20260817
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Integrate deterministic order index
+        run: node scripts/enterprise-finish-edit.mjs
+
+      - name: Validate complete source graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+          git diff --check
+          test "$(wc -l < src/main.ts)" -le 10
+          ! grep -q 'new WebSocket' src/activity_stream.ts
+          ! grep -q 'api.schwabapi.com/v1/oauth/token' src/auth.ts
+
+      - name: Build seven-sample performance baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/runtime-baseline-samples
+          for run in 1 2 3 4 5 6 7; do
+            npm run benchmark:runtime -- --output ".artifacts/runtime-baseline-samples/run-${run}.json"
+          done
+          npm run benchmark:runtime:baseline -- --inputs .artifacts/runtime-baseline-samples --output bench/runtime-baseline.json
+
+      - name: Validate fresh benchmark against baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run benchmark:runtime -- --output .artifacts/runtime-benchmark-current.json
+          npm run benchmark:runtime:check -- --baseline bench/runtime-baseline.json --current .artifacts/runtime-benchmark-current.json
+
+      - name: Remove migration-only tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/enterprise-finish-once.yml
+          git rm scripts/enterprise-finish-edit.mjs
+
+      - name: Validate final repository invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test ! -e .github/workflows/enterprise-convergence-once.yml
+          test ! -e .github/workflows/enterprise-finish-once.yml
+          test ! -e scripts/enterprise-convergence-edit.mjs
+          test ! -e scripts/enterprise-finish-edit.mjs
+
+      - name: Commit finalization
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/automation/runtimeOrchestrator.ts bench/runtime-baseline.json .github/workflows/schwab-sdk-ci.yml .github/workflows/schwab-deep-ci.yml package.json knip.json tsconfig.bench.json bench test docs src
+          git commit -m 'refactor: complete enterprise runtime convergence and SLO gates'
+          git push origin HEAD:refactor/enterprise-convergence-20260817
