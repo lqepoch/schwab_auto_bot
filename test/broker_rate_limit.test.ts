@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   appendBrokerRateLimit,
   brokerRateLimitFromHeaders,
-} from "../src/broker_rate_limit.ts";
+} from "../src/automation/broker/rateLimit.ts";
 
 test("reads an actual X-RateLimit response and appends remaining over limit at the end", () => {
   const value = brokerRateLimitFromHeaders(new Headers({

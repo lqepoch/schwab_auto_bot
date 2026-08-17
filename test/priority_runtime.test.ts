@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PriorityGate, PriorityWriter, type Job, type Priority } from "../src/priority_runtime.ts";
+import { PriorityGate, PriorityWriter, type Job, type Priority } from "../src/automation/scheduling/priorityRuntime.ts";
 
 function deferred<T = void>(): {
   promise: Promise<T>;

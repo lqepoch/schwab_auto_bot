@@ -7,8 +7,8 @@ coverage/
 .env
 .env.*
 !.env.example
-state/
-.state/
+/state/
+/.state/
 *.log
 baseline-import/
 baseline-node-vertical.zip

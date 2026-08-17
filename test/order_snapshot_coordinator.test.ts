@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { OrderSnapshotCoordinator, RuntimeStartupCoordinator } from "../src/order_snapshot_coordinator.ts";
+import { OrderSnapshotCoordinator, RuntimeStartupCoordinator } from "../src/automation/broker/orderSnapshotCoordinator.ts";
 
 type Order = { orderId: string; status: string };
 

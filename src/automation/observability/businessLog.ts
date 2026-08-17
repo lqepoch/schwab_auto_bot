@@ -1,4 +1,4 @@
-import type { OptionOrderInfo } from "./order_policy.ts";
+import type { OptionOrderInfo } from "../policy/order.ts";
 
 export function formatFixedPriceReplace(meta: Pick<OptionOrderInfo, "key" | "underlying" | "lowerStrike" | "higherStrike">, price: number): string {
   return `刷新 ${formatStrategy(meta)} Replace ${price.toFixed(2)}`;

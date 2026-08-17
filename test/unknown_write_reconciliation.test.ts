@@ -8,7 +8,7 @@ import {
   fingerprintPayload,
   fingerprintOrder,
   safePath,
-} from "../src/unknown_write_reconciliation.ts";
+} from "../src/automation/state/unknownWriteReconciliation.ts";
 
 function order(
   id: string,

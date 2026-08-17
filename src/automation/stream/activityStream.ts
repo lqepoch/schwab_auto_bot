@@ -1,7 +1,7 @@
 import type WebSocket from "ws";
-import { StreamerClient } from "./streamer/streamerClient.ts";
-import type { StreamerDataPayload } from "./types/streamer.ts";
-import type { StreamerInfo } from "./types/trader.ts";
+import { StreamerClient } from "../../streamer/streamerClient.ts";
+import type { StreamerDataPayload } from "../../types/streamer.ts";
+import type { StreamerInfo } from "../../types/trader.ts";
 
 export type StreamContext = {
   accessToken: string;

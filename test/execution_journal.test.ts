@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ExecutionJournal } from "../src/execution_journal.ts";
+import { ExecutionJournal } from "../src/automation/observability/executionJournal.ts";
 
 test("writes ordered JSONL records into a per-run state directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-journal-"));

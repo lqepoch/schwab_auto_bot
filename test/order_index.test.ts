@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { orderInfo, type Json } from "../src/order_policy.ts";
-import { parseRuntimePolicy } from "../src/runtime_policy.ts";
+import { orderInfo, type Json } from "../src/automation/policy/order.ts";
+import { parseRuntimePolicy } from "../src/automation/policy/runtime.ts";
 import {
   buildPrimaryActiveOpeningOrderIds,
   compareOpeningOrders,

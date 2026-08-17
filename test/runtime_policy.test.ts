@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isWithinExecutionWindow, isWithinInclusiveRange, parseRuntimePolicy } from "../src/runtime_policy.ts";
+import { isWithinExecutionWindow, isWithinInclusiveRange, parseRuntimePolicy } from "../src/automation/policy/runtime.ts";
 
 test("defaults permit QQQ and SPY only during the New York execution window", () => {
   const policy = parseRuntimePolicy([]);

@@ -27,6 +27,15 @@ import { StreamerSnapshotCache as SubpathSnapshotCache } from 'schwab-owokit/str
 import { SchwabGateway as SubpathGateway } from 'schwab-owokit/gateway';
 import { TokenStore as SubpathTokenStore } from 'schwab-owokit/token-store';
 import { REST_CONTRACT_MANIFEST as subpathRestManifest } from 'schwab-owokit/contract-manifest';
+import {
+  BrokerWriteCoordinator as AutomationBrokerWriteCoordinator,
+  ExecutionJournal as AutomationExecutionJournal,
+  PriceExplorer as AutomationPriceExplorer,
+  SchwabRestClient as AutomationSchwabRestClient,
+  UnknownWriteReconciliation as AutomationUnknownWriteReconciliation,
+  parseRuntimePolicy as automationParseRuntimePolicy,
+  runSchwabAutomationCli,
+} from 'schwab-owokit/automation';
 
 test('package root and streamer-fields subpath share the canonical Level One contract', () => {
   assert.equal(rootFields, subpathFields);
@@ -70,4 +79,14 @@ test('new streamer, gateway, and token-store contracts stay identical across roo
   assert.equal(rootEquityServiceFields['51'].type, 'boolean');
   assert.equal(rootEquityServiceFields['3'].type, 'number');
   assert.equal(rootContracts.ACCT_ACTIVITY.delivery, 'all-sequence');
+});
+
+test('automation subpath exposes the stable guarded execution boundary without import side effects', () => {
+  assert.equal(typeof runSchwabAutomationCli, 'function');
+  assert.equal(typeof AutomationSchwabRestClient, 'function');
+  assert.equal(typeof AutomationBrokerWriteCoordinator, 'function');
+  assert.equal(typeof AutomationExecutionJournal, 'function');
+  assert.equal(typeof AutomationPriceExplorer, 'function');
+  assert.equal(typeof AutomationUnknownWriteReconciliation, 'function');
+  assert.equal(typeof automationParseRuntimePolicy, 'function');
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EXIT_ORDER_PRICE, orderPolicyViolation } from "../src/order_policy.ts";
+import { EXIT_ORDER_PRICE, orderPolicyViolation } from "../src/automation/policy/order.ts";
 
 const policy = { underlyings: new Set(["QQQ", "SPY"]), entryNotionalMin: 82, entryNotionalMax: 92 };
 const today = "2026-07-24";

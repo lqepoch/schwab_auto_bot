@@ -2,64 +2,64 @@ import { appendFile, mkdir, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { SchwabActivityStream, type ActivityBatch } from "../activity_stream.ts";
-import { requireWeeklyReauthorization, SchwabTokenProvider } from "../auth.ts";
-import { runInteractiveLogin } from "../auth_cli.ts";
-import { createWeeklyReauthorizationEnsurer } from "../weekly_reauthorization.ts";
-import { PriorityGate, PriorityWriter, type Priority } from "../priority_runtime.ts";
-import { SchwabRestClient } from "../schwab_client.ts";
+import { SchwabActivityStream, type ActivityBatch } from "./stream/activityStream.ts";
+import { requireWeeklyReauthorization, SchwabTokenProvider } from "./auth/provider.ts";
+import { runInteractiveLogin } from "./auth/cli.ts";
+import { createWeeklyReauthorizationEnsurer } from "./auth/weeklyReauthorization.ts";
+import { PriorityGate, PriorityWriter, type Priority } from "./scheduling/priorityRuntime.ts";
+import { SchwabRestClient } from "./broker/schwabClient.ts";
 import { SchwabApiError } from "../utils/errors.ts";
 import { atomicWriteJson } from "../utils/atomicJson.ts";
-import { parseRuntimePolicy } from "../runtime_policy.ts";
-import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "../order_policy.ts";
+import { parseRuntimePolicy } from "./policy/runtime.ts";
+import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./policy/order.ts";
 import {
   buildPrimaryActiveOpeningOrderIds,
   managedOpeningInfo,
   selectActiveOpeningOrders,
 } from "./orderIndex.ts";
-import { completeNetDebitFill, completeOrderLimitFill } from "../fill_price.ts";
-import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "../price_explorer.ts";
-import { ExecutionJournal } from "../execution_journal.ts";
-import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "../exit_policy.ts";
-import { acquireRuntimeLock } from "../runtime_lock.ts";
-import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "../fixed_price_cycle.ts";
-import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "../refresh_pacer.ts";
-import { RefreshRoundLimit } from "../refresh_round_limit.ts";
-import { classifyPreviewRejection, previewRejectionCooldownFromError, previewRejectionDetails, previewRejectionSummary } from "../preview_rejection.ts";
-import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "../activity_pacer.ts";
-import { FULL_SNAPSHOT_MAX_AGE_MS, isFullSnapshotFresh } from "../full_snapshot_freshness.ts";
+import { completeNetDebitFill, completeOrderLimitFill } from "./execution/fillPrice.ts";
+import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./execution/priceExplorer.ts";
+import { ExecutionJournal } from "./observability/executionJournal.ts";
+import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "./policy/exit.ts";
+import { acquireRuntimeLock } from "./state/runtimeLock.ts";
+import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./execution/fixedPriceCycle.ts";
+import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./scheduling/refreshPacer.ts";
+import { RefreshRoundLimit } from "./scheduling/refreshRoundLimit.ts";
+import { classifyPreviewRejection, previewRejectionCooldownFromError, previewRejectionDetails, previewRejectionSummary } from "./execution/previewRejection.ts";
+import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./scheduling/activityPacer.ts";
+import { FULL_SNAPSHOT_MAX_AGE_MS, isFullSnapshotFresh } from "./policy/fullSnapshotFreshness.ts";
 import {
   formatFixedPriceRebuy,
   formatFixedPriceReplace,
   formatRefreshSpreadSkipped,
-} from "../business_log.ts";
-import { FixedPriceRefreshRoundGuard } from "../fixed_price_round_guard.ts";
-import { refreshAuthoritativeSnapshots } from "../refresh_preflight.ts";
+} from "./observability/businessLog.ts";
+import { FixedPriceRefreshRoundGuard } from "./execution/fixedPriceRoundGuard.ts";
+import { refreshAuthoritativeSnapshots } from "./policy/refreshPreflight.ts";
 import {
   EXISTING_ORDER_REPLACE_NO_PREVIEW,
   orderWritePreflight,
   replacementSourceViolation,
   type OrderWritePreflight,
-} from "../order_write_preflight.ts";
+} from "./execution/orderWritePreflight.ts";
 import {
   appendBrokerRateLimit,
   brokerRateLimitFromHeaders,
   type BrokerRateLimit,
-} from "../broker_rate_limit.ts";
+} from "./broker/rateLimit.ts";
 import {
   RefreshSpreadSkipTracker,
   REQUIRED_REFRESH_SPREAD_WIDTH,
   isRefreshSpreadEligible,
   refreshSpreadWidth,
-} from "../refresh_order_policy.ts";
-import { BrokerWriteCoordinator } from "../broker_write_coordinator.ts";
-import { OrderSnapshotCoordinator, RuntimeStartupCoordinator } from "../order_snapshot_coordinator.ts";
+} from "./policy/refreshOrder.ts";
+import { BrokerWriteCoordinator } from "./broker/writeCoordinator.ts";
+import { OrderSnapshotCoordinator, RuntimeStartupCoordinator } from "./broker/orderSnapshotCoordinator.ts";
 import {
   fingerprintOrder,
   safePath,
   UnknownWriteReconciliation,
   type UnknownWriteFailure,
-} from "../unknown_write_reconciliation.ts";
+} from "./state/unknownWriteReconciliation.ts";
 
 /**
  * Production automation composition and lifecycle orchestrator.

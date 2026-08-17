@@ -4,7 +4,7 @@ import {
   ACTIVITY_REST_DEBOUNCE_MS,
   ACTIVITY_REST_MIN_INTERVAL_MS,
   nextActivityRestConfirmationAt,
-} from "../src/activity_pacer.ts";
+} from "../src/automation/scheduling/activityPacer.ts";
 
 test("activity confirmation is prompt for a first signal but bounds a stream storm", () => {
   assert.equal(nextActivityRestConfirmationAt(10_000, 0), 10_000 + ACTIVITY_REST_DEBOUNCE_MS);

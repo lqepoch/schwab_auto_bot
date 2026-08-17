@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PassThrough } from "node:stream";
-import { readCallbackUrl, runInteractiveLogin } from "../src/auth_cli.ts";
+import { readCallbackUrl, runInteractiveLogin } from "../src/automation/auth/cli.ts";
 
 test("OAuth callback input releases the stdin handle after one pasted URL", async () => {
   const input = new PassThrough() as PassThrough & { unref?: () => void };

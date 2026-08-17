@@ -6,7 +6,7 @@
     "src/main.ts",
     "src/automation/public.ts",
     "src/automation/cli.ts",
-    "src/auth_cli.ts",
+    "src/automation/auth/cli.ts",
     "examples/**/*.ts",
     "bench/**/*.ts"
   ],
