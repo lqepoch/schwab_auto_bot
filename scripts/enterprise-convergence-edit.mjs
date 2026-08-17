@@ -1,4 +1,5 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 async function replaceInFile(path, replacements) {
   let text = await readFile(path, 'utf8');
@@ -8,6 +9,44 @@ async function replaceInFile(path, replacements) {
   }
   await writeFile(path, text, 'utf8');
 }
+
+async function sourceFiles(root) {
+  const result = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) result.push(...await sourceFiles(path));
+    else if (entry.isFile() && path.endsWith('.ts')) result.push(path);
+  }
+  return result;
+}
+
+// Node 24 strip-types executes the same source files that TypeScript compiles.
+// Keep relative source imports explicit as .ts; rewriteRelativeImportExtensions
+// emits .js references in dist, so the source and package execution models stay aligned.
+for (const path of await sourceFiles('src')) {
+  const text = await readFile(path, 'utf8');
+  const rewritten = text.replace(/(['"])(\.\.?\/[^'"]+)\.js\1/g, '$1$2.ts$1');
+  if (rewritten !== text) await writeFile(path, rewritten, 'utf8');
+}
+
+await replaceInFile('src/auth.ts', [[
+  `class AutomationAuthStore implements TokenStoreAdapter {
+  readonly path = statePath;
+
+  constructor(
+    private readonly credentials?: Credentials,
+    private readonly markReauthorized = false,
+  ) {}`,
+  `class AutomationAuthStore implements TokenStoreAdapter {
+  readonly path = statePath;
+  private readonly credentials: Credentials | undefined;
+  private readonly markReauthorized: boolean;
+
+  constructor(credentials?: Credentials, markReauthorized = false) {
+    this.credentials = credentials;
+    this.markReauthorized = markReauthorized;
+  }`,
+]]);
 
 await replaceInFile('src/streamer/streamerClient.ts', [[
   "this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));",
@@ -32,7 +71,7 @@ const boundary = lines.findIndex((line) => line.startsWith('const root = '));
 if (boundary < 0) throw new Error('MAIN_BOUNDARY_NOT_FOUND');
 let imports = lines.slice(0, boundary).join('\n').trimEnd();
 let body = lines.slice(boundary).join('\n');
-imports = imports.replaceAll('from "./', 'from "../');
+imports = imports.replaceAll('from "./', 'from "../').replaceAll("from './", "from '../");
 body = body.replace(
   'const root = dirname(dirname(fileURLToPath(import.meta.url)));',
   'const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));',
