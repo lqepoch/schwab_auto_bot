@@ -5,7 +5,7 @@ import {
   type StreamerService,
   type StreamerServiceRow,
   type TypedStreamerDataPayload,
-} from '../types/streamerContracts.js';
+} from '../types/streamerContracts.ts';
 
 export type SnapshotFreshness = 'fresh' | 'stale' | 'uncertain';
 export type SnapshotDiscardReason =

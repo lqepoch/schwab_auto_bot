@@ -1,4 +1,4 @@
-import type { AccountNumberHash } from '../types/trader.js';
+import type { AccountNumberHash } from '../types/trader.ts';
 
 /** Minimal source contract so the resolver is easy to test and does not own HTTP concerns. */
 export interface AccountNumberHashSource {

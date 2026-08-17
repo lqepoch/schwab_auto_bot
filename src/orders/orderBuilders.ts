@@ -5,8 +5,8 @@ import type {
   OrderLeg,
   PlaceOrderRequest,
   Session,
-} from '../types/trader.js';
-import { parseSchwabOptionSymbol } from '../options/optionSymbol.js';
+} from '../types/trader.ts';
+import { parseSchwabOptionSymbol } from '../options/optionSymbol.ts';
 
 export type NetOrderType = 'NET_DEBIT' | 'NET_CREDIT' | 'NET_ZERO';
 export type EquityInstruction = 'BUY' | 'SELL' | 'BUY_TO_COVER' | 'SELL_SHORT';

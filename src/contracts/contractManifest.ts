@@ -3,7 +3,7 @@ import {
   type StreamerDeliveryMode,
   type StreamerOrderingEvidence,
   type StreamerService,
-} from '../types/streamerContracts.js';
+} from '../types/streamerContracts.ts';
 
 export type RestClientName = 'TraderApiClient' | 'MarketDataApiClient';
 

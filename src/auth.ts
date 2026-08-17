@@ -102,11 +102,13 @@ function authConfig(credentials: Credentials): SchwabAuthConfig {
  */
 class AutomationAuthStore implements TokenStoreAdapter {
   readonly path = statePath;
+  private readonly credentials: Credentials | undefined;
+  private readonly markReauthorized: boolean;
 
-  constructor(
-    private readonly credentials?: Credentials,
-    private readonly markReauthorized = false,
-  ) {}
+  constructor(credentials?: Credentials, markReauthorized = false) {
+    this.credentials = credentials;
+    this.markReauthorized = markReauthorized;
+  }
 
   async load(): Promise<unknown | null> {
     const auth = await load();
@@ -210,11 +212,12 @@ export class SchwabTokenProvider {
     const auth = await load();
     if (!auth || Date.parse(auth.token.refreshExpiresAt) <= Date.now()) throw new Error("AUTH_LOGIN_REQUIRED");
     const tokenManager = manager(auth, new AutomationAuthStore());
+    const needsRefresh = force || Date.parse(auth.token.accessExpiresAt) <= Date.now() + 90_000;
     try {
-      const token = force
+      const token = needsRefresh
         ? await tokenManager.refreshAccessToken(auth.token.refreshToken)
         : await tokenManager.requireAccessToken();
-      if (force || token.access_token !== auth.token.accessToken) {
+      if (needsRefresh || token.access_token !== auth.token.accessToken) {
         this.report(`Schwab Node OAuth token 已刷新 expiresAt=${new Date(token.expires_at).toISOString()}`);
       }
       return token.access_token;

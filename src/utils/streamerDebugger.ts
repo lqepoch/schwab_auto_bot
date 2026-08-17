@@ -5,7 +5,7 @@
  * 专门针对 Schwab API 的实时数据流优化
  */
 
-import type { Logger } from './logger.js';
+import type { Logger } from './logger.ts';
 import { 
   StreamDebugger, 
   ConnectionMonitor, 
@@ -14,7 +14,7 @@ import {
   parseLevelOneEquities,
   parseNasdaqBook,
   parseChartEquity
-} from './debugUtils.js';
+} from './debugUtils.ts';
 
 /**
  * Streamer 调试配置选项

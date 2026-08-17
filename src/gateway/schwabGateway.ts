@@ -1,16 +1,16 @@
-import { AccountHashResolver, type AccountHashResolverOptions } from '../accounts/accountHashResolver.js';
-import { MarketDataApiClient } from '../clients/marketData.js';
-import { TraderApiClient, type AccountsQuery, type OrdersQuery } from '../clients/trader.js';
-import type { HttpResponse } from '../utils/httpClient.js';
+import { AccountHashResolver, type AccountHashResolverOptions } from '../accounts/accountHashResolver.ts';
+import { MarketDataApiClient } from '../clients/marketData.ts';
+import { TraderApiClient, type AccountsQuery, type OrdersQuery } from '../clients/trader.ts';
+import type { HttpResponse } from '../utils/httpClient.ts';
 import type {
   AccountResponse,
   Order,
-} from '../types/trader.js';
+} from '../types/trader.ts';
 import type {
   QuoteFieldRoot,
   QuotesResponse,
   SingleQuoteResponse,
-} from '../types/marketData.js';
+} from '../types/marketData.ts';
 
 /** Metadata retained by every read-only gateway operation. */
 export type ReadOnlyGatewayMetadata = Omit<HttpResponse<unknown>, 'body'>;

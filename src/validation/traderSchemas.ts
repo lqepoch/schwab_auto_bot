@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Order, PreviewOrderResponse } from '../types/trader.js';
+import type { Order, PreviewOrderResponse } from '../types/trader.ts';
 
 const finiteNumber = z.number().finite();
 const finiteNumberOptional = finiteNumber.optional();

@@ -1,17 +1,20 @@
 import { performance } from 'node:perf_hooks';
 import {
-  AuthorizationCodeParams,
-  PersistedToken,
   PersistedTokenSchema,
   RefreshTokenResponseSchema,
+  TokenResponseSchema,
+} from '../types/auth.ts';
+import type {
+  AuthorizationCodeParams,
+  PersistedToken,
   SchwabAuthConfig,
   TokenResponse,
-  TokenResponseSchema,
-} from '../types/auth.js';
-import { TokenStore, type TokenStoreAdapter } from './tokenStore.js';
-import { Logger, createConsoleLogger, withDuration } from '../utils/logger.js';
-import { redactSensitive } from '../utils/redact.js';
-import { ReauthRequiredError } from '../utils/errors.js';
+} from '../types/auth.ts';
+import { TokenStore, type TokenStoreAdapter } from './tokenStore.ts';
+import { createConsoleLogger, withDuration } from '../utils/logger.ts';
+import type { Logger } from '../utils/logger.ts';
+import { redactSensitive } from '../utils/redact.ts';
+import { ReauthRequiredError } from '../utils/errors.ts';
 
 const AUTH_URL = 'https://api.schwabapi.com/v1/oauth/authorize';
 const TOKEN_URL = 'https://api.schwabapi.com/v1/oauth/token';

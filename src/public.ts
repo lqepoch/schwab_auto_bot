@@ -1,4 +1,4 @@
-export * from './index.js';
+export * from './index.ts';
 
 // Canonical public Streamer field contract. Explicit exports take precedence over
 // the legacy diagnostic export pulled in by index.ts, keeping package-root and
@@ -9,18 +9,18 @@ export {
   LEVEL_ONE_FIELD_NAMES,
   formatLevelOneData,
   addFieldNames,
-} from './types/levelOneFields.js';
+} from './types/levelOneFields.ts';
 export type {
   LevelOneEquityFieldId,
   LevelOneEquityFieldSelection,
   LevelOneEquitiesFields,
-} from './types/levelOneFields.js';
+} from './types/levelOneFields.ts';
 
 export {
   AccountHashResolver,
   AccountHashNotFoundError,
-} from './accounts/accountHashResolver.js';
+} from './accounts/accountHashResolver.ts';
 export type {
   AccountNumberHashSource,
   AccountHashResolverOptions,
-} from './accounts/accountHashResolver.js';
+} from './accounts/accountHashResolver.ts';

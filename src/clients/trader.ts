@@ -1,8 +1,8 @@
-import { HttpClient } from '../utils/httpClient.js';
-import { TokenManager } from '../auth/tokenManager.js';
-import { AuthorizedApiClient } from '../utils/apiClientBase.js';
-import { Logger, createConsoleLogger } from '../utils/logger.js';
-import { SchwabApiError, UnknownOutcomeError, type MutationOperation } from '../utils/errors.js';
+import { HttpClient } from '../utils/httpClient.ts';
+import { TokenManager } from '../auth/tokenManager.ts';
+import { AuthorizedApiClient } from '../utils/apiClientBase.ts';
+import { Logger, createConsoleLogger } from '../utils/logger.ts';
+import { SchwabApiError, UnknownOutcomeError, type MutationOperation } from '../utils/errors.ts';
 import {
   AccountNumberHashesSchema,
   AccountResponseSchema,
@@ -14,7 +14,7 @@ import {
   TransactionOrArraySchema,
   TransactionsResponseSchema,
   UserPreferencesResponseSchema,
-} from '../validation/traderSchemas.js';
+} from '../validation/traderSchemas.ts';
 import {
   AccountNumberHash,
   AccountResponse,
@@ -29,8 +29,8 @@ import {
   UserPreference,
   PreviewOrderResponse,
   MutationResult,
-} from '../types/trader.js';
-import type { HttpResponse, RequestOptions } from '../utils/httpClient.js';
+} from '../types/trader.ts';
+import type { HttpResponse, RequestOptions } from '../utils/httpClient.ts';
 
 /**
  * Mutation requests may only override the physical request timeout. Automatic

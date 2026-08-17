@@ -1,4 +1,4 @@
-import { StreamerCommandResponse } from '../types/streamer.js';
+import type { StreamerCommandResponse } from '../types/streamer.ts';
 
 
 export class StreamerCommandError extends Error {

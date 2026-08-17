@@ -3,8 +3,10 @@ import { promises as fs } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { PersistedToken, PersistedTokenSchema } from '../types/auth.js';
-import { Logger, createConsoleLogger } from '../utils/logger.js';
+import { PersistedTokenSchema } from '../types/auth.ts';
+import type { PersistedToken } from '../types/auth.ts';
+import { createConsoleLogger } from '../utils/logger.ts';
+import type { Logger } from '../utils/logger.ts';
 
 export interface TokenStoreOptions {
   filePath?: string;
