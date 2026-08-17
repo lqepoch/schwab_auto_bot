@@ -62,6 +62,7 @@ import {
 } from "./state/unknownWriteReconciliation.ts";
 import { bindRuntimeProcessHandlers } from "./runtimeProcess.ts";
 import { repositoryRootFromAutomationModuleUrl } from "./repositoryPaths.ts";
+import { superviseBackgroundTask } from "./backgroundTask.ts";
 
 /**
  * Production automation composition and lifecycle orchestrator.
@@ -1249,7 +1250,7 @@ function armActivityRestConfirmation(): void {
   const dueAt = nextActivityRestConfirmationAt(Date.now(), lastActivityRestAt);
   activityRestTimer = setTimeout(() => {
     activityRestTimer = null;
-    void runActivityRestConfirmation();
+    launchRuntimeBackgroundTask("activity-rest-confirmation", runActivityRestConfirmation);
   }, Math.max(0, dueAt - Date.now()));
 }
 
@@ -1260,18 +1261,21 @@ async function runActivityRestConfirmation(): Promise<void> {
   const confirmingThrough = lastIncompleteActivityAt;
   let confirmed = false;
   const coveredByOtherPoll = lastFillPollAt >= confirmingThrough;
-  if (!stopping && !coveredByOtherPoll) {
-    // Record the attempt before I/O.  Otherwise a transient REST failure can
-    // immediately re-arm every stream message and consume the entire quota.
-    lastActivityRestAt = Date.now();
-    executionJournal.record("activity.rest-confirmation-started", {
-      confirmingThrough: new Date(confirmingThrough).toISOString(),
-      debounceMs: ACTIVITY_REST_DEBOUNCE_MS,
-      minIntervalMs: ACTIVITY_REST_MIN_INTERVAL_MS,
-    });
-    confirmed = await poll(false, 0);
+  try {
+    if (!stopping && !coveredByOtherPoll) {
+      // Record the attempt before I/O.  Otherwise a transient REST failure can
+      // immediately re-arm every stream message and consume the entire quota.
+      lastActivityRestAt = Date.now();
+      executionJournal.record("activity.rest-confirmation-started", {
+        confirmingThrough: new Date(confirmingThrough).toISOString(),
+        debounceMs: ACTIVITY_REST_DEBOUNCE_MS,
+        minIntervalMs: ACTIVITY_REST_MIN_INTERVAL_MS,
+      });
+      confirmed = await poll(false, 0);
+    }
+  } finally {
+    activityRestRunning = false;
   }
-  activityRestRunning = false;
   if ((!confirmed && !coveredByOtherPoll) || lastIncompleteActivityAt > confirmingThrough) {
     armActivityRestConfirmation();
   }
@@ -2455,6 +2459,21 @@ function requestStop(reason: string): boolean {
   return true;
 }
 
+function launchRuntimeBackgroundTask(
+  task: string,
+  operation: () => void | Promise<unknown>,
+): void {
+  superviseBackgroundTask(task, operation, (_task, error, code) => {
+    if (!requestStop(`background-task-failed:${task}`)) return;
+    executionJournal.record("runtime.background-task-failed", {
+      task,
+      code,
+      errorName: error instanceof Error ? error.name : typeof error,
+    });
+    stamp(`RUNTIME_BACKGROUND_TASK_FAILED task=${task} code=${code}`);
+  });
+}
+
 unbindRuntimeProcessHandlers = bindRuntimeProcessHandlers(process, {
   onSignal: (signal) => {
     if (!requestStop("signal")) return;
@@ -2514,7 +2533,7 @@ const startupCoordinator = new RuntimeStartupCoordinator({
       onState: stamp,
     });
     activityStream.start();
-    if (!readOnly) void explorerRoundLoop();
+    if (!readOnly) launchRuntimeBackgroundTask("explorer-round-loop", explorerRoundLoop);
   },
 });
 const startupReady = await startupCoordinator.start();
@@ -2533,11 +2552,17 @@ if (once || !startupReady) {
 } else {
   runtimeIntervals.push(setInterval(() => {
     const fallbackDue = Date.now() - lastFillPollAt >= 30_000;
-    if (!activityStream?.ready || fallbackDue) void poll(false);
+    if (!activityStream?.ready || fallbackDue) {
+      launchRuntimeBackgroundTask("fallback-fill-poll", () => poll(false));
+    }
   }, 2_000));
-  if (!policy.repeatBuyAtOrderPrice) runtimeIntervals.push(setInterval(() => void explorerTick(), 200));
+  if (!policy.repeatBuyAtOrderPrice) runtimeIntervals.push(setInterval(() => {
+    launchRuntimeBackgroundTask("explorer-tick", explorerTick);
+  }, 200));
   if (policy.repeatBuyAtOrderPrice) runtimeIntervals.push(setInterval(() => {
-    if (fixedPriceRefreshRoundActive) void poll(true, 3);
+    if (fixedPriceRefreshRoundActive) {
+      launchRuntimeBackgroundTask("fixed-price-full-poll", () => poll(true, 3));
+    }
   }, 2_000));
   runtimeIntervals.push(setInterval(() => void evaluateExits(), policy.roundCooldownMs));
   runtimeIntervals.push(setInterval(() => void checkControlRequest(), 250));
