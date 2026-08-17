@@ -1,0 +1,65 @@
+name: Enterprise convergence one-shot
+
+on:
+  push:
+    branches:
+      - refactor/enterprise-convergence-20260817
+
+permissions:
+  contents: write
+
+jobs:
+  convergence:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Inventory runtime structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('src/main.ts')
+          lines=p.read_text().splitlines()
+          print(f'MAIN_LINES={len(lines)} MAIN_BYTES={p.stat().st_size}')
+          patterns=[
+            re.compile(r'^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)'),
+            re.compile(r'^class\s+([A-Za-z0-9_]+)'),
+            re.compile(r'^const\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\('),
+          ]
+          for i,line in enumerate(lines,1):
+            for pat in patterns:
+              m=pat.search(line)
+              if m:
+                print(f'{i:5d} {m.group(1):48s} {line[:140]}')
+                break
+          print('\n=== imports ===')
+          for i,line in enumerate(lines[:80],1): print(f'{i:4d}: {line}')
+          PY
+          echo '=== auth/activity references ==='
+          grep -R -nE "from ['\"]\./auth|activity_stream|TokenManager|TokenStore|StreamerClient|AccountActivity" src test | head -n 300 || true
+          echo '=== main hotspots ==='
+          grep -nE "persist|refresh|reconcile|fixedPrice|fixed-price|explorer|exit|Opening|opening|shutdown|startup|main\(" src/main.ts | head -n 500 || true
+
+      - name: Baseline validation
+        run: |
+          npm test
+          npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+          git diff --check
