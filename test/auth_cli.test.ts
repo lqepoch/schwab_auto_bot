@@ -24,6 +24,37 @@ test("OAuth callback input releases the stdin handle after one pasted URL", asyn
   assert.equal(unrefCalls, 1);
 });
 
+test("OAuth callback input buffers multiple stream chunks until the complete line arrives", async () => {
+  const input = new PassThrough() as PassThrough & { unref?: () => void };
+  let unrefCalls = 0;
+  input.unref = () => { unrefCalls += 1; };
+  const callback = readCallbackUrl(input, { write: () => true });
+
+  input.write("https://127.0.0.1/?code=chunk");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  input.write("ed&state=expected");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  input.end("\nignored-second-line\n");
+
+  assert.equal(await callback, "https://127.0.0.1/?code=chunked&state=expected");
+  assert.equal(unrefCalls, 1);
+  assert.equal(input.listenerCount("data"), 0);
+  assert.equal(input.listenerCount("error"), 0);
+  assert.equal(input.listenerCount("end"), 0);
+});
+
+test("OAuth callback input accepts EOF as a line boundary but rejects blank input", async () => {
+  const eofInput = new PassThrough();
+  const eofCallback = readCallbackUrl(eofInput, { write: () => true });
+  eofInput.end("https://127.0.0.1/?code=eof&state=expected");
+  assert.equal(await eofCallback, "https://127.0.0.1/?code=eof&state=expected");
+
+  const blankInput = new PassThrough();
+  const blankCallback = readCallbackUrl(blankInput, { write: () => true });
+  blankInput.end("   \r\n");
+  await assert.rejects(blankCallback, /AUTH_CALLBACK_URL_EMPTY/);
+});
+
 test("interactive login opens the authorization page and completes with the pasted callback", async () => {
   const calls: string[] = [];
   let output = "";
