@@ -59,6 +59,21 @@ jobs:
           )
           shared.write_text(text, encoding='utf-8')
 
+          detailed = Path('examples/debug-level2-detailed.ts')
+          text = detailed.read_text(encoding='utf-8')
+          text = text.replace('#!/usr/bin/env tsx\n\n', '')
+          text = text.replace(
+              "import { createSdk } from '../src/index.ts';",
+              "import { createSdk } from './shared.ts';",
+          )
+          detailed.write_text(text, encoding='utf-8')
+
+          stable = Path('examples/stream-stable-connection.ts')
+          text = stable.read_text(encoding='utf-8')
+          text = text.replace("sdk.streamer.on('disconnected', () => {", "sdk.streamer.on('close', () => {")
+          text = text.replace("sdk.streamer.isConnected() ? '🟢 已连接' : '🔴 已断开'", "sdk.streamer.status === 'connected' ? '🟢 已连接' : '🔴 已断开'")
+          stable.write_text(text, encoding='utf-8')
+
           index = Path('src/index.ts')
           text = index.read_text(encoding='utf-8')
           text = text.replace(
@@ -67,9 +82,9 @@ jobs:
           )
           index.write_text(text, encoding='utf-8')
 
-          Path('examples/README.md').write_text('''# SDK examples\n\n本目录只保留可直接在 Node.js 24 源码模式运行的 SDK 示例。示例属于开发/诊断入口，不进入自动交易生产运行时，也不会被 `npm start` 自动加载。\n\n## 环境\n\n在仓库根目录创建 `.env`，或通过进程环境设置：\n\n```text\nSCHWAB_CLIENT_ID=<应用 Client ID>\nSCHWAB_CLIENT_SECRET=<应用 Client Secret>\nSCHWAB_REDIRECT_URI=<OAuth 回调地址>\nSCHWAB_TOKEN_PATH=.schwab_tokens.json\n```\n\n安装锁定依赖并执行类型检查：\n\n```bash\nnpm ci --ignore-scripts\nnpm run typecheck:examples\n```\n\n## 可执行入口\n\n```bash\nnode examples/authorize-and-refresh.ts\nnode examples/fetch-quotes.ts TSLA,MSFT\nnode examples/download-price-history.ts AAPL 20\nnode examples/stream-levelone.ts QQQ,SPY\nnode examples/stream-account-activity.ts\nnode examples/stream-chart-equity.ts\nnode examples/stream-level2-book.ts\nnode examples/stream-multi-data-sources.ts\nnode examples/stream-stable-connection.ts\nnode examples/debug-stream-data.ts\nnode examples/debug-level2-detailed.ts\nnode examples/debug-user-preferences-and-entitlements.ts\n```\n\n授权、行情、Streamer 示例会访问 Schwab API；执行前确认凭据和 API 权限。它们不调用自动下单模块，也不应作为生产守护进程部署。\n''', encoding='utf-8')
+          Path('examples/README.md').write_text('''# SDK examples\n\n本目录只保留可直接在 Node.js 24 源码模式运行的 SDK 示例。示例属于开发/诊断入口，不进入自动交易生产运行时，也不会被 `npm start` 自动加载。\n\n## 环境\n\n在仓库根目录创建 `.env`，或通过进程环境设置：\n\n```text\nSCHWAB_CLIENT_ID=<应用 Client ID>\nSCHWAB_CLIENT_SECRET=<应用 Client Secret>\nSCHWAB_REDIRECT_URI=<OAuth 回调地址>\nSCHWAB_TOKEN_PATH=.schwab_tokens.json\n```\n\n安装锁定依赖并执行类型检查：\n\n```bash\nnpm ci --ignore-scripts\nnpm run typecheck:examples\n```\n\n## 可执行入口\n\n```bash\nnode examples/authorize-and-refresh.ts\nnode examples/fetch-quotes.ts TSLA,MSFT\nnode examples/download-price-history.ts AAPL 20\nnode examples/stream-levelone.ts QQQ,SPY\nnode examples/stream-account-activity.ts\nnode examples/stream-chart-equity.ts\nnode examples/stream-level2-book.ts\nnode examples/stream-multi-data-sources.ts\nnode examples/stream-stable-connection.ts\nnode examples/debug-stream-data.ts\nnode examples/debug-level2-detailed.ts\nnode examples/debug-user-preferences-and-entitlements.ts\n```\n\n授权、行情、Streamer 示例会访问 Schwab API；执行前确认凭据和 API 权限。它们不调用自动下单模块，也不作为生产守护进程部署。\n''', encoding='utf-8')
 
-          Path('examples/README-streaming.md').write_text('''# Streamer examples\n\n`stream-levelone.ts` 用于查看 Schwab Level One 行情流，并支持原始、命名字段和格式化输出。\n\n```bash\nnode examples/stream-levelone.ts QQQ\nOUTPUT_MODE=raw node examples/stream-levelone.ts QQQ\nOUTPUT_MODE=named node examples/stream-levelone.ts AAPL,MSFT\nOUTPUT_MODE=formatted node examples/stream-levelone.ts QQQ,SPY\n```\n\n常用字段映射、交易状态与交易所辅助函数通过正式 package export 暴露：\n\n```typescript\nimport {\n  LevelOneEquitiesFields,\n  formatLevelOneData,\n  addFieldNames,\n  LEVEL_ONE_FIELD_NAMES,\n  TRADING_STATUS_CODES,\n  EXCHANGE_CODES,\n} from 'schwab-owokit/streamer-fields';\n```\n\n这些脚本用于开发诊断。生产 Streamer 生命周期、重连、ACK 跟踪和订阅状态应通过 SDK 公共 API 管理。\n''', encoding='utf-8')
+          Path('examples/README-streaming.md').write_text('''# Streamer examples\n\n`stream-levelone.ts` 用于查看 Schwab Level One 行情流，并支持原始、命名字段和格式化输出。\n\n```bash\nnode examples/stream-levelone.ts QQQ\nOUTPUT_MODE=raw node examples/stream-levelone.ts QQQ\nOUTPUT_MODE=named node examples/stream-levelone.ts AAPL,MSFT\nOUTPUT_MODE=formatted node examples/stream-levelone.ts QQQ,SPY\n```\n\n常用字段映射、交易状态与交易所辅助函数通过正式 package export 暴露：\n\n```typescript\nimport {\n  LevelOneEquitiesFields,\n  formatLevelOneData,\n  addFieldNames,\n  LEVEL_ONE_FIELD_NAMES,\n  TRADING_STATUS_CODES,\n  EXCHANGE_CODES,\n} from 'schwab-owokit/streamer-fields';\n```\n\n这些脚本用于开发诊断。生产 Streamer 生命周期、重连、ACK 跟踪和订阅状态通过 SDK 公共 API 管理。\n''', encoding='utf-8')
 
           Path('tsconfig.examples.json').write_text('''{\n  "extends": "./tsconfig.json",\n  "compilerOptions": {\n    "noEmit": true,\n    "rootDir": "."\n  },\n  "include": [\n    "src/**/*.ts",\n    "examples/**/*.ts"\n  ],\n  "exclude": [\n    "dist",\n    "node_modules"\n  ]\n}\n''', encoding='utf-8')
 
