@@ -1,3 +1,5 @@
+import { safeRuntimeError } from "../observability/runtimeError.ts";
+
 export type Priority = 0 | 1 | 2 | 3;
 
 export type Job = {
@@ -86,7 +88,7 @@ export class PriorityWriter {
         && !message.includes("SELL_QUOTA_EXHAUSTED")
         && !message.includes("FOLLOWUP_QUOTA_HEADROOM")
         && !message.includes("CACHED_PREVIEW_REJECTED")
-      ) this.onError(`任务失败 key=${job.key} error=${message}`);
+      ) this.onError(`任务失败 key=${job.key} error=${safeRuntimeError(error)}`);
     } finally {
       this.keys.delete(job.key);
       job.done?.();
