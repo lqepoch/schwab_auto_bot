@@ -91,7 +91,7 @@
     "benchmark:runtime:check": "node --experimental-strip-types bench/check-runtime-benchmark.ts"
   },
   "dependencies": {
-    "dotenv": "^16.4.7",
+    "dotenv": "^17.4.2",
     "open": "^10.1.0",
     "ws": "^8.21.0",
     "zod": "^4.1.9"
