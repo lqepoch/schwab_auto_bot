@@ -75,11 +75,16 @@ import { superviseBackgroundTask } from "./backgroundTask.ts";
  * executable boundary for process management and hot-switch tooling.
  */
 export async function runAutomationRuntime(options: AutomationRuntimeOptions = {}): Promise<void> {
+const codeRoot = repositoryRootFromAutomationModuleUrl(import.meta.url);
 const host = resolveAutomationRuntimeHost(options, {
   entryPath: defaultAutomationRuntimeEntryPath(import.meta.url),
+  workspaceRoot: codeRoot,
 });
-const root = repositoryRootFromAutomationModuleUrl(import.meta.url);
-const automationAuthOptions: AutomationAuthOptions = { env: host.env };
+const root = host.workspaceRoot;
+const automationAuthOptions: AutomationAuthOptions = {
+  env: host.env,
+  statePath: host.env.SCHWAB_BOT_AUTH_FILE || join(root, "state", "schwab-auth.json"),
+};
 const evidencePath = join(root, ".state", "send-evidence.jsonl");
 const policyAlertPath = join(root, ".state", "policy-alerts.jsonl");
 const explorerStatePath = join(root, ".state", "net-price-explorer.json");
@@ -104,7 +109,7 @@ if (!readOnly && !confirmedLive) {
   throw new Error("真实写入必须显式传入 --confirm-live I_UNDERSTAND");
 }
 const policy = parseRuntimePolicy(host.argv);
-const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId);
+const runtimeLock = acquireRuntimeLock(runtimeLockPath, runId, host.pid);
 let unbindRuntimeProcessHandlers = () => {};
 try {
 let sellOrderAutomationDisabledRecorded = false;
@@ -128,10 +133,10 @@ function stamp(message: string): void {
 
 const ensureWeeklyReauthorization = createWeeklyReauthorizationEnsurer({
   requireWeeklyReauthorization: () => requireWeeklyReauthorization(new Date(), automationAuthOptions),
-  reauthorizeInteractively: () => runInteractiveLogin({
+  reauthorizeInteractively: host.reauthorizeInteractively ?? (() => runInteractiveLogin({
     beginLogin: () => beginLogin(automationAuthOptions),
     login: (callbackUrl, state) => login(callbackUrl, state, automationAuthOptions),
-  }),
+  })),
   onReauthorizationRequired: () => {
     executionJournal.record("auth.weekly-reauth-required", { action: "interactive-login" });
     stamp("AUTH_WEEKLY_REAUTH_REQUIRED: interactive OAuth login is required before broker writes; browser opening now");
