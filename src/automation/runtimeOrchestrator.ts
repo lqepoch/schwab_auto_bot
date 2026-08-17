@@ -7,6 +7,8 @@ import { UnauthorizedRefreshCoordinator } from "./auth/unauthorizedRefresh.ts";
 import { runInteractiveLogin } from "./auth/cli.ts";
 import { createWeeklyReauthorizationEnsurer } from "./auth/weeklyReauthorization.ts";
 import { PriorityGate, PriorityWriter, type Priority } from "./scheduling/priorityRuntime.ts";
+import { RequestBudget } from "./scheduling/requestBudget.ts";
+import { ExplorerActionPacer } from "./scheduling/explorerActionPacer.ts";
 import { SchwabRestClient } from "./broker/schwabClient.ts";
 import { SchwabApiError } from "../utils/errors.ts";
 import { atomicWriteJson } from "../utils/atomicJson.ts";
@@ -24,7 +26,7 @@ import { safeRuntimeError } from "./observability/runtimeError.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "./policy/exit.ts";
 import { acquireRuntimeLock } from "./state/runtimeLock.ts";
 import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./execution/fixedPriceCycle.ts";
-import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer, fixedPriceRefreshIntervalMs } from "./scheduling/refreshPacer.ts";
+import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer } from "./scheduling/refreshPacer.ts";
 import { RefreshRoundLimit } from "./scheduling/refreshRoundLimit.ts";
 import { classifyPreviewRejection, previewRejectionCooldownFromError, previewRejectionDetails, previewRejectionSummary } from "./execution/previewRejection.ts";
 import { ACTIVITY_REST_DEBOUNCE_MS, ACTIVITY_REST_MIN_INTERVAL_MS, nextActivityRestConfirmationAt } from "./scheduling/activityPacer.ts";
@@ -210,74 +212,6 @@ function persistFixedPriceCycle(): void {
     .catch((error) => stamp(`FIXED_PRICE_CYCLE_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`));
 }
 
-class ExplorerActionPacer {
-  private tail = Promise.resolve();
-  private lastNormalActionAt = 0;
-
-  async admit(): Promise<void> {
-    const next = this.tail.then(async () => {
-      const delay = policy.orderCooldownMs - (Date.now() - this.lastNormalActionAt);
-      if (delay > 0) await wait(delay);
-      this.lastNormalActionAt = Date.now();
-    });
-    this.tail = next.catch(() => undefined);
-    await next;
-  }
-}
-
-class RequestBudget {
-  private attempts: number[] = [];
-  private blockedUntil = 0;
-  private lastHeadroomLogAt = 0;
-  private lastPriorityActivityAt = Date.now();
-
-  private pruneAttempts(now: number): void {
-    let expired = 0;
-    while (expired < this.attempts.length && now - this.attempts[expired] >= 60_000) expired += 1;
-    if (expired > 0) this.attempts.splice(0, expired);
-  }
-
-  async admit(priority: Priority): Promise<void> {
-    for (;;) {
-      const now = Date.now();
-      this.pruneAttempts(now);
-      if (now < this.blockedUntil) {
-        await wait(Math.min(1_000, this.blockedUntil - now));
-        continue;
-      }
-      const ceiling = priority === 0 ? 110 : priority === 3 ? (now - this.lastPriorityActivityAt >= 2_000 ? 110 : 105) : 108;
-      if (this.attempts.length < ceiling) {
-        this.attempts.push(now);
-        if (priority < 3) this.lastPriorityActivityAt = now;
-        return;
-      }
-      if (priority === 3) {
-        if (now - this.lastHeadroomLogAt >= 5_000) {
-          this.lastHeadroomLogAt = now;
-          stamp(`整体刷新等待滚动配额释放 usedLast60s=${this.attempts.length} refreshCeiling=${ceiling}`);
-        }
-        await wait(Math.max(100, 60_000 - (now - this.attempts[0])));
-        continue;
-      }
-      if (priority === 2) throw new Error("SELL_QUOTA_EXHAUSTED");
-      if (priority === 1) throw new Error("FOLLOWUP_QUOTA_HEADROOM");
-      await wait(Math.max(100, 60_000 - (now - this.attempts[0])));
-    }
-  }
-
-  fixedPriceRefreshIntervalMs(): number {
-    const now = Date.now();
-    this.pruneAttempts(now);
-    return fixedPriceRefreshIntervalMs(this.attempts.length);
-  }
-
-  rateLimited(retryAfter: string | null): void {
-    const seconds = Math.max(30, Math.min(300, Number(retryAfter) || 30));
-    this.blockedUntil = Date.now() + seconds * 1_000;
-    stamp(`Schwab 429，全局退避 ${seconds}s`);
-  }
-}
-
 const tokens = new SchwabTokenProvider(stamp);
 const unauthorizedRefresh = new UnauthorizedRefreshCoordinator({
   refresh: () => tokens.get(true),
@@ -286,7 +220,12 @@ const unauthorizedRefresh = new UnauthorizedRefreshCoordinator({
     stamp(`AUTH_BACKGROUND_REFRESH_FAILED code=${code}`);
   },
 });
-const budget = new RequestBudget();
+const budget = new RequestBudget({
+  onRefreshHeadroomWait: ({ usedLast60s, refreshCeiling }) => {
+    stamp(`整体刷新等待滚动配额释放 usedLast60s=${usedLast60s} refreshCeiling=${refreshCeiling}`);
+  },
+  onRateLimited: (seconds) => stamp(`Schwab 429，全局退避 ${seconds}s`),
+});
 const client = new SchwabRestClient();
 
 async function api(
@@ -379,7 +318,7 @@ const reportedHistoricalFixedPriceFills = new Set<string>();
 let explorerSavePending = Promise.resolve();
 let fixedPriceCycleSavePending = Promise.resolve();
 let exitTemplateSavePending = Promise.resolve();
-const normalExplorerActionPacer = new ExplorerActionPacer();
+const normalExplorerActionPacer = new ExplorerActionPacer({ cooldownMs: policy.orderCooldownMs });
 const fixedPriceRefreshPacer = new FixedPriceRefreshPacer();
 const refreshRoundLimit = new RefreshRoundLimit(policy.maxRefreshRounds);
 const fixedPriceRefreshRoundGuard = new FixedPriceRefreshRoundGuard();
