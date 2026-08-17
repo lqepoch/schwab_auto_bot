@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   migrate:
-    if: github.event.head_commit.message == 'chore: bootstrap automation layout migration'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -33,8 +32,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ ! -e src/auth.ts ]; then
+            echo 'automation layout already normalized'
+            exit 0
+          fi
           python3 - <<'PY'
-          from pathlib import Path, PurePosixPath
+          from pathlib import Path
           import json
           import os
           import re
@@ -75,11 +78,8 @@ jobs:
           relative_spec = re.compile(r"(?P<q>['\"])(?P<spec>\.\.?/[^'\"\r\n]+?\.(?:ts|js|mjs))(?P=q)")
           text_suffixes = {'.ts', '.mjs', '.js', '.json', '.md', '.yml', '.yaml', '.ps1'}
           root = Path.cwd()
-
-          def norm_posix(value: str) -> str:
-              return str(PurePosixPath(value))
-
           files = [p for p in root.rglob('*') if p.is_file() and '.git' not in p.parts and 'node_modules' not in p.parts and 'dist' not in p.parts]
+
           for path in files:
               if path.suffix.lower() not in text_suffixes:
                   continue
@@ -89,7 +89,6 @@ jobs:
                   text = path.read_text(encoding='utf-8')
               except UnicodeDecodeError:
                   continue
-
               if path.suffix.lower() in {'.ts', '.mjs', '.js'}:
                   def replace_spec(match: re.Match[str]) -> str:
                       spec = match.group('spec')
@@ -103,7 +102,6 @@ jobs:
                       quote = match.group('q')
                       return f"{quote}{rel}{quote}"
                   text = relative_spec.sub(replace_spec, text)
-
               for old, new in mapping.items():
                   text = text.replace(old, new)
               path.write_text(text, encoding='utf-8')
@@ -173,10 +171,14 @@ jobs:
           root_ts="$(find src -maxdepth 1 -type f -name '*.ts' -printf '%f\n' | sort | tr '\n' ' ')"
           test "$root_ts" = "index.ts main.ts public.ts "
 
-      - name: Commit migration
+      - name: Commit migration if changed
         shell: bash
         run: |
           set -euo pipefail
+          if git diff --quiet && git diff --cached --quiet; then
+            echo 'no migration changes to commit'
+            exit 0
+          fi
           git config user.name 'LQ'
           git config user.email 'lqepoch@126.com'
           git add -A
