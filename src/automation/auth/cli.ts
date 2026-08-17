@@ -23,22 +23,47 @@ export async function readCallbackUrl(
 ): Promise<string> {
   output.write("粘贴完整回调 URL 后按 Enter: ");
   return new Promise((resolveCallback, reject) => {
+    let buffer = "";
+    let settled = false;
+
     const cleanup = (): void => {
       input.off("data", onData);
       input.off("error", onError);
+      input.off("end", onEnd);
     };
-    const onData = (data: Buffer | string): void => {
-      cleanup();
+    const releaseInput = (): void => {
       input.pause();
       input.unref?.();
-      resolveCallback(data.toString().trim());
+    };
+    const finish = (raw: string): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      releaseInput();
+      const callbackUrl = raw.trim();
+      if (!callbackUrl) {
+        reject(new Error("AUTH_CALLBACK_URL_EMPTY"));
+        return;
+      }
+      resolveCallback(callbackUrl);
+    };
+    const onData = (data: Buffer | string): void => {
+      buffer += data.toString();
+      const newlineIndex = buffer.search(/[\r\n]/);
+      if (newlineIndex >= 0) finish(buffer.slice(0, newlineIndex));
     };
     const onError = (error: Error): void => {
+      if (settled) return;
+      settled = true;
       cleanup();
+      releaseInput();
       reject(error);
     };
-    input.once("data", onData);
+    const onEnd = (): void => finish(buffer);
+
+    input.on("data", onData);
     input.once("error", onError);
+    input.once("end", onEnd);
     input.resume();
   });
 }
