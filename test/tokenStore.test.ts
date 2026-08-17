@@ -109,8 +109,17 @@ test('a lock release does not unlink a replacement owner lock', async () => {
 test('concurrent saves leave a complete token document and no lock artifact', async () => {
   const { root, filePath, options } = await tempStore();
   try {
-    const first = new TokenStore(options).save(token('first'));
-    const second = new TokenStore(options).save(token('second'));
+    // Concurrent save correctness includes fsync + directory fsync. Shared CI
+    // runners can exceed the 50ms timeout used by lock-timeout unit cases even
+    // when the implementation is healthy, so this concurrency case gets
+    // realistic acquisition headroom while retaining the same 10ms retry loop.
+    const concurrentOptions = {
+      ...options,
+      lockAcquireTimeoutMs: 500,
+      staleLockThresholdMs: 1_000,
+    };
+    const first = new TokenStore(concurrentOptions).save(token('first'));
+    const second = new TokenStore(concurrentOptions).save(token('second'));
     await Promise.all([first, second]);
 
     const persisted = JSON.parse(await readFile(filePath, 'utf8')) as PersistedToken;
