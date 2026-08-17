@@ -63,20 +63,25 @@ jobs:
       - name: Build, typecheck, native-runtime audit, and unified contract tests
         run: npm test
 
-      - name: Gate deterministic runtime benchmark
+      - name: Gate runtime benchmark medians
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .artifacts
-          npm run benchmark:runtime -- --output .artifacts/runtime-benchmark.json
-          npm run benchmark:runtime:check -- --baseline bench/runtime-baseline.json --current .artifacts/runtime-benchmark.json
+          mkdir -p .artifacts/runtime-benchmark
+          for run in 1 2 3; do
+            npm run benchmark:runtime -- --output ".artifacts/runtime-benchmark/run-${run}.json"
+          done
+          npm run benchmark:runtime:check -- \
+            --baseline bench/runtime-baseline.json \
+            --current-dir .artifacts/runtime-benchmark \
+            --min-samples 3
 
       - name: Upload runtime benchmark evidence
-        if: ${{ always() && hashFiles('.artifacts/runtime-benchmark.json') != '' }}
+        if: ${{ always() && hashFiles('.artifacts/runtime-benchmark/*.json') != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-benchmark-${{ github.sha }}
-          path: .artifacts/runtime-benchmark.json
+          path: .artifacts/runtime-benchmark
           if-no-files-found: error
           retention-days: 30
 
