@@ -20,24 +20,114 @@ async function sourceFiles(root) {
   return result;
 }
 
-// Node 24 strip-types executes the same source files that TypeScript compiles.
-// Keep relative source imports explicit as .ts; rewriteRelativeImportExtensions
-// emits .js references in dist, so the source and package execution models stay aligned.
-for (const path of await sourceFiles('src')) {
-  const text = await readFile(path, 'utf8');
-  const rewritten = text.replace(/(['"])(\.\.?\/[^'"]+)\.js\1/g, '$1$2.ts$1');
-  if (rewritten !== text) await writeFile(path, rewritten, 'utf8');
-}
+// Make runtime-transitive SDK imports explicit about type/value ownership so
+// Node 24 strip-types cannot accidentally request erased interfaces at runtime.
+await replaceInFile('src/auth/tokenManager.ts', [
+  [
+`import {
+  AuthorizationCodeParams,
+  PersistedToken,
+  PersistedTokenSchema,
+  RefreshTokenResponseSchema,
+  SchwabAuthConfig,
+  TokenResponse,
+  TokenResponseSchema,
+} from '../types/auth.js';`,
+`import {
+  PersistedTokenSchema,
+  RefreshTokenResponseSchema,
+  TokenResponseSchema,
+} from '../types/auth.js';
+import type {
+  AuthorizationCodeParams,
+  PersistedToken,
+  SchwabAuthConfig,
+  TokenResponse,
+} from '../types/auth.js';`,
+  ],
+  [
+    "import { Logger, createConsoleLogger, withDuration } from '../utils/logger.js';",
+    "import { createConsoleLogger, withDuration } from '../utils/logger.js';\nimport type { Logger } from '../utils/logger.js';",
+  ],
+]);
 
+await replaceInFile('src/auth/tokenStore.ts', [
+  [
+    "import { PersistedToken, PersistedTokenSchema } from '../types/auth.js';",
+    "import { PersistedTokenSchema } from '../types/auth.js';\nimport type { PersistedToken } from '../types/auth.js';",
+  ],
+  [
+    "import { Logger, createConsoleLogger } from '../utils/logger.js';",
+    "import { createConsoleLogger } from '../utils/logger.js';\nimport type { Logger } from '../utils/logger.js';",
+  ],
+]);
+
+await replaceInFile('src/streamer/streamerClient.ts', [
+  [
+    "import { StreamerInfo } from '../types/trader.js';",
+    "import type { StreamerInfo } from '../types/trader.js';",
+  ],
+  [
+    "import { Logger, createConsoleLogger } from '../utils/logger.js';",
+    "import { createConsoleLogger } from '../utils/logger.js';\nimport type { Logger } from '../utils/logger.js';",
+  ],
+  [
+`import {
+  StreamerCommandResponse,
+  StreamerMessage,
+  StreamerMessageSchema,
+  StreamerNotifyPayload,
+  StreamerRequestEnvelope,
+  StreamerServiceRequest,
+  isSuccessfulStreamerCommand,
+} from '../types/streamer.js';`,
+`import {
+  StreamerMessageSchema,
+  isSuccessfulStreamerCommand,
+} from '../types/streamer.js';
+import type {
+  StreamerCommandResponse,
+  StreamerMessage,
+  StreamerNotifyPayload,
+  StreamerRequestEnvelope,
+  StreamerServiceRequest,
+} from '../types/streamer.js';`,
+  ],
+  [
+    "this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));",
+    "this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url, { handshakeTimeout: 15_000, perMessageDeflate: false }));",
+  ],
+]);
+
+await replaceInFile('src/streamer/streamerErrors.ts', [[
+  "import { StreamerCommandResponse } from '../types/streamer.js';",
+  "import type { StreamerCommandResponse } from '../types/streamer.js';",
+]]);
+
+await replaceInFile('src/streamer/commandTracker.ts', [[
+`export class StreamerCommandTracker {
+  private readonly pending = new Map<string, PendingCommand>();
+
+  constructor(private readonly timeoutMs: number) {}`,
+`export class StreamerCommandTracker {
+  private readonly pending = new Map<string, PendingCommand>();
+  private readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    this.timeoutMs = timeoutMs;
+  }`,
+]]);
+
+// The automation auth adapter itself must also stay within Node's erasable TS subset.
 await replaceInFile('src/auth.ts', [[
-  `class AutomationAuthStore implements TokenStoreAdapter {
+`class AutomationAuthStore implements TokenStoreAdapter {
   readonly path = statePath;
 
   constructor(
     private readonly credentials?: Credentials,
     private readonly markReauthorized = false,
   ) {}`,
-  `class AutomationAuthStore implements TokenStoreAdapter {
+`class AutomationAuthStore implements TokenStoreAdapter {
   readonly path = statePath;
   private readonly credentials: Credentials | undefined;
   private readonly markReauthorized: boolean;
@@ -48,11 +138,16 @@ await replaceInFile('src/auth.ts', [[
   }`,
 ]]);
 
-await replaceInFile('src/streamer/streamerClient.ts', [[
-  "this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));",
-  "this.webSocketFactory = options.webSocketFactory ?? ((url) => new WebSocket(url, { handshakeTimeout: 15_000, perMessageDeflate: false }));",
-]]);
+// Node 24 strip-types executes the same source files that TypeScript compiles.
+// Keep relative source imports explicit as .ts; rewriteRelativeImportExtensions
+// emits .js references in dist, so source execution and package execution stay aligned.
+for (const path of await sourceFiles('src')) {
+  const text = await readFile(path, 'utf8');
+  const rewritten = text.replace(/(['"])(\.\.?\/[^'"]+)\.js\1/g, '$1$2.ts$1');
+  if (rewritten !== text) await writeFile(path, rewritten, 'utf8');
+}
 
+// Bring the legacy characterization fake frames up to the strict SDK wire schema.
 await replaceInFile('test/activity_stream.test.ts', [
   [
     'this.emit("message", Buffer.from(JSON.stringify({ response: [{ requestid, service, command, content: { code } }] })));',
@@ -64,6 +159,7 @@ await replaceInFile('test/activity_stream.test.ts', [
   ],
 ]);
 
+// Split the stable executable boundary from the production lifecycle orchestrator.
 const mainPath = 'src/main.ts';
 const source = await readFile(mainPath, 'utf8');
 const lines = source.split(/\r?\n/);
