@@ -1,0 +1,70 @@
+name: One-shot source tree unification v2
+
+on:
+  push:
+    branches:
+      - refactor/unify-sdk-automation-module
+
+permissions:
+  contents: write
+
+jobs:
+  refactor:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: vendor/schwab-api-nodejs/package-lock.json
+
+      - name: Extract corrected refactor script
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path('.github/workflows/refactor-unify-source-tree.yml').read_text(encoding='utf-8')
+          start_marker = "      - name: Unify SDK and automation into one source tree\n        shell: bash\n        run: |\n"
+          end_marker = "\n      - name: Commit refactor\n"
+          start = source.index(start_marker) + len(start_marker)
+          end = source.index(end_marker, start)
+          lines = source[start:end].splitlines()
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+          script = script.replace(
+              "          test ! -e vendor/schwab-api-nodejs\n          ! git grep -n 'vendor/schwab-api-nodejs'",
+              "          test ! -d vendor",
+          )
+          script = script.replace(
+              "rm .github/workflows/refactor-unify-source-tree.yml",
+              "rm .github/workflows/refactor-unify-source-tree.yml\nrm .github/workflows/refactor-unify-source-tree-v2.yml",
+          )
+          script = script.replace(
+              "if git grep -n 'vendor/schwab-api-nodejs'; then",
+              "if git grep -n 'vendor/schwab-api-nodejs' -- src test docs README.md package.json package-lock.json; then",
+          )
+          Path('/tmp/unify-source-tree.sh').write_text(script, encoding='utf-8')
+          PY
+          chmod +x /tmp/unify-source-tree.sh
+
+      - name: Execute and validate refactor
+        shell: bash
+        run: /tmp/unify-source-tree.sh
+
+      - name: Commit refactor
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'refactor: unify Schwab SDK and automation source tree'
+          git push origin HEAD:refactor/unify-sdk-automation-module
