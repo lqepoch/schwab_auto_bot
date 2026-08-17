@@ -3,6 +3,7 @@ import {
   AuthorizationCodeParams,
   PersistedToken,
   PersistedTokenSchema,
+  RefreshTokenResponseSchema,
   SchwabAuthConfig,
   TokenResponse,
   TokenResponseSchema,
@@ -41,11 +42,8 @@ export class TokenManager {
   constructor(config: SchwabAuthConfig, store?: TokenStoreAdapter, options: TokenManagerOptions = {}) {
     this.config = config;
 
-    // 创建基础记录器，确保后续步骤都有统一的输出格式
     const baseLogger = options.logger ?? createConsoleLogger({ scope: 'TokenManager' });
     this.logger = baseLogger.child('core');
-
-    // 若未显式传入 TokenStore，则默认使用基于文件的实现
     this.store =
       store ??
       new TokenStore({
@@ -66,11 +64,8 @@ export class TokenManager {
     });
   }
 
-  /**
-   * 拼装授权链接，可嵌入自定义 state、scope。
-   */
+  /** 拼装授权链接，可嵌入自定义 state、scope。 */
   createAuthorizeUrl(params: AuthorizationCodeParams = {}): string {
-    // 输出生成授权链接的参数，方便确认 state/scope
     this.logger.info('生成授权链接', { params });
     const url = new URL(AUTH_URL);
     url.searchParams.set('client_id', this.config.clientId);
@@ -81,9 +76,7 @@ export class TokenManager {
     return url.toString();
   }
 
-  /**
-   * 使用授权码兑换初始访问令牌，并自动写入缓存文件。
-   */
+  /** 使用授权码兑换初始访问令牌，并自动写入缓存文件。 */
   async exchangeCodeForToken(code: string): Promise<PersistedToken> {
     this.logger.info('收到授权码，准备换取访问令牌', { hasCode: Boolean(code) });
     const body = new URLSearchParams({
@@ -94,13 +87,9 @@ export class TokenManager {
     return this.requestToken(body, false);
   }
 
-  /**
-   * 使用 refresh_token 刷新访问令牌。
-   */
+  /** 使用 refresh_token 刷新访问令牌。 */
   async refreshAccessToken(refreshToken: string): Promise<PersistedToken> {
-    if (this.reauthRequired) {
-      throw new ReauthRequiredError();
-    }
+    if (this.reauthRequired) throw new ReauthRequiredError();
     this.logger.info('准备刷新访问令牌', { hasRefreshToken: Boolean(refreshToken) });
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
@@ -114,7 +103,7 @@ export class TokenManager {
     }
 
     const start = performance.now();
-    const pending = this.requestToken(body, true)
+    const pending = this.requestToken(body, true, refreshToken)
       .then((token) => {
         if (token.refresh_token !== refreshToken) {
           this.logger.warn('检测到刷新令牌已更新，将放弃旧的 refresh_token');
@@ -129,14 +118,10 @@ export class TokenManager {
     return pending;
   }
 
-  /**
-   * 获取仍在有效期内的访问令牌，若即将过期则尝试提前刷新。
-   */
+  /** 获取仍在有效期内的访问令牌，若即将过期则尝试提前刷新。 */
   async getValidToken(): Promise<PersistedToken | null> {
     this.logger.info('尝试读取可用访问令牌');
-    if (this.reauthRequired) {
-      throw new ReauthRequiredError();
-    }
+    if (this.reauthRequired) throw new ReauthRequiredError();
     const cached = await this.loadPersistedToken();
     if (!cached) {
       this.logger.warn('未找到本地缓存的令牌');
@@ -146,12 +131,9 @@ export class TokenManager {
     if (remainingMs <= this.safetyWindow) {
       try {
         this.logger.warn('令牌即将过期，准备刷新');
-        const refreshed = await this.refreshAccessToken(cached.refresh_token);
-        return refreshed;
+        return await this.refreshAccessToken(cached.refresh_token);
       } catch (error) {
-        if (error instanceof ReauthRequiredError) {
-          throw error;
-        }
+        if (error instanceof ReauthRequiredError) throw error;
         if (cached.expires_at > Date.now()) {
           this.logger.warn('刷新令牌失败，但缓存访问令牌仍在有效期内，暂时继续使用', {
             error: safeErrorMessage(error),
@@ -171,9 +153,7 @@ export class TokenManager {
     return cached;
   }
 
-  /**
-   * 获取可用令牌；若不存在缓存则抛出异常，提示调用方先完成授权交换。
-   */
+  /** 获取可用令牌；若不存在缓存则要求调用方完成授权交换。 */
   async requireAccessToken(): Promise<PersistedToken> {
     const token = await this.getValidToken();
     if (!token) {
@@ -189,9 +169,7 @@ export class TokenManager {
     return token;
   }
 
-  /**
-   * 手动持久化令牌对象，可用于外部自定义换取流程。
-   */
+  /** 手动持久化令牌对象，可用于外部自定义换取流程。 */
   async persist(token: TokenResponse): Promise<PersistedToken> {
     this.logger.info('准备手动持久化令牌');
     const persisted = this.decorateToken(token);
@@ -201,10 +179,12 @@ export class TokenManager {
     return persisted;
   }
 
-  /**
-   * 与 Schwab OAuth 服务器交互的核心逻辑，封装 POST 请求与错误信息。
-   */
-  private async requestToken(body: URLSearchParams, isRefresh: boolean): Promise<PersistedToken> {
+  /** OAuth POST 核心路径；刷新响应允许 Schwab 不返回新的 refresh_token。 */
+  private async requestToken(
+    body: URLSearchParams,
+    isRefresh: boolean,
+    priorRefreshToken?: string,
+  ): Promise<PersistedToken> {
     const start = performance.now();
     this.logger.info('向 OAuth 服务器请求令牌');
     let response: Response;
@@ -219,9 +199,7 @@ export class TokenManager {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (error) {
-      this.logger.error('请求 OAuth 服务器失败（网络异常）', {
-        error: safeErrorMessage(error),
-      });
+      this.logger.error('请求 OAuth 服务器失败（网络异常）', { error: safeErrorMessage(error) });
       throw error;
     }
     if (!response.ok) {
@@ -246,19 +224,27 @@ export class TokenManager {
       }
       throw new Error(`Schwab token request failed: ${response.status} ${response.statusText}`);
     }
+
     let payload: unknown;
     try {
       payload = await response.json();
     } catch (error) {
-      this.logger.error('解析 OAuth 响应 JSON 失败', {
-        error: safeErrorMessage(error),
-      });
+      this.logger.error('解析 OAuth 响应 JSON 失败', { error: safeErrorMessage(error) });
       throw error;
     }
 
     let token: TokenResponse;
     try {
-      token = TokenResponseSchema.parse(payload);
+      if (isRefresh) {
+        const refreshed = RefreshTokenResponseSchema.parse(payload);
+        const refreshToken = refreshed.refresh_token ?? priorRefreshToken;
+        if (!refreshToken) {
+          throw new Error('Schwab refresh response omitted refresh_token without a prior credential');
+        }
+        token = { ...refreshed, refresh_token: refreshToken };
+      } else {
+        token = TokenResponseSchema.parse(payload);
+      }
     } catch (error) {
       this.logger.error('OAuth 响应结构验证失败', {
         error: safeErrorMessage(error),
@@ -266,6 +252,7 @@ export class TokenManager {
       });
       throw error;
     }
+
     this.logger.info('成功从 OAuth 服务器获取令牌', withDuration(start));
     const persisted = this.decorateToken(token);
     await this.store.save(persisted);
@@ -273,9 +260,6 @@ export class TokenManager {
     return persisted;
   }
 
-  /**
-   * 为原始响应补充缓存时间与过期时间戳，方便失效判断。
-   */
   private decorateToken(token: TokenResponse): PersistedToken {
     const now = Date.now();
     this.logger.debug('计算令牌过期时间', { now, expiresIn: token.expires_in });
@@ -338,24 +322,15 @@ export class TokenManager {
   }
 
   private emitInvalidGrant(details: { description?: string; body: unknown }): void {
-    if (!this.invalidGrantObserver) {
-      return;
-    }
+    if (!this.invalidGrantObserver) return;
     try {
       this.invalidGrantObserver(details);
     } catch (error) {
-      this.logger.error('invalid_grant 回调执行失败', {
-        error: safeErrorMessage(error),
-      });
+      this.logger.error('invalid_grant 回调执行失败', { error: safeErrorMessage(error) });
     }
   }
 }
 
-/**
- * OAuth error payloads are untrusted. Keep enough context for diagnostics
- * while ensuring token-shaped values in both JSON and plain-text responses do
- * not reach logs or callbacks.
- */
 function redactOAuthText(value: unknown): unknown {
   const redacted = redactSensitive(value);
   const visit = (current: unknown): unknown => {
