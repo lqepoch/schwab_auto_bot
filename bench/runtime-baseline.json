@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-17T08:02:33.785Z",
+  "sampleCount": 7,
+  "nodeMajor": 24,
+  "seed": 20260817,
+  "corpusSize": 2500,
+  "policy": {
+    "orderIndexMultiplier": 2,
+    "persistenceMultiplier": 2.5,
+    "journalMultiplier": 2,
+    "streamerMultiplier": 2,
+    "eventLoopMultiplier": 2.5,
+    "minimumEventLoopP99Ms": 25
+  },
+  "metrics": {
+    "orderIndex.wallMs": {
+      "median": 314.144,
+      "p90": 322.468,
+      "limit": 644.936,
+      "unit": "ms"
+    },
+    "atomicPersistence.wallMs": {
+      "median": 23.46,
+      "p90": 25.393,
+      "limit": 63.483,
+      "unit": "ms"
+    },
+    "executionJournal.wallMs": {
+      "median": 279.58,
+      "p90": 312.345,
+      "limit": 624.69,
+      "unit": "ms"
+    },
+    "streamerDecodeDispatch.wallMs": {
+      "median": 37.137,
+      "p90": 41.718,
+      "limit": 83.436,
+      "unit": "ms"
+    },
+    "eventLoop.p99Ms": {
+      "median": 11.821,
+      "p90": 13.042,
+      "limit": 32.605,
+      "unit": "ms"
+    }
+  }
+}

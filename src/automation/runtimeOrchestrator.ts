@@ -12,6 +12,11 @@ import { SchwabApiError } from "../utils/errors.ts";
 import { atomicWriteJson } from "../utils/atomicJson.ts";
 import { parseRuntimePolicy } from "../runtime_policy.ts";
 import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "../order_policy.ts";
+import {
+  buildPrimaryActiveOpeningOrderIds,
+  managedOpeningInfo,
+  selectActiveOpeningOrders,
+} from "./orderIndex.ts";
 import { completeNetDebitFill, completeOrderLimitFill } from "../fill_price.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "../price_explorer.ts";
 import { ExecutionJournal } from "../execution_journal.ts";
@@ -1261,15 +1266,7 @@ async function runActivityRestConfirmation(): Promise<void> {
 }
 
 function managedOpening(order: Json): ReturnType<typeof orderInfo> {
-  const meta = info(order);
-  const today = newYorkDate();
-  if (
-    !meta?.opening || meta.expiration !== today || !policy.underlyings.has(meta.underlying)
-    || !policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
-    || !isRefreshSpreadEligible(meta)
-    || quantity(order) !== 1 || orderPolicyViolation(order, policy, today)
-  ) return null;
-  return meta;
+  return managedOpeningInfo(order, policy, newYorkDate());
 }
 
 function rememberExitTemplate(strategy: string, order: Json): void {
@@ -1355,30 +1352,12 @@ function queueExplorerActions(groupKey: string, actions: ExplorerAction[]): void
   }
 }
 
-function compareOpeningOrders(left: Json, right: Json): number {
-  return Number(left.price) - Number(right.price)
-    || eventTime(left) - eventTime(right)
-    || orderId(left).localeCompare(orderId(right));
-}
-
 function activeOpeningOrders(groupKey: string): Json[] {
-  const today = newYorkDate();
-  return orders.filter((order) => {
-    const meta = info(order);
-    return working.has(String(order.status)) && meta?.opening && meta.key === groupKey
-      && meta.expiration === today && policy.underlyings.has(meta.underlying);
-  }).sort(compareOpeningOrders);
+  return selectActiveOpeningOrders(orders, groupKey, newYorkDate(), policy.underlyings, working);
 }
 
 function primaryActiveOpeningOrderIds(): Map<string, string> {
-  const primary = new Map<string, Json>();
-  for (const order of orders) {
-    const meta = managedOpening(order);
-    if (!meta || !working.has(String(order.status))) continue;
-    const current = primary.get(meta.key);
-    if (!current || compareOpeningOrders(order, current) < 0) primary.set(meta.key, order);
-  }
-  return new Map([...primary].map(([strategy, order]) => [strategy, orderId(order)]));
+  return buildPrimaryActiveOpeningOrderIds(orders, policy, newYorkDate(), working);
 }
 
 function queueFixedPriceRefresh(
