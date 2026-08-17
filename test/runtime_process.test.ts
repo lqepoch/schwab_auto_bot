@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
+  bindRuntimeAbortSignal,
   bindRuntimeProcessHandlers,
   type RuntimeProcessEvents,
   type RuntimeSignal,
@@ -41,4 +42,35 @@ test("runtime process bindings preserve the exact signal and clean up idempotent
   assert.equal(emitter.listenerCount("SIGINT"), 0);
   assert.equal(emitter.listenerCount("SIGTERM"), 0);
   assert.equal(emitter.listenerCount("exit"), 0);
+});
+
+test("runtime abort binding handles one future abort and cleanup is idempotent", () => {
+  const controller = new AbortController();
+  let aborts = 0;
+  const cleanup = bindRuntimeAbortSignal(controller.signal, () => { aborts += 1; });
+
+  controller.abort();
+  controller.abort();
+  assert.equal(aborts, 1);
+
+  cleanup();
+  cleanup();
+  assert.equal(aborts, 1);
+});
+
+test("an already-aborted signal requests shutdown immediately", () => {
+  const controller = new AbortController();
+  controller.abort();
+  let aborts = 0;
+  const cleanup = bindRuntimeAbortSignal(controller.signal, () => { aborts += 1; });
+  assert.equal(aborts, 1);
+  cleanup();
+});
+
+test("missing abort signal binds as a no-op", () => {
+  let aborts = 0;
+  const cleanup = bindRuntimeAbortSignal(undefined, () => { aborts += 1; });
+  cleanup();
+  cleanup();
+  assert.equal(aborts, 0);
 });
