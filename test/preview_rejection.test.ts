@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyPreviewRejection, previewRejectionCooldownFromError, previewRejectionDetails, previewRejectionSummary } from "../src/preview_rejection.ts";
+import { classifyPreviewRejection, previewRejectionCooldownFromError, previewRejectionDetails, previewRejectionSummary } from "../src/automation/execution/previewRejection.ts";
 
 test("classifies Preview rejection text into a cooldown category", () => {
   assert.deepEqual(classifyPreviewRejection({ errors: [{ detail: "Insufficient buying power" }] }), { code: "INSUFFICIENT_FUNDS", cooldownMs: 15_000 });

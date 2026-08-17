@@ -58,7 +58,7 @@ test("rejects corrupt, blank, and invalid-date auth files before making a token 
       await writeFile(path, typeof value === "string" ? value : JSON.stringify(value), "utf8");
       const output = await runAuthScript(path, `
         globalThis.fetch = async () => { console.log("FETCH_CALLED"); return new Response("{}", { status: 200 }); };
-        const { SchwabTokenProvider } = await import("./src/auth.ts");
+        const { SchwabTokenProvider } = await import("./src/automation/auth/provider.ts");
         try { await new SchwabTokenProvider(() => undefined).get(); }
         catch (error) { console.log("ERROR=" + (error instanceof Error ? error.message : String(error))); }
       `);
@@ -84,7 +84,7 @@ test("shares concurrent refreshes and a force request cannot be weakened by an i
         if (!body.includes("grant_type=refresh_token")) throw new Error("WRONG_GRANT");
         return new Response(JSON.stringify({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 1800, refresh_expires_in: 86400 }), { status: 200 });
       };
-      const { SchwabTokenProvider } = await import("./src/auth.ts");
+      const { SchwabTokenProvider } = await import("./src/automation/auth/provider.ts");
       const provider = new SchwabTokenProvider(() => undefined);
       const cached = await provider.get();
       const regular = provider.get(false);
@@ -110,7 +110,7 @@ test("rejects callback state, origin, path, and malformed URL mismatches without
     const output = await runAuthScript(path, `
       let calls = 0;
       globalThis.fetch = async () => { calls += 1; return new Response("{}", { status: 200 }); };
-      const { login } = await import("./src/auth.ts");
+      const { login } = await import("./src/automation/auth/provider.ts");
       for (const callback of [
         "https://127.0.0.1/callback?code=x&state=wrong",
         "https://localhost/callback?code=x&state=state",
@@ -140,7 +140,7 @@ test("login atomically saves a private auth file and does not print credentials"
         console.log(JSON.stringify({ method: init.method, hasBasic: headers.get("authorization")?.startsWith("Basic "), formHasCode: form.includes("code=auth-code"), formHasRedirect: form.includes("redirect_uri=https%3A%2F%2F127.0.0.1%2Fcallback") }));
         return new Response(JSON.stringify({ access_token: "access-secret", refresh_token: "refresh-secret", expires_in: 1800, refresh_expires_in: 86400 }), { status: 200 });
       };
-      const { login } = await import("./src/auth.ts");
+      const { login } = await import("./src/automation/auth/provider.ts");
       await login("https://127.0.0.1/callback?code=auth-code&state=expected", "expected");
       console.log("DONE");
     `);
@@ -171,7 +171,7 @@ test("refresh failure remains structured and reports no token or secret material
     } })), "utf8");
     const output = await runAuthScript(path, `
       globalThis.fetch = async () => new Response("denied", { status: 401 });
-      const { SchwabTokenProvider } = await import("./src/auth.ts");
+      const { SchwabTokenProvider } = await import("./src/automation/auth/provider.ts");
       try { await new SchwabTokenProvider((message) => console.log("REPORT=" + message)).get(); }
       catch (error) { console.log("ERROR=" + (error instanceof Error ? error.message : String(error))); }
     `);
@@ -195,7 +195,7 @@ test("expired refresh credentials fail closed without calling the token endpoint
     } })), "utf8");
     const output = await runAuthScript(path, `
       globalThis.fetch = async () => { console.log("FETCH_CALLED"); return new Response("{}", { status: 200 }); };
-      const { SchwabTokenProvider } = await import("./src/auth.ts");
+      const { SchwabTokenProvider } = await import("./src/automation/auth/provider.ts");
       try { await new SchwabTokenProvider(() => undefined).get(true); }
       catch (error) { console.log("ERROR=" + (error instanceof Error ? error.message : String(error))); }
     `);
@@ -221,7 +221,7 @@ test("invalid refresh JSON is fail-closed and the token endpoint receives an abo
         console.log(JSON.stringify({ method: init.method, hasAbortSignal: Boolean(init.signal), abortInitially: init.signal.aborted }));
         return new Response("not-json", { status: 200 });
       };
-      const { SchwabTokenProvider } = await import("./src/auth.ts");
+      const { SchwabTokenProvider } = await import("./src/automation/auth/provider.ts");
       try { await new SchwabTokenProvider(() => undefined).get(); }
       catch (error) { console.log("ERROR=" + (error instanceof Error ? error.message : String(error))); }
     `);
@@ -245,7 +245,7 @@ test("null or array token responses are rejected as invalid schemas", async () =
     for (const body of ["null", "[]"]) {
       const output = await runAuthScript(path, `
         globalThis.fetch = async () => new Response(${JSON.stringify(body)}, { status: 200 });
-        const { SchwabTokenProvider } = await import("./src/auth.ts");
+        const { SchwabTokenProvider } = await import("./src/automation/auth/provider.ts");
         try { await new SchwabTokenProvider(() => undefined).get(); }
         catch (error) { console.log("ERROR=" + (error instanceof Error ? error.message : String(error))); }
       `);
@@ -269,7 +269,7 @@ test("refresh response without a new refresh token preserves the prior refresh c
     await writeFile(path, JSON.stringify(original), "utf8");
     await runAuthScript(path, `
       globalThis.fetch = async () => new Response(JSON.stringify({ access_token: "new-access", expires_in: 1800 }), { status: 200 });
-      const { SchwabTokenProvider } = await import("./src/auth.ts");
+      const { SchwabTokenProvider } = await import("./src/automation/auth/provider.ts");
       console.log(await new SchwabTokenProvider(() => undefined).get());
     `);
     const saved = JSON.parse(await readFile(path, "utf8"));
@@ -288,7 +288,7 @@ test("failed atomic save removes its temporary file", async () => {
     await (await import("node:fs/promises")).mkdir(path);
     const output = await runAuthScript(path, `
       globalThis.fetch = async () => new Response(JSON.stringify({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 1800, refresh_expires_in: 86400 }), { status: 200 });
-      const { login } = await import("./src/auth.ts");
+      const { login } = await import("./src/automation/auth/provider.ts");
       try { await login("https://127.0.0.1/callback?code=code&state=state", "state"); }
       catch (error) { console.log("ERROR=" + (error instanceof Error ? error.code || error.message : String(error))); }
     `);

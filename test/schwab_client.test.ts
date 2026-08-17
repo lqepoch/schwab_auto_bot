@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SchwabApiError } from "../src/utils/errors.ts";
-import { SchwabRestClient } from "../src/schwab_client.ts";
+import { SchwabRestClient } from "../src/automation/broker/schwabClient.ts";
 
 test("SDK transport preserves the broker Location header and JSON request contract", async () => {
   let observedUrl = "";

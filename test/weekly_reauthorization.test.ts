@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createWeeklyReauthorizationEnsurer } from "../src/weekly_reauthorization.ts";
+import { createWeeklyReauthorizationEnsurer } from "../src/automation/auth/weeklyReauthorization.ts";
 
 test("weekly reauthorization opens one interactive login and rechecks before continuing", async () => {
   let authorized = false;

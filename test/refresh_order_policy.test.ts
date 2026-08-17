@@ -5,7 +5,7 @@ import {
   REQUIRED_REFRESH_SPREAD_WIDTH,
   isRefreshSpreadEligible,
   refreshSpreadWidth,
-} from "../src/refresh_order_policy.ts";
+} from "../src/automation/policy/refreshOrder.ts";
 
 test("only a one-point vertical spread is eligible for order refresh", () => {
   assert.equal(REQUIRED_REFRESH_SPREAD_WIDTH, 1);

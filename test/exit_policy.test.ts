@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_INVENTORY_TRIGGER, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "../src/exit_policy.ts";
+import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_INVENTORY_TRIGGER, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "../src/automation/policy/exit.ts";
 
 test("resets a vertical's full-exit countdown on its most recent buy fill", () => {
   const lastBuyFillAt = 1_000_000;

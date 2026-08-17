@@ -3,14 +3,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
-import { orderInfo, type Json } from "../src/order_policy.ts";
-import { parseRuntimePolicy } from "../src/runtime_policy.ts";
+import { orderInfo, type Json } from "../src/automation/policy/order.ts";
+import { parseRuntimePolicy } from "../src/automation/policy/runtime.ts";
 import {
   buildPrimaryActiveOpeningOrderIds,
   selectActiveOpeningOrders,
 } from "../src/automation/orderIndex.ts";
 import { atomicWriteJson } from "../src/utils/atomicJson.ts";
-import { ExecutionJournal } from "../src/execution_journal.ts";
+import { ExecutionJournal } from "../src/automation/observability/executionJournal.ts";
 import { StreamerMessageSchema } from "../src/types/streamer.ts";
 
 const CORPUS_SIZE = 2_500;

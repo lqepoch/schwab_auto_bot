@@ -1,4 +1,4 @@
-import { orderInfo, type Json } from "./order_policy.ts";
+import { orderInfo, type Json } from "../policy/order.ts";
 
 export const SUBMIT_PREVIEW_REQUIRED = "SUBMIT_PREVIEW_REQUIRED";
 export const EXISTING_ORDER_REPLACE_NO_PREVIEW = "EXISTING_ORDER_REPLACE_NO_PREVIEW";

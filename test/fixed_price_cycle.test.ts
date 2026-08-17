@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FixedPriceReplenishmentGuard, FIXED_PRICE_MAX_ACTIVE_ORDERS, FIXED_PRICE_STARTUP_FILL_GRACE_MS, STALE_ORDER_RECREATE_AGE_MS, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "../src/fixed_price_cycle.ts";
+import { FixedPriceReplenishmentGuard, FIXED_PRICE_MAX_ACTIVE_ORDERS, FIXED_PRICE_STARTUP_FILL_GRACE_MS, STALE_ORDER_RECREATE_AGE_MS, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "../src/automation/execution/fixedPriceCycle.ts";
 
 test("fixed-price mode keeps exactly one working opening order per strategy", () => {
   assert.equal(FIXED_PRICE_MAX_ACTIVE_ORDERS, 1);

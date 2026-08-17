@@ -1,4 +1,4 @@
-import { ENTRY_PRICE_MAX_CENTS, ENTRY_PRICE_MIN_CENTS } from "./entry_price_policy.ts";
+import { ENTRY_PRICE_MAX_CENTS, ENTRY_PRICE_MIN_CENTS } from "./entryPrice.ts";
 
 const executionTimeZone = "America/New_York";
 

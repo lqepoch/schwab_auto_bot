@@ -6,7 +6,7 @@ import {
   nativeReplaceOrderId,
   orderWritePreflight,
   replacementSourceViolation,
-} from "../src/order_write_preflight.ts";
+} from "../src/automation/execution/orderWritePreflight.ts";
 
 const workingOpening = {
   orderId: "12345",

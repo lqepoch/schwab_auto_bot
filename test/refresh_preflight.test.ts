@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { refreshAuthoritativeSnapshots } from "../src/refresh_preflight.ts";
+import { refreshAuthoritativeSnapshots } from "../src/automation/policy/refreshPreflight.ts";
 
 test("refreshes Schwab orders before positions and only then admits a refresh round", async () => {
   const calls: string[] = [];

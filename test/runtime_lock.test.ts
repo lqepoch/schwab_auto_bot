@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { acquireRuntimeLock } from "../src/runtime_lock.ts";
+import { acquireRuntimeLock } from "../src/automation/state/runtimeLock.ts";
 
 test("rejects a second runtime while the first lock owner is alive", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-runtime-lock-"));

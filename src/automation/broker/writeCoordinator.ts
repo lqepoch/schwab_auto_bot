@@ -2,7 +2,7 @@ import type {
   UnknownWriteFailure,
   UnknownWriteOperation,
   UnknownWriteRecord,
-} from "./unknown_write_reconciliation.ts";
+} from "../state/unknownWriteReconciliation.ts";
 
 export type BrokerWriteMethod = "POST" | "PUT" | "DELETE";
 export type BrokerWritePriority = 0 | 1 | 2 | 3;

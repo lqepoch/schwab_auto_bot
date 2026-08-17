@@ -1,4 +1,4 @@
-import { ENTRY_PRICE_MAX_CENTS, ENTRY_PRICE_MIN_CENTS } from "./entry_price_policy.ts";
+import { ENTRY_PRICE_MAX_CENTS, ENTRY_PRICE_MIN_CENTS } from "../policy/entryPrice.ts";
 
 export const PRICE_MIN_CENTS = ENTRY_PRICE_MIN_CENTS;
 export const PRICE_MAX_CENTS = ENTRY_PRICE_MAX_CENTS;

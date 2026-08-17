@@ -70,9 +70,9 @@
   ],
   "scripts": {
     "start": "node src/automation/cli.ts",
-    "auth:login": "node src/auth_cli.ts login",
-    "auth:relogin": "node src/auth_cli.ts relogin --confirm REAUTHORIZE_SCHWAB",
-    "auth:status": "node src/auth_cli.ts status",
+    "auth:login": "node src/automation/auth/cli.ts login",
+    "auth:relogin": "node src/automation/auth/cli.ts relogin --confirm REAUTHORIZE_SCHWAB",
+    "auth:status": "node src/automation/auth/cli.ts status",
     "build:sdk": "tsc -p tsconfig.sdk.json",
     "build:automation": "tsc -p tsconfig.automation.json",
     "build": "npm run build:sdk && npm run build:automation",
@@ -91,14 +91,14 @@
     "benchmark:runtime:check": "node --experimental-strip-types bench/check-runtime-benchmark.ts"
   },
   "dependencies": {
-    "dotenv": "^16.4.7",
-    "open": "^10.1.0",
+    "dotenv": "^17.4.2",
+    "open": "^11.0.1",
     "ws": "^8.21.0",
     "zod": "^4.1.9"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.1",
-    "typescript": "^5.9.2"
+    "typescript": "^7.0.2"
   }
 }
