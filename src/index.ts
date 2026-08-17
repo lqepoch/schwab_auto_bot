@@ -145,7 +145,7 @@ export class SchwabOwokit {
 
     if (loadEnvFile) {
       const envFilePath = envPath ?? '.env';
-      const result = loadEnvConfig({ path: envFilePath });
+      const result = loadEnvConfig({ path: envFilePath, quiet: true });
       if (result.error) {
         logger.warn('加载 .env 文件失败，将继续读取现有环境变量', {
           path: envFilePath,
