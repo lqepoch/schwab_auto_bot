@@ -12,6 +12,7 @@ on:
       - 'package-lock.json'
       - 'tsconfig*.json'
       - '.github/workflows/schwab-sdk-ci.yml'
+      - '.github/dependabot.yml'
   push:
     branches:
       - main
@@ -25,38 +26,62 @@ on:
       - 'package-lock.json'
       - 'tsconfig*.json'
       - '.github/workflows/schwab-sdk-ci.yml'
+      - '.github/dependabot.yml'
+
+concurrency:
+  group: schwab-unified-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
   contracts:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Node.js 24
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
 
-      - name: Typecheck SDK and automation
-        run: npm run typecheck
+      - name: Audit production dependency vulnerabilities
+        run: npm audit --omit=dev --audit-level=high
 
-      - name: Build and run unified contract tests
+      - name: Build, typecheck, and run unified contract tests
         run: npm test
 
-      - name: Verify single source tree
+      - name: Verify package export surface
         shell: bash
         run: |
           set -euo pipefail
+          test -f dist/public.js
+          test -f dist/public.d.ts
+          test -f dist/automation/public.js
+          test -f dist/automation/public.d.ts
+          npm pack --dry-run --json > /tmp/npm-pack.json
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const data = JSON.parse(fs.readFileSync('/tmp/npm-pack.json', 'utf8'));
+          const files = new Set((data[0]?.files ?? []).map((entry) => entry.path));
+          for (const required of ['dist/public.js', 'dist/public.d.ts', 'dist/automation/public.js', 'dist/automation/public.d.ts']) {
+            if (!files.has(required)) throw new Error(`PACKAGE_EXPORT_MISSING:${required}`);
+          }
+          NODE
+
+      - name: Verify repository invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
           test ! -d vendor
           if git grep -n 'vendor/schwab-api-nodejs' -- src test docs README.md package.json package-lock.json; then
             echo 'stale nested SDK path remains' >&2
