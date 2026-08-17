@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { SchwabActivityStream, type ActivityBatch } from "./stream/activityStream.ts";
 import { requireWeeklyReauthorization, SchwabTokenProvider } from "./auth/provider.ts";
+import { UnauthorizedRefreshCoordinator } from "./auth/unauthorizedRefresh.ts";
 import { runInteractiveLogin } from "./auth/cli.ts";
 import { createWeeklyReauthorizationEnsurer } from "./auth/weeklyReauthorization.ts";
 import { PriorityGate, PriorityWriter, type Priority } from "./scheduling/priorityRuntime.ts";
@@ -276,6 +277,13 @@ class RequestBudget {
 }
 
 const tokens = new SchwabTokenProvider(stamp);
+const unauthorizedRefresh = new UnauthorizedRefreshCoordinator({
+  refresh: () => tokens.get(true),
+  onFailure: (code) => {
+    executionJournal.record("auth.background-refresh-failed", { source: "broker-401", code });
+    stamp(`AUTH_BACKGROUND_REFRESH_FAILED code=${code}`);
+  },
+});
 const budget = new RequestBudget();
 const client = new SchwabRestClient();
 
@@ -294,7 +302,9 @@ async function api(
     if (error instanceof SchwabApiError) {
       latestBrokerRateLimit = brokerRateLimitFromHeaders(error.headers);
       if (error.status === 429) budget.rateLimited(error.headers["retry-after"] ?? null);
-      if (error.status === 401) void tokens.get(true);
+      if (error.status === 401 && unauthorizedRefresh.schedule()) {
+        executionJournal.record("auth.background-refresh-scheduled", { source: "broker-401" });
+      }
       throw Object.assign(new Error(`SCHWAB_HTTP_${error.status}`), {
         status: error.status,
         statusText: error.statusText,
