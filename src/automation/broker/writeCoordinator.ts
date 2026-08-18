@@ -89,6 +89,7 @@ export type BrokerWriteEvent = Readonly<{
   event:
     | "blocked"
     | "intent-persisted"
+    | "acceptance-evidence-recovered"
     | "accepted"
     | "rejected"
     | "unknown"
@@ -277,16 +278,28 @@ export class BrokerWriteCoordinator {
       // mutation after WAL persistence has succeeded.
       response = await preparedTransport.send();
     } catch (error) {
-      const status = statusOf(error);
-      const reason = reasonOf(error, status);
-      if (status !== null && isExplicitBrokerRejection(status)) {
-        await this.clearIntent(request, intent.id, status, "explicit-4xx");
-        this.emitEvent({ event: "rejected", request, ledgerId: intent.id, status });
-        throw new BrokerWriteRejectedError(request, status);
+      const recovered = recoverAcceptedMutationResponse(request, error);
+      if (recovered) {
+        response = recovered;
+        this.emitEvent({
+          event: "acceptance-evidence-recovered",
+          request,
+          ledgerId: intent.id,
+          status: recovered.status,
+          reason: "2xx-response-headers-after-body-read-failure",
+        });
+      } else {
+        const status = statusOf(error);
+        const reason = reasonOf(error, status);
+        if (status !== null && isExplicitBrokerRejection(status)) {
+          await this.clearIntent(request, intent.id, status, "explicit-4xx");
+          this.emitEvent({ event: "rejected", request, ledgerId: intent.id, status });
+          throw new BrokerWriteRejectedError(request, status);
+        }
+        await this.persistUnknown(request, intent.id, status, reason);
+        this.emitEvent({ event: "unknown", request, ledgerId: intent.id, status: status ?? undefined, reason });
+        throw new UnknownOutcomeError(request, intent.id, reason, status, error);
       }
-      await this.persistUnknown(request, intent.id, status, reason);
-      this.emitEvent({ event: "unknown", request, ledgerId: intent.id, status: status ?? undefined, reason });
-      throw new UnknownOutcomeError(request, intent.id, reason, status, error);
     }
 
     if (isExplicitBrokerRejection(response.status)) {
@@ -414,6 +427,40 @@ export class SerialBrokerWriteGate implements BrokerWriteGate {
     this.tail = new Promise<void>((resolve) => { release = resolve; });
     return previous.then(operation).finally(release);
   }
+}
+
+function recoverAcceptedMutationResponse(
+  request: BrokerWriteRequest,
+  error: unknown,
+): BrokerWriteResponse | null {
+  if ((error as { isNetworkError?: unknown })?.isNetworkError !== true) return null;
+  const status = statusOf(error);
+  const headers = responseHeadersOf(error);
+
+  // Schwab's Trader API contract defines successful DELETE cancellation as
+  // HTTP 200 with an empty body. If body streaming fails after those response
+  // headers arrived, the cancel is already conclusively accepted.
+  if (request.method === "DELETE" && status === 200) {
+    return { status, headers };
+  }
+
+  // Place/Replace success is HTTP 201 plus Location. Require both pieces of
+  // broker evidence so a generic 2xx client-side error can never clear WAL.
+  if ((request.method === "POST" || request.method === "PUT") && status === 201) {
+    return locationOrderId(headers) === null ? null : { status, headers };
+  }
+  return null;
+}
+
+function responseHeadersOf(error: unknown): BrokerWriteResponse["headers"] {
+  const value = (error as { headers?: unknown })?.headers;
+  if (value instanceof Headers) return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const headers: Record<string, string | undefined> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === "string" || entry === undefined) headers[key] = entry;
+  }
+  return headers;
 }
 
 function statusOf(error: unknown): number | null {
