@@ -20,9 +20,9 @@ export type DurableJsonlOptions = Readonly<{
 export class DurableJsonlWriter {
   readonly path: string;
   private readonly failureCode: string;
-  private readonly directoryMode?: number;
+  private readonly directoryMode: number | undefined;
   private readonly fileMode: number;
-  private readonly onFailure?: (error: unknown) => void;
+  private readonly onFailure: ((error: unknown) => void) | undefined;
   private tail: Promise<void> = Promise.resolve();
   private persistenceFailure: unknown = null;
 
