@@ -3,6 +3,13 @@ import { orderInfo, type Json } from "../policy/order.ts";
 export const SUBMIT_PREVIEW_REQUIRED = "SUBMIT_PREVIEW_REQUIRED";
 export const EXISTING_ORDER_REPLACE_NO_PREVIEW = "EXISTING_ORDER_REPLACE_NO_PREVIEW";
 
+export const AUTOMATION_WORKING_ORDER_STATUSES = [
+  "PENDING_ACTIVATION",
+  "QUEUED",
+  "WORKING",
+  "AWAITING_PARENT_ORDER",
+] as const;
+
 export type OrderWritePreflight =
   | typeof SUBMIT_PREVIEW_REQUIRED
   | typeof EXISTING_ORDER_REPLACE_NO_PREVIEW;
@@ -24,13 +31,7 @@ export type OrderWritePreflightDecision =
     violation: "REPLACE_ENDPOINT_INVALID";
   }>;
 
-const replaceableStatuses = new Set([
-  "PENDING_ACTIVATION",
-  "QUEUED",
-  "WORKING",
-  "PARTIALLY_FILLED",
-  "AWAITING_PARENT_ORDER",
-]);
+const replaceableStatuses: ReadonlySet<string> = new Set(AUTOMATION_WORKING_ORDER_STATUSES);
 
 /**
  * Returns the existing broker order ID only for the exact native Replace
