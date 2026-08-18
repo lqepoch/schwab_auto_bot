@@ -36,10 +36,11 @@ test("current-date strategy consumers reuse one revision-aware order view", asyn
   }
 });
 
-test("non-0DTE working-order policy audit keeps the full authority scan", async () => {
+test("non-0DTE working-order policy audit uses the broader cached working view", async () => {
   const source = await runtimeSource();
   const value = block(source, "function reportWorkingOrderPolicyViolations", "function recordRefreshSpreadSkip");
-  assert.match(value, /for \(const order of orders\)/);
+  assert.match(value, /for \(const order of workingAllowedUnderlyingOrders\(\)\)/);
+  assert.doesNotMatch(value, /for \(const order of orders\)/);
   assert.doesNotMatch(value, /currentStrategyOrders\(\)/);
   assert.match(value, /orderPolicyViolation\(order, policy, today, meta\)/);
 });
