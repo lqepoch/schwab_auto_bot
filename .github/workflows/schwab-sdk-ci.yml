@@ -14,6 +14,7 @@ on:
       - 'package-lock.json'
       - 'tsconfig*.json'
       - '.github/workflows/schwab-sdk-ci.yml'
+      - '.github/workflows/schwab-deep-ci.yml'
       - '.github/dependabot.yml'
   push:
     branches:
@@ -30,6 +31,7 @@ on:
       - 'package-lock.json'
       - 'tsconfig*.json'
       - '.github/workflows/schwab-sdk-ci.yml'
+      - '.github/workflows/schwab-deep-ci.yml'
       - '.github/dependabot.yml'
 
 concurrency:
@@ -122,5 +124,9 @@ jobs:
           test ! -e scripts/enterprise-finish-edit.mjs
           if git grep -n 'vendor/schwab-api-nodejs' -- src test docs README.md package.json package-lock.json; then
             echo 'stale nested SDK path remains' >&2
+            exit 1
+          fi
+          if git grep -n 'npx --yes knip' -- .github package.json; then
+            echo 'unlocked Knip invocation remains' >&2
             exit 1
           fi
