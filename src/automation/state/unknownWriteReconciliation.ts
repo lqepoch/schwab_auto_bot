@@ -57,12 +57,12 @@ export type ReconciliationResult = Readonly<{
   resolved: readonly UnknownWriteRecord[];
   pending: readonly Readonly<{
     record: UnknownWriteRecord;
-    reason: "no-unique-match" | "target-not-canceled";
+    reason: "no-unique-match" | "target-not-terminal";
     matchingOrderCount: number;
   }>[];
 }>;
 
-const TERMINAL_CANCEL_STATUSES = new Set(["CANCELED", "CANCELLED"]);
+const TERMINAL_CANCEL_TARGET_STATUSES = new Set(["CANCELED", "CANCELLED", "FILLED", "REJECTED", "REPLACED", "EXPIRED"]);
 const SAFE_PATH_SEGMENT = "/accounts/[REDACTED]";
 const BROKER_CLOCK_SKEW_MS = 5_000;
 const BROKER_MATCH_WINDOW_MS = 60_000;
@@ -357,7 +357,7 @@ export class UnknownWriteReconciliation {
     const resolved: UnknownWriteRecord[] = [];
     const pending: Array<{
       record: UnknownWriteRecord;
-      reason: "no-unique-match" | "target-not-canceled";
+      reason: "no-unique-match" | "target-not-terminal";
       matchingOrderCount: number;
     }> = [];
     // Build all candidate sets before resolving anything. A broker order is a
@@ -366,17 +366,20 @@ export class UnknownWriteReconciliation {
     // candidate is shared; guessing an assignment would permit a duplicate
     // mutation after a process restart.
     const candidates = new Map<string, readonly BrokerOrderSnapshot[]>();
-    const pendingReason = new Map<string, "no-unique-match" | "target-not-canceled">();
+    const pendingReason = new Map<string, "no-unique-match" | "target-not-terminal">();
     for (const record of this.pendingRecords) {
       if (record.phase === "IN_FLIGHT") continue;
       if (record.operation === "CANCEL_ORDER") {
         const targetMatches = orders.filter((order) => String(order.orderId ?? "") === record.targetOrderId);
-        const canceled = targetMatches.filter((order) => TERMINAL_CANCEL_STATUSES.has(String(order.status ?? "").toUpperCase()));
-        if (targetMatches.length === 1 && canceled.length === 1) {
-          candidates.set(record.id, canceled);
+        const terminal = targetMatches.filter((order) => TERMINAL_CANCEL_TARGET_STATUSES.has(String(order.status ?? "").toUpperCase()));
+        if (targetMatches.length === 1 && terminal.length === 1) {
+          // Once the exact target is terminal, replaying the unknown cancel can
+          // no longer improve the outcome. FILLED/EXPIRED/REJECTED/REPLACED are
+          // therefore as conclusive for duplicate-cancel prevention as CANCELED.
+          candidates.set(record.id, terminal);
         } else {
           candidates.set(record.id, []);
-          pendingReason.set(record.id, "target-not-canceled");
+          pendingReason.set(record.id, "target-not-terminal");
         }
         continue;
       }
