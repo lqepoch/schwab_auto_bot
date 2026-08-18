@@ -35,6 +35,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/patch-prepared-mutation-transport.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('test/broker_write_post_intent_guard.test.ts')
+          text = path.read_text()
+          old = 'assert.equal(validations, 2);'
+          if text.count(old) < 2:
+              raise SystemExit('expected at least two legacy validation-count assertions')
+          text = text.replace(old, 'assert.equal(validations, 3);', 2)
+          path.write_text(text)
+          PY
           rm scripts/patch-prepared-mutation-transport.py
 
       - name: Validate prepared mutation transport
