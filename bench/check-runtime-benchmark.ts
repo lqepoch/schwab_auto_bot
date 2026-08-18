@@ -87,6 +87,9 @@ async function main(): Promise<void> {
     "eventLoop.p99Ms": samples.map((sample) => sample.metrics.eventLoop.p99Ms),
   };
 
+  // Shared CI runners do not provide a stable filesystem latency reference.
+  // Durable fsync latency and event-loop p99 remain evidence by default; a
+  // calibrated host can opt into either gate with at least five samples.
   const gateEventLoop = hasFlag("--gate-event-loop");
   const gateAtomicPersistence = hasFlag("--gate-atomic-persistence");
   if (gateEventLoop && samples.length < 5) {
