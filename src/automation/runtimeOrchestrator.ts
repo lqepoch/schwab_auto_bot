@@ -341,7 +341,11 @@ const inventoryObservedAt = new Map<string, number>();
 const inventoryByStrategy = new Map<string, number>();
 const observedFillQuantities = new Map<string, number>();
 let inventoryFillBaselineEstablished = false;
-const unknownWriteReconciliation = new UnknownWriteReconciliation(unknownWriteStatePath);
+const unknownWriteReconciliation = new UnknownWriteReconciliation(unknownWriteStatePath, {
+  // Recovery supplements can include exact-order child trees. Keep every row
+  // on the same strict broker identity contract as live authoritative orders.
+  orderId: (order) => brokerOrderId(order),
+});
 let unknownWritePersistenceFault: unknown = null;
 const reportedUnknownPending = new Map<string, string>();
 const sellDue = new Map<string, number>();
