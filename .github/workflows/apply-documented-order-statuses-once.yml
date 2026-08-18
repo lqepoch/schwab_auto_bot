@@ -1,22 +1,28 @@
 name: Apply Documented Order Statuses Once
 
 on:
-  push:
-    branches:
-      - fix/documented-order-status-contract-20260818
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-documented-order-statuses-once.yml'
+      - 'scripts/patch-documented-order-statuses.py'
+      - 'src/automation/execution/orderWritePreflight.ts'
+      - 'test/order_write_preflight.test.ts'
+      - 'test/order_index.test.ts'
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: github.event.head_commit.message != 'fix: align automation working statuses with Schwab contract'
+    if: github.head_ref == 'fix/documented-order-status-contract-20260818'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - name: Checkout
+      - name: Checkout staging branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: fix/documented-order-status-contract-20260818
           fetch-depth: 0
 
       - name: Setup Node.js 24
