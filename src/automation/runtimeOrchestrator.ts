@@ -60,6 +60,7 @@ import {
 } from "./policy/refreshOrder.ts";
 import { BrokerWriteCoordinator } from "./broker/writeCoordinator.ts";
 import { brokerOrderId } from "./broker/orderIdentity.ts";
+import { exactOrderRoot } from "./broker/exactOrderResponse.ts";
 import { OrderLookup } from "./broker/orderLookup.ts";
 import {
   ACTIVE_ORDER_QUERY_LIMIT,
@@ -777,17 +778,13 @@ async function fetchOrderRange(
 }
 
 async function fetchExactOrderTree(orderIdValue: string, priority: Priority): Promise<Json[]> {
-  if (!/^\d+$/.test(orderIdValue)) throw new Error("AUTHORITATIVE_ORDER_ID_INVALID");
+  const canonicalOrderId = brokerOrderId({ orderId: orderIdValue });
   const response = await api(
-    `/trader/v1/accounts/${accountHash}/orders/${encodeURIComponent(orderIdValue)}`,
+    `/trader/v1/accounts/${accountHash}/orders/${encodeURIComponent(canonicalOrderId)}`,
     {},
     priority,
   );
-  const values = Array.isArray(response.body) ? response.body : [response.body];
-  if (values.length != 1 || !values[0] || typeof values[0] !== "object" || Array.isArray(values[0])) {
-    throw new Error("AUTHORITATIVE_ORDER_RESPONSE_INVALID");
-  }
-  return flatten(values as Json[]);
+  return flatten([exactOrderRoot<Json>(response.body, canonicalOrderId)]);
 }
 
 let lastActiveOrderSweepAt = 0;
