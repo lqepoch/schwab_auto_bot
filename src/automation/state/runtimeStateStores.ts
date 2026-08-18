@@ -173,7 +173,7 @@ export class ExitTemplateStateStore {
             .filter(([, template]) => Array.isArray(template?.orderLegCollection)),
         );
       },
-      encode: (value) => Object.fromEntries(value),
+      encode: (value) => structuredClone(Object.fromEntries(value)),
       onWriteFailure: options.onWriteFailure,
     });
   }
