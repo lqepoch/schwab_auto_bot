@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
+import { AUTOMATION_WORKING_ORDER_STATUSES } from "../src/automation/execution/orderWritePreflight.ts";
 import { orderInfo, type Json } from "../src/automation/policy/order.ts";
 import { parseRuntimePolicy } from "../src/automation/policy/runtime.ts";
 import {
@@ -19,7 +20,7 @@ const ATOMIC_WRITES = 50;
 const JOURNAL_RECORDS = 2_000;
 const STREAM_MESSAGES = 12_000;
 const TRADING_DATE = "2026-07-24";
-const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
+const working = new Set<string>(AUTOMATION_WORKING_ORDER_STATUSES);
 const policy = parseRuntimePolicy([]);
 
 export type RuntimeBenchmarkResult = {

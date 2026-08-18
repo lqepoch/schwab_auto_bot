@@ -41,6 +41,7 @@ import {
 import { FixedPriceRefreshRoundGuard } from "./execution/fixedPriceRoundGuard.ts";
 import { refreshAuthoritativeSnapshots } from "./policy/refreshPreflight.ts";
 import {
+  AUTOMATION_WORKING_ORDER_STATUSES,
   EXISTING_ORDER_REPLACE_NO_PREVIEW,
   orderWritePreflight,
   replacementSourceViolation,
@@ -133,7 +134,7 @@ const policyAlertAudit = new DurableJsonlWriter(policyAlertPath, {
   failureCode: "POLICY_ALERT_PERSISTENCE_FAILED",
   onFailure: (error) => noteOperationalAuditFailure("policy-alert", error),
 });
-const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
+const working = new Set<string>(AUTOMATION_WORKING_ORDER_STATUSES);
 const readOnly = host.argv.includes("--read-only");
 const once = host.argv.includes("--once");
 const confirmIndex = host.argv.indexOf("--confirm-live");

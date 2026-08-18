@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AUTOMATION_WORKING_ORDER_STATUSES } from "../src/automation/execution/orderWritePreflight.ts";
 import { orderInfo, type Json } from "../src/automation/policy/order.ts";
 import { parseRuntimePolicy } from "../src/automation/policy/runtime.ts";
 import {
@@ -11,7 +12,7 @@ import {
 
 const tradingDate = "2026-07-24";
 const policy = parseRuntimePolicy([]);
-const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
+const working = new Set<string>(AUTOMATION_WORKING_ORDER_STATUSES);
 
 function opening(
   orderId: string,
