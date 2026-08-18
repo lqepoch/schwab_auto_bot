@@ -60,6 +60,7 @@ test("caches active opening and closing views until authority revision changes",
   assert.ok(strategy);
   assert.deepEqual(cache.activeOpeningOrders(source, 1, policy, tradingDate, working, strategy), [opening]);
   assert.deepEqual(cache.activeClosingOrders(source, 1, policy, tradingDate, working, strategy), [closing]);
+  assert.deepEqual(cache.primaryOpeningOrders(source, 1, policy, tradingDate, working), [opening]);
 
   closing.status = "CANCELED";
   assert.equal(cache.snapshot(source, 1, policy, tradingDate, working), first);
@@ -88,6 +89,10 @@ test("sorts active orders deterministically and selects one managed opening per 
     cache.activeClosingOrders(source, 1, policy, tradingDate, working, strategy).map((order) => order.orderId),
     ["201", "202"],
   );
+  assert.deepEqual(
+    cache.primaryOpeningOrders(source, 1, policy, tradingDate, working).map((order) => order.orderId),
+    ["101"],
+  );
   assert.equal(cache.primaryOpeningOrderIds(source, 1, policy, tradingDate, working).get(strategy), "101");
 });
 
@@ -106,6 +111,7 @@ test("excludes terminal, foreign-date, and disallowed-underlying rows", () => {
   const snapshot = cache.snapshot(source, 1, policy, tradingDate, working);
   const active = [...snapshot.activeOpeningOrdersByStrategy.values()].flat();
   assert.deepEqual(active.map((order) => order.orderId), ["101"]);
+  assert.deepEqual(snapshot.primaryActiveOpeningOrders.map((order) => order.orderId), ["101"]);
   assert.equal(snapshot.primaryActiveOpeningOrderIds.size, 1);
 });
 
@@ -116,5 +122,6 @@ test("trading date participates in the cache key", () => {
   const nextDate = cache.snapshot(source, 1, policy, "2026-08-19", working);
   assert.notEqual(nextDate, first);
   assert.equal(nextDate.activeOpeningOrdersByStrategy.size, 0);
+  assert.equal(nextDate.primaryActiveOpeningOrders.length, 0);
   assert.equal(nextDate.primaryActiveOpeningOrderIds.size, 0);
 });
