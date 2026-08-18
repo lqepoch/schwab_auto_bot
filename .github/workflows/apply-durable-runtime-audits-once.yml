@@ -1,0 +1,33 @@
+name: Apply Durable Runtime Audits Once
+
+on:
+  push:
+    branches:
+      - refactor/enterprise-convergence-20260817
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Apply patch and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-durable-runtime-audits.py
+          rm scripts/patch-durable-runtime-audits.py
+          git config user.name 'LQ'
+          git config user.email 'lqepoch@126.com'
+          git rm .github/workflows/apply-durable-runtime-audits-once.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: make runtime operational audits crash durable'
+          git push origin HEAD:refactor/enterprise-convergence-20260817
