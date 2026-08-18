@@ -1,16 +1,20 @@
 name: Apply Local Mutation Publication Race Once
 
 on:
-  push:
-    branches:
-      - fix/local-mutation-publication-race-20260818
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-local-mutation-publication-race-once.yml'
+      - 'scripts/patch-local-mutation-publication-race.py'
+      - 'src/automation/runtimeOrchestrator.ts'
+      - 'test/runtime_local_mutation_publication.test.ts'
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: github.event.head_commit.message != 'fix: preserve broker authority during local mutation publication'
+    if: github.head_ref == 'fix/local-mutation-publication-race-20260818'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -64,5 +68,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
+          git reset .github/workflows/apply-local-mutation-publication-race-once.yml
           git commit -m 'fix: preserve broker authority during local mutation publication'
           git push origin HEAD:fix/local-mutation-publication-race-20260818
