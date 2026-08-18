@@ -20,7 +20,14 @@ test("runtime keeps historical unknown-write recovery outside the authoritative 
   assert.doesNotMatch(authoritativeFetchBlock, /planUnknownWriteRecovery/);
   assert.match(authoritativeFetchBlock, /fetchOrderRange/);
   assert.match(recoveryBlock, /planUnknownWriteRecovery/);
-  assert.match(recoveryBlock, /orders\/\$\{encodeURIComponent\(targetOrderId\)\}/);
+  assert.match(recoveryBlock, /fetchExactOrderTree\(targetOrderId, priority\)/);
   assert.match(recoveryBlock, /recovered\.push/);
   assert.match(source.slice(reconcileStart, reconcileStart + 160), /reconcileUnknownWritesAfterFullSnapshot\(snapshot\)/);
+
+  const exactStart = source.indexOf("async function fetchExactOrderTree(");
+  const exactEnd = source.indexOf("let lastActiveOrderSweepAt", exactStart);
+  assert.notEqual(exactStart, -1);
+  assert.notEqual(exactEnd, -1);
+  const exactBlock = source.slice(exactStart, exactEnd);
+  assert.match(exactBlock, /orders\/\$\{encodeURIComponent\(orderIdValue\)\}/);
 });
