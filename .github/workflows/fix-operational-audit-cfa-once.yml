@@ -1,0 +1,57 @@
+name: Fix Operational Audit CFA Once
+
+on:
+  push:
+    branches:
+      - refactor/enterprise-convergence-20260817
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Apply control-flow fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fix-operational-audit-cfa.py
+          rm scripts/fix-operational-audit-cfa.py
+
+      - name: Validate durable audit implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          pwsh -NoProfile -File ./test/hot_switch_identity.test.ps1
+          npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+          git diff --check
+
+      - name: Commit fix and remove workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'LQ'
+          git config user.email 'lqepoch@126.com'
+          git rm .github/workflows/fix-operational-audit-cfa-once.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: remove unreachable operational audit state branch'
+          git push origin HEAD:refactor/enterprise-convergence-20260817
