@@ -1,0 +1,93 @@
+name: Apply Runtime Order Metadata Cache Once
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-runtime-order-metadata-cache-once.yml'
+      - 'scripts/patch-runtime-order-metadata-cache.py'
+      - 'src/automation/orderMetadataCache.ts'
+      - 'src/automation/orderRuntimeIndex.ts'
+      - 'src/automation/orderIndex.ts'
+      - 'src/automation/policy/order.ts'
+      - 'src/automation/runtimeOrchestrator.ts'
+      - 'bench/runtime-benchmark.ts'
+      - 'test/order_metadata_cache.test.ts'
+      - 'test/order_runtime_index.test.ts'
+      - 'test/runtime_order_metadata_cache.test.ts'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'perf/cache-runtime-order-metadata-20260818'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: perf/cache-runtime-order-metadata-20260818
+          fetch-depth: 0
+
+      - name: Detect pending patch
+        id: pending
+        shell: bash
+        run: |
+          if test -f scripts/patch-runtime-order-metadata-cache.py; then
+            echo 'apply=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'apply=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js 24
+        if: steps.pending.outputs.apply == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        if: steps.pending.outputs.apply == 'true'
+        run: npm ci --ignore-scripts
+
+      - name: Apply runtime metadata-cache wiring
+        if: steps.pending.outputs.apply == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-runtime-order-metadata-cache.py
+          rm scripts/patch-runtime-order-metadata-cache.py
+
+      - name: Validate metadata-cache integration
+        if: steps.pending.outputs.apply == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          npm run lint:deadcode
+          pwsh -NoProfile -File ./test/hot_switch_identity.test.ps1
+          mkdir -p .artifacts/runtime-benchmark
+          for run in 1 2 3; do
+            npm run benchmark:runtime -- --output ".artifacts/runtime-benchmark/run-${run}.json" >/dev/null
+          done
+          npm run benchmark:runtime:check -- --baseline bench/runtime-baseline.json --current-dir .artifacts/runtime-benchmark --min-samples 3
+          rm -rf .artifacts/runtime-benchmark
+          git diff --check
+          grep -q 'const orderMetadata = new RuntimeOrderMetadataCache();' src/automation/runtimeOrchestrator.ts
+          grep -q 'return orderMetadata.get(order)' src/automation/runtimeOrchestrator.ts
+          ! grep -q 'function info(order: Json) { return orderInfo(order); }' src/automation/runtimeOrchestrator.ts
+
+      - name: Commit validated product changes
+        if: steps.pending.outputs.apply == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git reset .github/workflows/apply-runtime-order-metadata-cache-once.yml
+          git commit -m 'perf: cache runtime order metadata structurally'
+          git push origin HEAD:perf/cache-runtime-order-metadata-20260818
