@@ -54,6 +54,11 @@ class FakeLedger {
     this.records.delete(id);
   }
 
+  async discardWrite(id: string): Promise<void> {
+    if (this.failComplete) throw new Error("wal rename failed");
+    this.records.delete(id);
+  }
+
   async settleWrite(
     id: string,
     outcome: Pick<UnknownWriteFailure, "status" | "reason">,

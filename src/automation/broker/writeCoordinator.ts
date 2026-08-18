@@ -37,6 +37,8 @@ export type BrokerWriteResult = Readonly<{
 export interface BrokerWriteLedger {
   beginWrite(failure: UnknownWriteFailure): Promise<UnknownWriteRecord>;
   completeWrite(id: string): Promise<void>;
+  /** Remove an intent that is durably known to have never reached transport. */
+  discardWrite(id: string): Promise<void>;
   settleWrite(
     id: string,
     outcome: Pick<UnknownWriteFailure, "status" | "reason">,
@@ -54,6 +56,16 @@ export interface BrokerWriteGate {
 export type BrokerWriteGuards = Readonly<{
   assertReady: (request: BrokerWriteRequest) => void | Promise<void>;
   beforeFinalWrite?: (request: BrokerWriteRequest) => void | Promise<void>;
+  /**
+   * Re-check non-blocking runtime invariants after WAL fsync and immediately
+   * before transport. The current intent is supplied so callers can exclude it
+   * from their own unknown-write blocker while still rejecting every other
+   * unresolved intent.
+   */
+  beforeTransportSend?: (
+    request: BrokerWriteRequest,
+    intent: UnknownWriteRecord,
+  ) => void | Promise<void>;
   isStopping?: () => boolean;
   isReadOnly?: () => boolean;
   onPersistenceFault?: (error: unknown) => void;
@@ -224,6 +236,19 @@ export class BrokerWriteCoordinator {
     const intent = await this.persistIntent(request);
     this.emitEvent({ event: "intent-persisted", request, ledgerId: intent.id });
 
+    try {
+      if (this.guards.isStopping?.()) throw new BrokerWriteStoppingError(request);
+      await this.guards.beforeTransportSend?.(request, intent);
+      // Request-specific validation is intentionally repeated after WAL fsync:
+      // broker/order state may change while the durable intent is being written.
+      await request.validateFinal?.();
+      if (this.guards.isStopping?.()) throw new BrokerWriteStoppingError(request);
+    } catch (error) {
+      await this.discardIntentBeforeSend(request, intent.id);
+      this.emitEvent({ event: "blocked", request, ledgerId: intent.id, reason: String(error) });
+      throw error;
+    }
+
     let response: BrokerWriteResponse;
     try {
       // This is deliberately the only transport invocation in this primitive.
@@ -302,6 +327,15 @@ export class BrokerWriteCoordinator {
   private async completeIntent(request: BrokerWriteRequest, id: string): Promise<void> {
     try {
       await this.ledger.completeWrite(id);
+    } catch (error) {
+      this.markPersistenceFault(error, request);
+      throw new BrokerWritePersistenceError(request, error);
+    }
+  }
+
+  private async discardIntentBeforeSend(request: BrokerWriteRequest, id: string): Promise<void> {
+    try {
+      await this.ledger.discardWrite(id);
     } catch (error) {
       this.markPersistenceFault(error, request);
       throw new BrokerWritePersistenceError(request, error);
