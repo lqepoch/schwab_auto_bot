@@ -1090,6 +1090,13 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     targetOrder: replaceTargetOrderId
       ? () => orders.find((order) => orderId(order) === replaceTargetOrderId)
       : undefined,
+    validateFinal: replaceTargetOrderId
+      ? () => {
+        const currentSource = orders.find((order) => orderId(order) === replaceTargetOrderId);
+        const violation = replacementSourceViolation(currentSource, payload);
+        if (violation) throw new Error(violation);
+      }
+      : undefined,
     priority,
     transportPriority: 0,
   });
