@@ -25,13 +25,15 @@ test("runtime hydrates and refreshes active orders outside the short recent wind
   assert.match(coordinatorBlock, /reconciliationSupplement:/);
 });
 
-test("order-range pages at the requested Schwab ceiling fail closed instead of becoming partial authority", async () => {
+test("order-range pages at Schwab's ceiling are adaptively partitioned before becoming authority", async () => {
   const source = await readFile(runtimeSourceUrl, "utf8");
-  const rangeStart = source.indexOf("async function fetchOrderRange(");
-  const exactStart = source.indexOf("async function fetchExactOrderTree(", rangeStart);
-  assert.notEqual(rangeStart, -1);
+  const pageStart = source.indexOf("async function fetchOrderRangePage(");
+  const exactStart = source.indexOf("async function fetchExactOrderTree(", pageStart);
+  assert.notEqual(pageStart, -1);
   assert.notEqual(exactStart, -1);
-  const range = source.slice(rangeStart, exactStart);
-  assert.match(range, /response\.body\.length >= ACTIVE_ORDER_QUERY_LIMIT/);
-  assert.match(range, /ORDER_SNAPSHOT_RANGE_SATURATED/);
+  const range = source.slice(pageStart, exactStart);
+  assert.match(range, /fetchCompleteOrderRange/);
+  assert.match(range, /maxResults: ACTIVE_ORDER_QUERY_LIMIT/);
+  assert.match(range, /key: \(order\) => orderId\(order\)/);
+  assert.doesNotMatch(range, /ORDER_SNAPSHOT_RANGE_SATURATED/);
 });
