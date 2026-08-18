@@ -11,9 +11,10 @@ import type {
   BrokerWriteRequest,
   BrokerWriteResponse,
 } from "../src/automation/broker/writeCoordinator.ts";
-import type {
-  UnknownWriteFailure,
-  UnknownWriteRecord,
+import {
+  isExplicitBrokerRejection,
+  type UnknownWriteFailure,
+  type UnknownWriteRecord,
 } from "../src/automation/state/unknownWriteReconciliation.ts";
 
 type Outcome = BrokerWriteResponse | Error;
@@ -67,7 +68,7 @@ class FakeLedger {
     const current = this.records.get(id);
     if (!current) throw new Error("missing intent");
     const status = outcome.status ?? null;
-    if (status !== null && status >= 400 && status < 500) {
+    if (status !== null && isExplicitBrokerRejection(status)) {
       this.records.delete(id);
       return null;
     }
@@ -201,6 +202,7 @@ test("structured HTTP 4xx transport errors are explicit rejection, not unknown o
 test("5xx, timeout, socket reset, and missing Location retain one pending intent", async (t) => {
   const cases: Array<[string, Outcome]> = [
     ["5xx", rejected(503)],
+    ["HTTP 408", rejected(408)],
     ["timeout", Object.assign(new Error("request timeout"), { status: 0 })],
     ["socket reset", new Error("socket reset")],
     ["missing Location", { status: 201, headers: new Headers() }],

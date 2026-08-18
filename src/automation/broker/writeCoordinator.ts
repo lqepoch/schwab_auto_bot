@@ -1,7 +1,8 @@
-import type {
-  UnknownWriteFailure,
-  UnknownWriteOperation,
-  UnknownWriteRecord,
+import {
+  isExplicitBrokerRejection,
+  type UnknownWriteFailure,
+  type UnknownWriteOperation,
+  type UnknownWriteRecord,
 } from "../state/unknownWriteReconciliation.ts";
 
 export type BrokerWriteMethod = "POST" | "PUT" | "DELETE";
@@ -278,7 +279,7 @@ export class BrokerWriteCoordinator {
     } catch (error) {
       const status = statusOf(error);
       const reason = reasonOf(error, status);
-      if (status !== null && isExplicitRejection(status)) {
+      if (status !== null && isExplicitBrokerRejection(status)) {
         await this.clearIntent(request, intent.id, status, "explicit-4xx");
         this.emitEvent({ event: "rejected", request, ledgerId: intent.id, status });
         throw new BrokerWriteRejectedError(request, status);
@@ -288,7 +289,7 @@ export class BrokerWriteCoordinator {
       throw new UnknownOutcomeError(request, intent.id, reason, status, error);
     }
 
-    if (isExplicitRejection(response.status)) {
+    if (isExplicitBrokerRejection(response.status)) {
       await this.clearIntent(request, intent.id, response.status, "explicit-4xx");
       this.emitEvent({ event: "rejected", request, ledgerId: intent.id, status: response.status });
       throw new BrokerWriteRejectedError(request, response.status);
@@ -415,16 +416,13 @@ export class SerialBrokerWriteGate implements BrokerWriteGate {
   }
 }
 
-function isExplicitRejection(status: number): boolean {
-  return status >= 400 && status < 500;
-}
-
 function statusOf(error: unknown): number | null {
   const value = (error as { status?: unknown })?.status;
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function reasonOf(error: unknown, status: number | null): string {
+  if (status === 408) return "timeout";
   if (status !== null && status >= 500) return "server-error";
   if ((error as { isNetworkError?: unknown })?.isNetworkError === true || status === 0) return "network-error";
   const message = String(error).toLowerCase();
