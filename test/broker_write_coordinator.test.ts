@@ -222,6 +222,104 @@ test("5xx, timeout, socket reset, and missing Location retain one pending intent
   }
 });
 
+test("201 plus valid Location recovers Place acceptance after response-body read failure", async () => {
+  const ledger = new FakeLedger();
+  const transport = new FakeTransport();
+  const events: string[] = [];
+  transport.queue(Object.assign(new Error("response body read failed"), {
+    status: 201,
+    isNetworkError: true,
+    headers: { location: "/trader/v1/accounts/hash/orders/98765" },
+  }));
+  const coordinator = new BrokerWriteCoordinator({
+    ledger,
+    transport,
+    guards: { assertReady: () => undefined },
+    emit: (event) => { events.push(event.event); },
+  });
+  const result = await coordinator.execute(baseRequest());
+  assert.equal(result.status, 201);
+  assert.equal(result.orderId, "98765");
+  assert.equal(transport.attempts, 1);
+  assert.equal(ledger.records.size, 0);
+  assert.equal(events.includes("acceptance-evidence-recovered"), true);
+  assert.equal(events.includes("accepted"), true);
+});
+
+test("201 plus valid Location recovers Replace acceptance after response-body read failure", async () => {
+  const ledger = new FakeLedger();
+  const transport = new FakeTransport();
+  transport.queue(Object.assign(new Error("response body read failed"), {
+    status: 201,
+    isNetworkError: true,
+    headers: new Headers({ location: "/trader/v1/accounts/hash/orders/76543" }),
+  }));
+  const request = baseRequest({
+    method: "PUT",
+    operation: "REPLACE_ORDER",
+    path: "/trader/v1/accounts/hash/orders/12345",
+    targetOrderId: "12345",
+    targetOrder: { orderId: "12345", status: "WORKING" },
+  });
+  const result = await makeCoordinator(ledger, transport).execute(request);
+  assert.equal(result.orderId, "76543");
+  assert.equal(transport.attempts, 1);
+  assert.equal(ledger.records.size, 0);
+});
+
+test("HTTP 200 recovers Cancel acceptance after response-body read failure", async () => {
+  const ledger = new FakeLedger();
+  const transport = new FakeTransport();
+  transport.queue(Object.assign(new Error("response body read failed"), {
+    status: 200,
+    isNetworkError: true,
+    headers: {},
+  }));
+  const request = baseRequest({
+    method: "DELETE",
+    operation: "CANCEL_ORDER",
+    path: "/trader/v1/accounts/hash/orders/12345",
+    payload: undefined,
+    targetOrderId: "12345",
+    targetOrder: { orderId: "12345", status: "WORKING" },
+  });
+  const result = await makeCoordinator(ledger, transport).execute(request);
+  assert.equal(result.status, 200);
+  assert.equal(result.orderId, null);
+  assert.equal(transport.attempts, 1);
+  assert.equal(ledger.records.size, 0);
+});
+
+test("2xx transport errors require exact broker acceptance evidence", async (t) => {
+  const cases: Array<[string, Error]> = [
+    ["201 missing Location", Object.assign(new Error("response body read failed"), {
+      status: 201, isNetworkError: true, headers: {},
+    })],
+    ["201 malformed Location", Object.assign(new Error("response body read failed"), {
+      status: 201, isNetworkError: true, headers: { location: "/not/orders/abc" },
+    })],
+    ["201 non-network error", Object.assign(new Error("future schema error"), {
+      status: 201, isNetworkError: false, headers: { location: "/trader/v1/accounts/hash/orders/123" },
+    })],
+    ["200 on Place", Object.assign(new Error("response body read failed"), {
+      status: 200, isNetworkError: true, headers: {},
+    })],
+  ];
+  for (const [name, error] of cases) {
+    await t.test(name, async () => {
+      const ledger = new FakeLedger();
+      const transport = new FakeTransport();
+      transport.queue(error);
+      await assert.rejects(
+        () => makeCoordinator(ledger, transport).execute(baseRequest()),
+        UnknownOutcomeError,
+      );
+      assert.equal(transport.attempts, 1);
+      assert.equal(ledger.pendingCount, 1);
+    });
+  }
+});
+
 test("structured 2xx response-body read failure is unknown, never a safe retry", async () => {
   const ledger = new FakeLedger();
   const transport = new FakeTransport();
