@@ -33,13 +33,15 @@ test("replacement validates duplicates before publishing the new index", () => {
   assert.equal(index.get("2"), undefined);
 });
 
-test("local add rejects a duplicate without overwriting broker state", () => {
+test("authoritative observation wins a race with local accepted-order publication", () => {
   const index = lookup();
-  const existing = { orderId: "7", status: "WORKING" };
-  index.replace([existing]);
-  assert.throws(
-    () => index.add({ orderId: "7", status: "FILLED" }),
-    /BROKER_ORDER_ID_DUPLICATE/,
-  );
-  assert.equal(index.get("7"), existing);
+  const authoritative = { orderId: "7", status: "WORKING" };
+  index.replace([authoritative]);
+  assert.equal(index.addIfAbsent({ orderId: "7", status: "ACCEPTED" }), false);
+  assert.equal(index.size, 1);
+  assert.equal(index.get("7"), authoritative);
+
+  const local = { orderId: "8", status: "WORKING" };
+  assert.equal(index.addIfAbsent(local), true);
+  assert.equal(index.get("8"), local);
 });
