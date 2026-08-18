@@ -22,6 +22,8 @@ Assert-True (Test-HotSwitchApprovedRuntimeEntry -Workspace $workspace -EntryPath
 Assert-True (Test-HotSwitchApprovedRuntimeEntry -Workspace $workspace -EntryPath $distEntry) 'dist runtime entry must be approved'
 Assert-False (Test-HotSwitchApprovedRuntimeEntry -Workspace $workspace -EntryPath (Join-Path $workspace 'src/automation/cli.ts')) 'CLI entry is a launch identity, not persisted runtime replacement entry'
 Assert-False (Test-HotSwitchApprovedRuntimeEntry -Workspace $workspace -EntryPath (Join-Path $workspace 'other.ts')) 'arbitrary entry must be rejected'
+Assert-True (Test-HotSwitchApprovedNodeExecutable -NodePath $nodePath) 'node runtime leaf must be approved'
+Assert-False (Test-HotSwitchApprovedNodeExecutable -NodePath (Join-Path $workspace 'runtime/powershell')) 'non-node executable leaf must be rejected'
 
 $sourceCli = [pscustomobject]@{
   ExecutablePath = $nodePath
@@ -41,11 +43,20 @@ $distCli = [pscustomobject]@{
 }
 Assert-True (Test-HotSwitchProcessIdentity -ProcessDetails $distCli -Workspace $workspace -NodePath $nodePath -EntryPath $distEntry) 'compiled CLI must identify as the bot process'
 
+$spacedWorkspace = Join-Path ([System.IO.Path]::GetTempPath()) 'schwab hot switch workspace'
+$spacedNode = Join-Path $spacedWorkspace 'runtime/node'
+$spacedEntry = Join-Path $spacedWorkspace 'src/main.ts'
+$quotedEntry = [pscustomobject]@{
+  ExecutablePath = $spacedNode
+  CommandLine = "`"$spacedNode`" `"$spacedEntry`" --read-only"
+}
+Assert-True (Test-HotSwitchProcessIdentity -ProcessDetails $quotedEntry -Workspace $spacedWorkspace -NodePath $spacedNode -EntryPath $spacedEntry) 'quoted paths containing spaces must preserve the entry token'
+
 $nearMiss = [pscustomobject]@{
   ExecutablePath = $nodePath
   CommandLine = "`"$nodePath`" src/automation/cli.ts.evil --read-only"
 }
-Assert-False (Test-HotSwitchProcessIdentity -ProcessDetails $nearMiss -Workspace $workspace -NodePath $nodePath -EntryPath $sourceEntry) 'path prefix near-miss must not pass token boundaries'
+Assert-False (Test-HotSwitchProcessIdentity -ProcessDetails $nearMiss -Workspace $workspace -NodePath $nodePath -EntryPath $sourceEntry) 'path prefix near-miss must not pass entry identity'
 
 $wrongExecutable = [pscustomobject]@{
   ExecutablePath = Join-Path $workspace 'runtime/other-node'
@@ -55,9 +66,10 @@ Assert-False (Test-HotSwitchProcessIdentity -ProcessDetails $wrongExecutable -Wo
 
 $unrelatedCommand = [pscustomobject]@{
   ExecutablePath = $nodePath
-  CommandLine = "`"$nodePath`" unrelated.js src/automation/cli.ts.evil"
+  CommandLine = "`"$nodePath`" unrelated.js src/automation/cli.ts"
 }
-Assert-False (Test-HotSwitchProcessIdentity -ProcessDetails $unrelatedCommand -Workspace $workspace -NodePath $nodePath -EntryPath $sourceEntry) 'unrelated node command must be rejected'
+Assert-False (Test-HotSwitchProcessIdentity -ProcessDetails $unrelatedCommand -Workspace $workspace -NodePath $nodePath -EntryPath $sourceEntry) 'approved bot path appearing as a later argument must not establish identity'
+Assert-False (Test-HotSwitchProcessIdentity -ProcessDetails ([pscustomobject]@{ ExecutablePath = $nodePath }) -Workspace $workspace -NodePath $nodePath -EntryPath $sourceEntry) 'missing command line metadata must fail closed'
 
 $active = [pscustomobject]@{ pid = 1234; runId = 'run-current' }
 $matchingLock = [pscustomobject]@{ schemaVersion = 1; pid = 1234; runId = 'run-current'; ownerId = 'owner-current' }
@@ -65,5 +77,6 @@ Assert-True (Test-HotSwitchRuntimeLockMatchesState -LockRecord $matchingLock -Ac
 Assert-False (Test-HotSwitchRuntimeLockMatchesState -LockRecord ([pscustomobject]@{ schemaVersion = 1; pid = 1234; runId = 'other-run'; ownerId = 'owner-current' }) -ActiveState $active) 'run id mismatch must fail'
 Assert-False (Test-HotSwitchRuntimeLockMatchesState -LockRecord ([pscustomobject]@{ schemaVersion = 1; pid = 9999; runId = 'run-current'; ownerId = 'owner-current' }) -ActiveState $active) 'pid mismatch must fail'
 Assert-False (Test-HotSwitchRuntimeLockMatchesState -LockRecord ([pscustomobject]@{ schemaVersion = 1; pid = 1234; runId = 'run-current'; ownerId = '' }) -ActiveState $active) 'ownerless lock must fail'
+Assert-False (Test-HotSwitchRuntimeLockMatchesState -LockRecord ([pscustomobject]@{ schemaVersion = 1; pid = 1234; runId = 'run-current' }) -ActiveState $active) 'missing lock owner field must fail closed'
 
 Write-Output 'HOT_SWITCH_IDENTITY_TESTS_PASSED'
