@@ -1,3 +1,4 @@
+import { brokerOrderId } from "./broker/orderIdentity.ts";
 import { orderInfo, orderPolicyViolation, type Json } from "./policy/order.ts";
 import { isRefreshSpreadEligible } from "./policy/refreshOrder.ts";
 import type { RuntimePolicy } from "./policy/runtime.ts";
@@ -5,7 +6,7 @@ import type { RuntimePolicy } from "./policy/runtime.ts";
 export type ManagedOpeningInfo = NonNullable<ReturnType<typeof orderInfo>>;
 
 export function orderIdentifier(order: Json): string {
-  return String(order.orderId);
+  return brokerOrderId(order);
 }
 
 export function orderEventTime(order: Json): number {
