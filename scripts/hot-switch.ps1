@@ -94,6 +94,10 @@ if ($null -ne $oldProcess) {
     throw "ACTIVE_RUN_PID_NOT_A_BOT_PROCESS: refusing to stop pid $($oldProcess.Id)."
   }
 
+  if (Test-Path -LiteralPath $controlPath) {
+    throw "CONTROL_REQUEST_ALREADY_PENDING: inspect the existing operator request before writing another."
+  }
+
   $requestId = [guid]::NewGuid().ToString()
   $request = [ordered]@{
     command = $(if ($StopOnly) { "stop" } else { "stop-for-restart" })
@@ -106,7 +110,16 @@ if ($null -ne $oldProcess) {
   $controlTemporaryPath = "$controlPath.$requestId.tmp"
   try {
     [System.IO.File]::WriteAllText($controlTemporaryPath, $request, [System.Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $controlTemporaryPath -Destination $controlPath -Force
+    try {
+      # No -Force: a concurrent operator that won the destination path keeps
+      # ownership. This invocation must not overwrite another stop request.
+      Move-Item -LiteralPath $controlTemporaryPath -Destination $controlPath -ErrorAction Stop
+    } catch {
+      if (Test-Path -LiteralPath $controlPath) {
+        throw "CONTROL_REQUEST_ALREADY_PENDING: another operator won the control-request race."
+      }
+      throw
+    }
   } finally {
     Remove-Item -LiteralPath $controlTemporaryPath -Force -ErrorAction SilentlyContinue
   }
