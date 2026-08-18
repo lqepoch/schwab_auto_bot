@@ -1573,6 +1573,16 @@ function activeClosingOrders(strategy: string): readonly Json[] {
   );
 }
 
+function allActiveClosingOrders(): readonly Json[] {
+  return runtimeOrderIndex.allActiveClosingOrders(
+    orders,
+    orderAuthorityRevision,
+    policy,
+    newYorkDate(),
+    working,
+  );
+}
+
 function primaryActiveOpeningOrders(): readonly Json[] {
   return runtimeOrderIndex.primaryOpeningOrders(
     orders,
@@ -2107,19 +2117,17 @@ function adoptSells(): void {
     return;
   }
   const active = new Set<string>();
-  for (const order of orders) {
+  for (const order of allActiveClosingOrders()) {
     const meta = info(order);
-    if (
-      !meta?.closing || !working.has(String(order.status))
-      || meta.expiration !== newYorkDate() || !policy.underlyings.has(meta.underlying)
-    ) continue;
-    active.add(orderId(order));
-    if (!sellDue.has(orderId(order))) {
+    if (!meta) continue;
+    const id = orderId(order);
+    active.add(id);
+    if (!sellDue.has(id)) {
       const refreshAt = Date.now() + EXIT_REFRESH_MS;
-      sellDue.set(orderId(order), refreshAt);
+      sellDue.set(id, refreshAt);
       executionJournal.record("exit.working-sell-adopted", {
         strategy: meta.key,
-        orderId: orderId(order),
+        orderId: id,
         refreshAt: new Date(refreshAt).toISOString(),
       });
     }
@@ -2320,8 +2328,7 @@ function nextExitWorkerDue(strategy: string): number {
   const liquidity = liquidityExitRefreshes.get(strategy);
   if (liquidity) return Math.max(now, liquidity.nextAt);
   const nextIdleDeadline = (lastOpeningFillAt.get(strategy) ?? now) + EXIT_IDLE_BUY_FILL_DELAY_MS;
-  const nextSellRefresh = orders
-    .filter((order) => info(order)?.closing && info(order)?.key === strategy)
+  const nextSellRefresh = activeClosingOrders(strategy)
     .map((order) => sellDue.get(orderId(order)) ?? Number.POSITIVE_INFINITY)
     .filter((dueAt) => dueAt > now)
     .sort((left, right) => left - right)[0];
@@ -2333,11 +2340,7 @@ function nextExitWorkerDue(strategy: string): number {
 
 function exitStrategyNeedsWorker(strategy: string): boolean {
   if (liquidityExitRefreshes.has(strategy) || (inventoryByStrategy.get(strategy) ?? 0) > 0) return true;
-  return orders.some((order) => {
-    const meta = info(order);
-    return working.has(String(order.status)) && meta?.closing && meta.key === strategy
-      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
-  });
+  return activeClosingOrders(strategy).length > 0;
 }
 
 function scheduleExitWorker(strategy: string, template: Json, dueAt: number, reason: string): void {

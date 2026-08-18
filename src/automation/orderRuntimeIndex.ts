@@ -11,6 +11,7 @@ import type { RuntimePolicy } from "./policy/runtime.ts";
 export type RuntimeOrderIndexSnapshot = Readonly<{
   activeOpeningOrdersByStrategy: ReadonlyMap<string, readonly Json[]>;
   activeClosingOrdersByStrategy: ReadonlyMap<string, readonly Json[]>;
+  activeClosingOrders: readonly Json[];
   primaryActiveOpeningOrders: readonly Json[];
   primaryActiveOpeningOrderIds: ReadonlyMap<string, string>;
 }>;
@@ -56,6 +57,7 @@ export class RuntimeOrderIndexCache {
 
     const activeOpeningOrdersByStrategy = new Map<string, Json[]>();
     const activeClosingOrdersByStrategy = new Map<string, Json[]>();
+    const activeClosingOrders: Json[] = [];
     const primaryActiveOpeningOrdersByStrategy = new Map<string, Json>();
 
     for (const order of source) {
@@ -68,7 +70,10 @@ export class RuntimeOrderIndexCache {
         && policy.underlyings.has(meta.underlying)
       ) {
         if (meta.opening) push(activeOpeningOrdersByStrategy, meta.key, order);
-        if (meta.closing) push(activeClosingOrdersByStrategy, meta.key, order);
+        if (meta.closing) {
+          push(activeClosingOrdersByStrategy, meta.key, order);
+          activeClosingOrders.push(order);
+        }
       }
 
       const managed = managedOpeningInfo(order, policy, tradingDate, meta);
@@ -85,6 +90,7 @@ export class RuntimeOrderIndexCache {
     for (const values of activeClosingOrdersByStrategy.values()) {
       values.sort(compareClosingOrders);
     }
+    activeClosingOrders.sort(compareClosingOrders);
 
     const primaryActiveOpeningOrderIds = new Map<string, string>();
     for (const [strategy, order] of primaryActiveOpeningOrdersByStrategy) {
@@ -94,6 +100,7 @@ export class RuntimeOrderIndexCache {
     const snapshot: RuntimeOrderIndexSnapshot = {
       activeOpeningOrdersByStrategy,
       activeClosingOrdersByStrategy,
+      activeClosingOrders,
       primaryActiveOpeningOrders: [...primaryActiveOpeningOrdersByStrategy.values()],
       primaryActiveOpeningOrderIds,
     };
@@ -128,6 +135,17 @@ export class RuntimeOrderIndexCache {
   ): readonly Json[] {
     return this.snapshot(source, revision, policy, tradingDate, workingStatuses)
       .activeClosingOrdersByStrategy.get(strategy) ?? EMPTY_ORDERS;
+  }
+
+  allActiveClosingOrders(
+    source: readonly Json[],
+    revision: number,
+    policy: RuntimePolicy,
+    tradingDate: string,
+    workingStatuses: ReadonlySet<string>,
+  ): readonly Json[] {
+    return this.snapshot(source, revision, policy, tradingDate, workingStatuses)
+      .activeClosingOrders;
   }
 
   primaryOpeningOrders(

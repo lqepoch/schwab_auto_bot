@@ -60,6 +60,7 @@ test("caches active opening and closing views until authority revision changes",
   assert.ok(strategy);
   assert.deepEqual(cache.activeOpeningOrders(source, 1, policy, tradingDate, working, strategy), [opening]);
   assert.deepEqual(cache.activeClosingOrders(source, 1, policy, tradingDate, working, strategy), [closing]);
+  assert.deepEqual(cache.allActiveClosingOrders(source, 1, policy, tradingDate, working), [closing]);
   assert.deepEqual(cache.primaryOpeningOrders(source, 1, policy, tradingDate, working), [opening]);
 
   closing.status = "CANCELED";
@@ -67,6 +68,7 @@ test("caches active opening and closing views until authority revision changes",
   const refreshed = cache.snapshot(source, 2, policy, tradingDate, working);
   assert.notEqual(refreshed, first);
   assert.deepEqual(cache.activeClosingOrders(source, 2, policy, tradingDate, working, strategy), []);
+  assert.deepEqual(cache.allActiveClosingOrders(source, 2, policy, tradingDate, working), []);
 });
 
 test("sorts active orders deterministically and selects one managed opening per strategy", () => {
@@ -87,6 +89,10 @@ test("sorts active orders deterministically and selects one managed opening per 
   );
   assert.deepEqual(
     cache.activeClosingOrders(source, 1, policy, tradingDate, working, strategy).map((order) => order.orderId),
+    ["201", "202"],
+  );
+  assert.deepEqual(
+    cache.allActiveClosingOrders(source, 1, policy, tradingDate, working).map((order) => order.orderId),
     ["201", "202"],
   );
   assert.deepEqual(
@@ -111,6 +117,7 @@ test("excludes terminal, foreign-date, and disallowed-underlying rows", () => {
   const snapshot = cache.snapshot(source, 1, policy, tradingDate, working);
   const active = [...snapshot.activeOpeningOrdersByStrategy.values()].flat();
   assert.deepEqual(active.map((order) => order.orderId), ["101"]);
+  assert.deepEqual(snapshot.activeClosingOrders, []);
   assert.deepEqual(snapshot.primaryActiveOpeningOrders.map((order) => order.orderId), ["101"]);
   assert.equal(snapshot.primaryActiveOpeningOrderIds.size, 1);
 });
@@ -122,6 +129,7 @@ test("trading date participates in the cache key", () => {
   const nextDate = cache.snapshot(source, 1, policy, "2026-08-19", working);
   assert.notEqual(nextDate, first);
   assert.equal(nextDate.activeOpeningOrdersByStrategy.size, 0);
+  assert.equal(nextDate.activeClosingOrders.length, 0);
   assert.equal(nextDate.primaryActiveOpeningOrders.length, 0);
   assert.equal(nextDate.primaryActiveOpeningOrderIds.size, 0);
 });
@@ -138,6 +146,7 @@ test("an index rebuild resolves metadata once per working broker row", () => {
   assert.equal(resolutions, source.length);
   cache.primaryOpeningOrders(source, 1, policy, tradingDate, working);
   cache.activeOpeningOrders(source, 1, policy, tradingDate, working, "missing");
+  cache.allActiveClosingOrders(source, 1, policy, tradingDate, working);
   assert.equal(resolutions, source.length);
 
   cache.snapshot(source, 2, policy, tradingDate, working);
