@@ -1,5 +1,6 @@
 import { brokerOrderId } from "./orderIdentity.ts";
 import { OrderLookup } from "./orderLookup.ts";
+import { managedOpeningInfo } from "../orderIndex.ts";
 import { RuntimeOrderMetadataCache } from "../orderMetadataCache.ts";
 import { RuntimeOrderIndexCache } from "../orderRuntimeIndex.ts";
 import type { Json, OptionOrderInfo } from "../policy/order.ts";
@@ -47,6 +48,11 @@ export class RuntimeOrderAuthority {
 
   info(order: Json): OptionOrderInfo | null {
     return this.metadata.get(order);
+  }
+
+  managedOpening(order: Json): OptionOrderInfo | null {
+    const meta = this.info(order);
+    return managedOpeningInfo(order, this.policy, this.tradingDate(), meta);
   }
 
   get(orderIdValue: string): Json | undefined {
