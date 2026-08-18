@@ -46,6 +46,18 @@ test("price explorer persistence snapshots state when the save is queued", async
   }
 });
 
+test("price explorer persistence rejects array-shaped group state", async () => {
+  const root = await tempRoot();
+  const statePath = path.join(root, "explorer.json");
+  try {
+    await writeFile(statePath, JSON.stringify({ groups: [] }), "utf8");
+    const store = new PriceExplorerStateStore(statePath, { readOnly: false, onWriteFailure: noopFailure });
+    await assert.rejects(() => store.load(), /EXPLORER_STATE_INVALID/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("fixed-price cycle persistence caps history and read-only mode leaves disk untouched", async () => {
   const root = await tempRoot();
   const statePath = path.join(root, "fixed.json");
@@ -71,7 +83,7 @@ test("fixed-price cycle persistence caps history and read-only mode leaves disk 
   }
 });
 
-test("exit-template persistence filters invalid input and deep-snapshots nested order data", async () => {
+test("exit-template persistence rejects malformed state and deep-snapshots nested order data", async () => {
   const root = await tempRoot();
   const statePath = path.join(root, "exits.json");
   try {
@@ -80,8 +92,7 @@ test("exit-template persistence filters invalid input and deep-snapshots nested 
       invalid: { orderId: "2" },
     }), "utf8");
     const store = new ExitTemplateStateStore(statePath, { readOnly: false, onWriteFailure: noopFailure });
-    const loaded = await store.load();
-    assert.deepEqual([...loaded.keys()], ["valid"]);
+    await assert.rejects(() => store.load(), /EXIT_TEMPLATE_STATE_INVALID/);
 
     const template: Json = {
       orderId: "3",
