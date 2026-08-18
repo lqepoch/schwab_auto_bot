@@ -66,6 +66,7 @@ import {
   mergeCurrentAuthority,
   missingTrackedActiveOrderIds,
 } from "./broker/activeOrderAuthority.ts";
+import { fetchCompleteOrderRange } from "./broker/completeOrderRange.ts";
 import {
   DEFAULT_FULL_ORDER_LOOKBACK_MS,
   planUnknownWriteRecovery,
@@ -712,7 +713,7 @@ const brokerWriteCoordinator = new BrokerWriteCoordinator({
   }),
 });
 
-async function fetchOrderRange(
+async function fetchOrderRangePage(
   fromEnteredTime: string,
   toEnteredTime: string,
   priority: Priority,
@@ -726,13 +727,29 @@ async function fetchOrderRange(
   if (status) query.set("status", status);
   const response = await api(`/trader/v1/accounts/${accountHash}/orders?${query}`, {}, priority);
   if (!Array.isArray(response.body)) throw new Error("订单快照不是数组");
-  // Treat a page exactly at Schwab's requested ceiling as potentially
-  // truncated. Partial authority is less safe than keeping the write barrier
-  // closed; a later adaptive-range reader can improve liveness here.
-  if (response.body.length >= ACTIVE_ORDER_QUERY_LIMIT) {
-    throw new Error(`ORDER_SNAPSHOT_RANGE_SATURATED status=${status ?? "ALL"}`);
-  }
-  return flatten(response.body);
+  return response.body as Json[];
+}
+
+async function fetchOrderRange(
+  fromEnteredTime: string,
+  toEnteredTime: string,
+  priority: Priority,
+  status?: string,
+): Promise<Json[]> {
+  const roots = await fetchCompleteOrderRange(
+    { fromEnteredTime, toEnteredTime },
+    (range) => fetchOrderRangePage(
+      range.fromEnteredTime,
+      range.toEnteredTime,
+      priority,
+      status,
+    ),
+    {
+      maxResults: ACTIVE_ORDER_QUERY_LIMIT,
+      key: (order) => orderId(order),
+    },
+  );
+  return flatten(roots);
 }
 
 async function fetchExactOrderTree(orderIdValue: string, priority: Priority): Promise<Json[]> {
