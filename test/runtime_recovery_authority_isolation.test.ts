@@ -29,5 +29,7 @@ test("runtime keeps historical unknown-write recovery outside the authoritative 
   assert.notEqual(exactStart, -1);
   assert.notEqual(exactEnd, -1);
   const exactBlock = source.slice(exactStart, exactEnd);
-  assert.match(exactBlock, /orders\/\$\{encodeURIComponent\(orderIdValue\)\}/);
+  assert.match(exactBlock, /canonicalOrderId = brokerOrderId\(\{ orderId: orderIdValue \}\)/);
+  assert.match(exactBlock, /orders\/\$\{encodeURIComponent\(canonicalOrderId\)\}/);
+  assert.match(exactBlock, /exactOrderRoot<Json>\(response\.body, canonicalOrderId\)/);
 });
