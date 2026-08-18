@@ -13,8 +13,9 @@ import { SchwabRestClient } from "./broker/schwabClient.ts";
 import { SchwabApiError } from "../utils/errors.ts";
 import { atomicWriteJson } from "../utils/atomicJson.ts";
 import { parseRuntimePolicy } from "./policy/runtime.ts";
-import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./policy/order.ts";
+import { EXIT_ORDER_PRICE, orderPolicyViolation, type Json } from "./policy/order.ts";
 import { managedOpeningInfo } from "./orderIndex.ts";
+import { RuntimeOrderMetadataCache } from "./orderMetadataCache.ts";
 import { RuntimeOrderIndexCache } from "./orderRuntimeIndex.ts";
 import { completeNetDebitFill, completeOrderLimitFill } from "./execution/fillPrice.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction } from "./execution/priceExplorer.ts";
@@ -309,7 +310,8 @@ const finalWriteGate = new PriorityGate();
 let accountHash = "";
 let orders: Json[] = [];
 const ordersById = new OrderLookup<Json>((order) => orderId(order));
-const runtimeOrderIndex = new RuntimeOrderIndexCache();
+const orderMetadata = new RuntimeOrderMetadataCache();
+const runtimeOrderIndex = new RuntimeOrderIndexCache((order) => orderMetadata.get(order));
 let orderAuthorityRevision = 0;
 let polling = false;
 let fullSnapshotReconciled = false;
@@ -391,7 +393,7 @@ function flatten(source: any[]): Json[] {
   return output;
 }
 
-function info(order: Json) { return orderInfo(order); }
+function info(order: Json) { return orderMetadata.get(order); }
 
 function orderId(order: Json): string { return brokerOrderId(order); }
 function replaceOrders(next: readonly Json[]): void {
@@ -1093,7 +1095,7 @@ function reportWorkingOrderPolicyViolations(): void {
     if (!working.has(String(order.status))) continue;
     const meta = info(order);
     if (!meta || !policy.underlyings.has(meta.underlying)) continue;
-    const violation = orderPolicyViolation(order, policy, today);
+    const violation = orderPolicyViolation(order, policy, today, meta);
     if (violation) reportPolicyAlert("order-snapshot", order, violation.code, violation.message);
   }
 }
@@ -1462,8 +1464,9 @@ async function runActivityRestConfirmation(): Promise<void> {
   }
 }
 
-function managedOpening(order: Json): ReturnType<typeof orderInfo> {
-  return managedOpeningInfo(order, policy, newYorkDate());
+function managedOpening(order: Json): ReturnType<typeof info> {
+  const meta = info(order);
+  return managedOpeningInfo(order, policy, newYorkDate(), meta);
 }
 
 function rememberExitTemplate(strategy: string, order: Json): void {

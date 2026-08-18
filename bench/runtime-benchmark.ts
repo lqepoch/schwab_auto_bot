@@ -6,6 +6,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { AUTOMATION_WORKING_ORDER_STATUSES } from "../src/automation/execution/orderWritePreflight.ts";
 import { orderInfo, type Json } from "../src/automation/policy/order.ts";
 import { parseRuntimePolicy } from "../src/automation/policy/runtime.ts";
+import { RuntimeOrderMetadataCache } from "../src/automation/orderMetadataCache.ts";
 import { RuntimeOrderIndexCache } from "../src/automation/orderRuntimeIndex.ts";
 import { atomicWriteJson } from "../src/utils/atomicJson.ts";
 import { ExecutionJournal } from "../src/automation/observability/executionJournal.ts";
@@ -101,7 +102,8 @@ async function main(): Promise<void> {
   const groupKey = orderInfo(firstWorking)?.key;
   if (!groupKey) throw new Error("BENCHMARK_STRATEGY_KEY_INVALID");
 
-  const orderIndexCache = new RuntimeOrderIndexCache();
+  const orderMetadata = new RuntimeOrderMetadataCache();
+  const orderIndexCache = new RuntimeOrderIndexCache((order) => orderMetadata.get(order));
   for (let warmup = 0; warmup < 5; warmup += 1) {
     orderIndexCache.primaryOpeningOrders(corpus, warmup, policy, TRADING_DATE, working);
     orderIndexCache.activeOpeningOrders(corpus, warmup, policy, TRADING_DATE, working, groupKey);
