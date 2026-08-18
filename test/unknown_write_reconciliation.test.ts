@@ -125,29 +125,55 @@ test("HTTP 408 remains pending as an ambiguous timeout outcome", async () => {
   }
 });
 
-test("cancel unknown resolves only when the exact target is explicitly canceled", async () => {
-  const { root, store } = await makeStore();
-  try {
-    await store.recordFailure({
-      operation: "CANCEL_ORDER",
-      method: "DELETE",
-      key: "cancel:42",
-      path: "/trader/v1/accounts/hash/orders/42",
-      targetOrderId: "42",
-      targetOrder: order("42"),
-      status: 0,
-      reason: "network timeout",
+test("cancel unknown remains pending while the exact target can still transition", async (t) => {
+  for (const status of ["WORKING", "PENDING_CANCEL", "PENDING_REPLACE", "QUEUED", "UNKNOWN"]) {
+    await t.test(status, async () => {
+      const { root, store } = await makeStore();
+      try {
+        await store.recordFailure({
+          operation: "CANCEL_ORDER",
+          method: "DELETE",
+          key: `cancel:42:${status}`,
+          path: "/trader/v1/accounts/hash/orders/42",
+          targetOrderId: "42",
+          targetOrder: order("42"),
+          status: 0,
+          reason: "network timeout",
+        });
+        const unresolved = await store.reconcile([order("42", status)]);
+        assert.equal(unresolved.resolved.length, 0);
+        assert.equal(unresolved.pending[0]?.reason, "target-not-terminal");
+        assert.equal(store.hasPending(), true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
-    const unresolved = await store.reconcile([order("42", "WORKING")]);
-    assert.equal(unresolved.resolved.length, 0);
-    assert.equal(unresolved.pending[0]?.reason, "target-not-canceled");
-    assert.equal(store.hasPending(), true);
+  }
+});
 
-    const resolved = await store.reconcile([order("42", "CANCELED")]);
-    assert.equal(resolved.resolved.length, 1);
-    assert.equal(store.hasPending(), false);
-  } finally {
-    await rm(root, { recursive: true, force: true });
+test("cancel unknown resolves once the exact target is terminal", async (t) => {
+  for (const status of ["CANCELED", "CANCELLED", "FILLED", "REJECTED", "REPLACED", "EXPIRED"]) {
+    await t.test(status, async () => {
+      const { root, store } = await makeStore();
+      try {
+        await store.recordFailure({
+          operation: "CANCEL_ORDER",
+          method: "DELETE",
+          key: `cancel:42:${status}`,
+          path: "/trader/v1/accounts/hash/orders/42",
+          targetOrderId: "42",
+          targetOrder: order("42"),
+          status: 0,
+          reason: "network timeout",
+        });
+        const resolved = await store.reconcile([order("42", status)]);
+        assert.equal(resolved.resolved.length, 1);
+        assert.equal(resolved.pending.length, 0);
+        assert.equal(store.hasPending(), false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   }
 });
 
