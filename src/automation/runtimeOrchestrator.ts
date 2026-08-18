@@ -395,12 +395,13 @@ function replaceOrders(next: readonly Json[]): void {
   ordersById.replace(snapshot);
   orders = snapshot;
 }
-function addOrder(order: Json): void {
+function addOrder(order: Json): boolean {
   // An authoritative REST poll may observe a just-accepted order before the
   // caller publishes its local synthetic copy. Keep the broker row in that
   // race because it carries fresher status/execution metadata.
-  if (!ordersById.addIfAbsent(order)) return;
+  if (!ordersById.addIfAbsent(order)) return false;
   orders.push(order);
+  return true;
 }
 function getOrder(orderIdValue: string): Json | undefined {
   return ordersById.get(orderIdValue);
@@ -983,15 +984,19 @@ function localOrder(payload: Json, id: string): Json {
 }
 
 function applyLocalSubmit(payload: Json, id: string): void {
-  addOrder(localOrder(payload, id));
+  if (!addOrder(localOrder(payload, id))) return;
   observedFillQuantities.set(id, 0);
   if (info(payload)?.closing) sellDue.set(id, Date.now() + EXIT_REFRESH_MS);
 }
 
 function applyLocalReplace(sourceId: string, payload: Json, replacementId: string): void {
+  // Publish the synthetic replacement only when REST authority has not already
+  // observed it. A concurrent broker poll wins, including its fill/status data.
+  if (!addOrder(localOrder(payload, replacementId))) return;
   const source = getOrder(sourceId);
-  if (source) source.status = "REPLACED";
-  addOrder(localOrder(payload, replacementId));
+  // Never overwrite a broker-observed terminal or transitional state that
+  // arrived while the Replace request was in flight.
+  if (source && working.has(String(source.status))) source.status = "REPLACED";
   observedFillQuantities.set(replacementId, 0);
   if (info(payload)?.closing) sellDue.set(replacementId, Date.now() + EXIT_REFRESH_MS);
 }
@@ -1299,7 +1304,10 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
     transportPriority: priority,
   });
   const current = getOrder(orderIdValue);
-  if (current) current.status = "CANCELED";
+  // A broker poll may have observed FILLED/REPLACED/PENDING_* while the Cancel
+  // response was in flight. Preserve that fresher authority instead of
+  // overwriting it with a local terminal projection.
+  if (current && working.has(String(current.status))) current.status = "CANCELED";
   executionJournal.record("broker.cancel.accepted", { key, orderId: orderIdValue, path });
 }
 
