@@ -24,6 +24,16 @@ function Get-HotSwitchRuntimeEntryPaths {
   )
 }
 
+function Get-HotSwitchLaunchEntryPaths {
+  param([Parameter(Mandatory = $true)][string]$Workspace)
+  return @(
+    ConvertTo-HotSwitchNormalizedPath -Path 'src/main.ts' -BasePath $Workspace
+    ConvertTo-HotSwitchNormalizedPath -Path 'dist/main.js' -BasePath $Workspace
+    ConvertTo-HotSwitchNormalizedPath -Path 'src/automation/cli.ts' -BasePath $Workspace
+    ConvertTo-HotSwitchNormalizedPath -Path 'dist/automation/cli.js' -BasePath $Workspace
+  )
+}
+
 function Test-HotSwitchApprovedRuntimeEntry {
   param(
     [Parameter(Mandatory = $true)][string]$Workspace,
@@ -41,36 +51,38 @@ function Test-HotSwitchApprovedNodeExecutable {
   return $leaf -eq 'node' -or $leaf -eq 'node.exe'
 }
 
+function Get-HotSwitchCommandLineTokens {
+  param([Parameter(Mandatory = $true)][string]$CommandLine)
+  if ([string]::IsNullOrWhiteSpace($CommandLine)) { return @() }
+
+  $tokens = @()
+  $matches = [regex]::Matches($CommandLine, '"([^"]*)"|''([^'']*)''|(\S+)')
+  foreach ($match in $matches) {
+    if ($match.Groups[1].Success) {
+      $tokens += $match.Groups[1].Value
+    } elseif ($match.Groups[2].Success) {
+      $tokens += $match.Groups[2].Value
+    } else {
+      $tokens += $match.Groups[3].Value
+    }
+  }
+  return $tokens
+}
+
 function Test-HotSwitchCommandLineEntry {
   param(
     [Parameter(Mandatory = $true)][string]$Workspace,
     [Parameter(Mandatory = $true)][string]$CommandLine
   )
 
-  if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
-  $normalizedCommandLine = $CommandLine.Replace('\', '/').ToLowerInvariant()
-  $workspaceNormalized = ConvertTo-HotSwitchNormalizedPath -Path $Workspace -BasePath $Workspace
+  $tokens = @(Get-HotSwitchCommandLineTokens -CommandLine $CommandLine)
+  if ($tokens.Count -lt 2) { return $false }
 
-  $relativeEntries = @(
-    'src/main.ts'
-    'dist/main.js'
-    'src/automation/cli.ts'
-    'dist/automation/cli.js'
-  )
-  $candidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-  foreach ($relative in $relativeEntries) {
-    [void]$candidates.Add($relative)
-    [void]$candidates.Add("./$relative")
-    [void]$candidates.Add("$workspaceNormalized/$relative")
-  }
-
-  foreach ($candidate in $candidates) {
-    $escaped = [regex]::Escape($candidate)
-    if ($normalizedCommandLine -match "(^|[\s`"'])$escaped($|[\s`"'])") {
-      return $true
-    }
-  }
-  return $false
+  # The supported bot launch contract invokes Node with the entry script as the
+  # first argument. An approved path appearing later as arbitrary user data does
+  # not establish process identity.
+  $entry = ConvertTo-HotSwitchNormalizedPath -Path ([string]$tokens[1]) -BasePath $Workspace
+  return (Get-HotSwitchLaunchEntryPaths -Workspace $Workspace) -contains $entry
 }
 
 function Test-HotSwitchProcessIdentity {
@@ -82,6 +94,8 @@ function Test-HotSwitchProcessIdentity {
   )
 
   if ($null -eq $ProcessDetails) { return $false }
+  $processProperties = @($ProcessDetails.PSObject.Properties.Name)
+  if ($processProperties -notcontains 'ExecutablePath' -or $processProperties -notcontains 'CommandLine') { return $false }
   if (-not (Test-HotSwitchApprovedNodeExecutable -NodePath $NodePath)) { return $false }
   if (-not (Test-HotSwitchApprovedRuntimeEntry -Workspace $Workspace -EntryPath $EntryPath)) { return $false }
   if ([string]::IsNullOrWhiteSpace([string]$ProcessDetails.ExecutablePath)) { return $false }
@@ -101,6 +115,14 @@ function Test-HotSwitchRuntimeLockMatchesState {
   )
 
   if ($null -eq $LockRecord -or $null -eq $ActiveState) { return $false }
+  $lockProperties = @($LockRecord.PSObject.Properties.Name)
+  $stateProperties = @($ActiveState.PSObject.Properties.Name)
+  foreach ($name in @('schemaVersion', 'pid', 'runId', 'ownerId')) {
+    if ($lockProperties -notcontains $name) { return $false }
+  }
+  foreach ($name in @('pid', 'runId')) {
+    if ($stateProperties -notcontains $name) { return $false }
+  }
   if ([int]$LockRecord.schemaVersion -ne 1) { return $false }
   if ([string]::IsNullOrWhiteSpace([string]$LockRecord.ownerId)) { return $false }
   if ([string]::IsNullOrWhiteSpace([string]$LockRecord.runId)) { return $false }
