@@ -1,0 +1,66 @@
+name: Apply Strict Broker Order Identity Once
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .tmp-strict-broker-order-id
+      - .github/workflows/apply-strict-broker-order-id-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'tmp/strict-broker-order-id-20260818'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout staging branch
+        uses: actions/checkout@v4
+        with:
+          ref: refactor/enterprise-convergence-20260817
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Apply strict broker order identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-strict-broker-order-id.py
+          rm scripts/patch-strict-broker-order-id.py
+
+      - name: Validate strict order identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          pwsh -NoProfile -File ./test/hot_switch_identity.test.ps1
+          npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+          git diff --check
+          grep -q 'brokerOrderId(order)' src/automation/runtimeOrchestrator.ts
+          grep -q 'BROKER_ORDER_ID_INVALID' src/automation/broker/orderIdentity.ts
+          grep -q 'String\\(order\\.orderId\\)' test/runtime_broker_order_identity.test.ts
+          test ! -f scripts/patch-strict-broker-order-id.py
+
+      - name: Commit validated change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/automation/runtimeOrchestrator.ts src/automation/broker/orderIdentity.ts test/order_identity.test.ts test/runtime_broker_order_identity.test.ts scripts/patch-strict-broker-order-id.py
+          if git diff --cached --quiet; then
+            echo 'No validated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'fix: fail closed on malformed broker order IDs'
+          git push origin HEAD:refactor/enterprise-convergence-20260817
