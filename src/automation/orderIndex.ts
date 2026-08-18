@@ -1,9 +1,14 @@
 import { brokerOrderId } from "./broker/orderIdentity.ts";
-import { orderInfo, orderPolicyViolation, type Json } from "./policy/order.ts";
+import {
+  orderInfo,
+  orderPolicyViolation,
+  type Json,
+  type OptionOrderInfo,
+} from "./policy/order.ts";
 import { isRefreshSpreadEligible } from "./policy/refreshOrder.ts";
 import type { RuntimePolicy } from "./policy/runtime.ts";
 
-export type ManagedOpeningInfo = NonNullable<ReturnType<typeof orderInfo>>;
+export type ManagedOpeningInfo = OptionOrderInfo;
 
 export function orderIdentifier(order: Json): string {
   return brokerOrderId(order);
@@ -23,8 +28,9 @@ export function managedOpeningInfo(
   order: Json,
   policy: RuntimePolicy,
   tradingDate: string,
+  parsedMeta?: OptionOrderInfo | null,
 ): ManagedOpeningInfo | null {
-  const meta = orderInfo(order);
+  const meta = parsedMeta === undefined ? orderInfo(order) : parsedMeta;
   if (
     !meta?.opening
     || meta.expiration !== tradingDate
@@ -32,7 +38,7 @@ export function managedOpeningInfo(
     || !policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
     || !isRefreshSpreadEligible(meta)
     || Number(order.quantity ?? 0) !== 1
-    || orderPolicyViolation(order, policy, tradingDate)
+    || orderPolicyViolation(order, policy, tradingDate, meta)
   ) return null;
   return meta;
 }

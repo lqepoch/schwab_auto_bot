@@ -4,6 +4,7 @@ import {
   orderEventTime,
   orderIdentifier,
 } from "./orderIndex.ts";
+import type { OrderInfoResolver } from "./orderMetadataCache.ts";
 import { orderInfo, type Json } from "./policy/order.ts";
 import type { RuntimePolicy } from "./policy/runtime.ts";
 
@@ -31,6 +32,11 @@ export class RuntimeOrderIndexCache {
   private policy: RuntimePolicy | null = null;
   private workingStatuses: ReadonlySet<string> | null = null;
   private cached: RuntimeOrderIndexSnapshot | null = null;
+  private readonly resolveInfo: OrderInfoResolver;
+
+  constructor(resolveInfo: OrderInfoResolver = orderInfo) {
+    this.resolveInfo = resolveInfo;
+  }
 
   snapshot(
     source: readonly Json[],
@@ -55,7 +61,7 @@ export class RuntimeOrderIndexCache {
     for (const order of source) {
       if (!workingStatuses.has(String(order.status))) continue;
 
-      const meta = orderInfo(order);
+      const meta = this.resolveInfo(order);
       if (
         meta
         && meta.expiration === tradingDate
@@ -65,7 +71,7 @@ export class RuntimeOrderIndexCache {
         if (meta.closing) push(activeClosingOrdersByStrategy, meta.key, order);
       }
 
-      const managed = managedOpeningInfo(order, policy, tradingDate);
+      const managed = managedOpeningInfo(order, policy, tradingDate, meta);
       if (!managed) continue;
       const current = primaryActiveOpeningOrdersByStrategy.get(managed.key);
       if (!current || compareOpeningOrders(order, current) < 0) {

@@ -3,8 +3,8 @@ import test from "node:test";
 
 import { AUTOMATION_WORKING_ORDER_STATUSES } from "../src/automation/execution/orderWritePreflight.ts";
 import { RuntimeOrderIndexCache } from "../src/automation/orderRuntimeIndex.ts";
+import { orderInfo, type Json } from "../src/automation/policy/order.ts";
 import { parseRuntimePolicy } from "../src/automation/policy/runtime.ts";
-import type { Json } from "../src/automation/policy/order.ts";
 
 const policy = parseRuntimePolicy([]);
 const working = new Set<string>(AUTOMATION_WORKING_ORDER_STATUSES);
@@ -124,4 +124,22 @@ test("trading date participates in the cache key", () => {
   assert.equal(nextDate.activeOpeningOrdersByStrategy.size, 0);
   assert.equal(nextDate.primaryActiveOpeningOrders.length, 0);
   assert.equal(nextDate.primaryActiveOpeningOrderIds.size, 0);
+});
+
+test("an index rebuild resolves metadata once per working broker row", () => {
+  const source = [spread("101", 744), spread("102", 745), spread("201", 744, { closing: true })];
+  let resolutions = 0;
+  const cache = new RuntimeOrderIndexCache((order) => {
+    resolutions += 1;
+    return orderInfo(order);
+  });
+
+  cache.snapshot(source, 1, policy, tradingDate, working);
+  assert.equal(resolutions, source.length);
+  cache.primaryOpeningOrders(source, 1, policy, tradingDate, working);
+  cache.activeOpeningOrders(source, 1, policy, tradingDate, working, "missing");
+  assert.equal(resolutions, source.length);
+
+  cache.snapshot(source, 2, policy, tradingDate, working);
+  assert.equal(resolutions, source.length * 2);
 });

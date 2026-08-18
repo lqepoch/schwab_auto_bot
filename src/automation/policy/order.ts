@@ -54,8 +54,13 @@ export function isWithinStrikeRange(meta: OptionOrderInfo, strikeMin: number, st
   return meta.lowerStrike >= strikeMin && meta.higherStrike <= strikeMax;
 }
 
-export function orderPolicyViolation(order: Json, policy: OrderPolicy, tradingDate: string): OrderPolicyViolation | null {
-  const meta = orderInfo(order);
+export function orderPolicyViolation(
+  order: Json,
+  policy: OrderPolicy,
+  tradingDate: string,
+  parsedMeta?: OptionOrderInfo | null,
+): OrderPolicyViolation | null {
+  const meta = parsedMeta === undefined ? orderInfo(order) : parsedMeta;
   if (!meta) return { code: "ORDER_STRUCTURE_INVALID", message: "订单不是可识别的双腿垂直期权策略" };
   const requestedQuantity = Number(order.quantity);
   const quantitiesMatch = meta.legs.every((leg) => Number(leg.quantity) === requestedQuantity);
