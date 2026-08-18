@@ -1,0 +1,60 @@
+name: Inject Runtime State Fail Closed Once
+
+on:
+  push:
+    branches:
+      - refactor/enterprise-convergence-20260817
+
+permissions:
+  contents: write
+
+jobs:
+  inject:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Apply runtime state fail-closed patch
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-runtime-state-failclosed.py
+          rm scripts/patch-runtime-state-failclosed.py
+
+      - name: Validate runtime state persistence boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+          git diff --check
+          grep -q 'runtime.state-persistence-failed' src/automation/runtimeOrchestrator.ts
+          grep -q 'requestStop(`state-persistence-failed:${state}`)' src/automation/runtimeOrchestrator.ts
+          grep -q 'Promise.allSettled' src/automation/runtimeOrchestrator.ts
+          grep -q 'runtime.state-flush-failed' src/automation/runtimeOrchestrator.ts
+          grep -q 'Array.isArray(groups)' src/automation/state/runtimeStateStores.ts
+          grep -q 'EXIT_TEMPLATE_STATE_INVALID' test/runtime_state_stores.test.ts
+
+      - name: Commit injection
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'LQ'
+          git config user.email 'lqepoch@126.com'
+          git add -A
+          git status --short
+          git commit -m 'refactor: fail closed on runtime state persistence faults'
+          git push origin HEAD:refactor/enterprise-convergence-20260817
