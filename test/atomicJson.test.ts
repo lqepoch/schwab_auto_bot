@@ -48,12 +48,32 @@ test("atomicWriteJson rejects non-serializable top-level undefined without a tem
   }
 });
 
-test("atomicWriteJson tightens explicit owner-only file and existing-directory modes", {
+test("atomicWriteJson applies explicit owner-only modes to a newly created state directory", {
   skip: process.platform === "win32",
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "atomic-json-mode-"));
   try {
-    const directory = join(root, "state");
+    const directory = join(root, "nested", "state");
+    const target = join(directory, "auth.json");
+
+    await atomicWriteJson(target, { token: "redacted" }, {
+      directoryMode: 0o700,
+      fileMode: 0o600,
+    });
+
+    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    assert.equal((await stat(target)).mode & 0o777, 0o600);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("atomicWriteJson never chmods an existing caller-owned parent directory", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "atomic-json-existing-mode-"));
+  try {
+    const directory = join(root, "shared");
     const target = join(directory, "auth.json");
     await mkdir(directory, { mode: 0o755 });
     await chmod(directory, 0o755);
@@ -63,7 +83,7 @@ test("atomicWriteJson tightens explicit owner-only file and existing-directory m
       fileMode: 0o600,
     });
 
-    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    assert.equal((await stat(directory)).mode & 0o777, 0o755);
     assert.equal((await stat(target)).mode & 0o777, 0o600);
   } finally {
     await rm(root, { recursive: true, force: true });
