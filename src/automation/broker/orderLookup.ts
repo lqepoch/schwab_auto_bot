@@ -20,11 +20,16 @@ export class OrderLookup<T> {
     this.byId = next;
   }
 
-  /** Add one locally accepted broker order without rescanning the snapshot. */
-  add(value: T): void {
+  /**
+   * Publish a locally accepted order only when an authoritative poll has not
+   * already observed the same broker ID. The authoritative object wins this
+   * race because it contains the broker's fresher status/execution metadata.
+   */
+  addIfAbsent(value: T): boolean {
     const id = this.key(value);
-    if (this.byId.has(id)) throw new Error("BROKER_ORDER_ID_DUPLICATE");
+    if (this.byId.has(id)) return false;
     this.byId.set(id, value);
+    return true;
   }
 
   get(id: string): T | undefined {
