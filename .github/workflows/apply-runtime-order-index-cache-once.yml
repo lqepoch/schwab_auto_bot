@@ -1,16 +1,22 @@
 name: Apply Runtime Order Index Cache Once
 
 on:
-  push:
-    branches:
-      - perf/cache-derived-order-index-20260818
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-runtime-order-index-cache-once.yml'
+      - 'scripts/patch-runtime-order-index-cache.py'
+      - 'src/automation/orderRuntimeIndex.ts'
+      - 'src/automation/runtimeOrchestrator.ts'
+      - 'bench/runtime-benchmark.ts'
+      - 'test/order_runtime_index.test.ts'
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: github.event.head_commit.message != 'perf: cache derived runtime order views by authority revision'
+    if: github.head_ref == 'perf/cache-derived-order-index-20260818'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -20,7 +26,18 @@ jobs:
           ref: perf/cache-derived-order-index-20260818
           fetch-depth: 0
 
+      - name: Detect pending one-shot patch
+        id: pending
+        shell: bash
+        run: |
+          if test -f scripts/patch-runtime-order-index-cache.py; then
+            echo 'apply=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'apply=false' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Node.js 24
+        if: steps.pending.outputs.apply == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24'
@@ -28,9 +45,11 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Install locked dependencies
+        if: steps.pending.outputs.apply == 'true'
         run: npm ci --ignore-scripts
 
       - name: Apply runtime order-index integration
+        if: steps.pending.outputs.apply == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -38,6 +57,7 @@ jobs:
           rm scripts/patch-runtime-order-index-cache.py
 
       - name: Validate runtime order-index cache
+        if: steps.pending.outputs.apply == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -57,6 +77,7 @@ jobs:
           ! grep -q 'orders.filter((order) => {' <(sed -n '/async function evaluateExitStrategy/,/function evaluateExits/p' src/automation/runtimeOrchestrator.ts)
 
       - name: Commit validated product changes
+        if: steps.pending.outputs.apply == 'true'
         shell: bash
         run: |
           set -euo pipefail
