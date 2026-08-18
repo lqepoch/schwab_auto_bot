@@ -1,0 +1,51 @@
+name: Validate Atomic JSON Final Once
+
+on:
+  push:
+    branches:
+      - refactor/enterprise-convergence-20260817
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Validate crash-durable JSON persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+          git diff --check
+          grep -q 'temporaryFile.sync()' src/utils/atomicJson.ts
+          grep -q 'directoryHandle.sync()' src/utils/atomicJson.ts
+          grep -q 'existing caller-owned parent directory is never chmodded' src/utils/atomicJson.ts
+          grep -q 'never chmods an existing caller-owned parent directory' test/atomicJson.test.ts
+
+      - name: Remove validation workflow after success
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'LQ'
+          git config user.email 'lqepoch@126.com'
+          git rm .github/workflows/validate-atomic-json-final-once.yml
+          git commit -m 'chore: remove final atomic JSON validation workflow'
+          git push origin HEAD:refactor/enterprise-convergence-20260817
