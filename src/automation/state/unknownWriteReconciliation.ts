@@ -224,15 +224,21 @@ export class UnknownWriteReconciliation {
   private loaded = false;
   private readonly now: () => string;
   private readonly idFactory: () => string;
+  private readonly orderId: (order: BrokerOrderSnapshot) => string;
   private operationTail: Promise<void> = Promise.resolve();
 
   constructor(
     statePath: string,
-    options: { now?: () => string; idFactory?: () => string } = {},
+    options: {
+      now?: () => string;
+      idFactory?: () => string;
+      orderId?: (order: BrokerOrderSnapshot) => string;
+    } = {},
   ) {
     this.statePath = statePath;
     this.now = options.now ?? (() => new Date().toISOString());
     this.idFactory = options.idFactory ?? randomUUID;
+    this.orderId = options.orderId ?? ((order) => String(order.orderId ?? ""));
   }
 
   async load(): Promise<void> {
@@ -377,7 +383,7 @@ export class UnknownWriteReconciliation {
     for (const record of this.pendingRecords) {
       if (record.phase === "IN_FLIGHT") continue;
       if (record.operation === "CANCEL_ORDER") {
-        const targetMatches = orders.filter((order) => String(order.orderId ?? "") === record.targetOrderId);
+        const targetMatches = orders.filter((order) => this.orderId(order) === record.targetOrderId);
         const terminal = targetMatches.filter((order) => TERMINAL_CANCEL_TARGET_STATUSES.has(String(order.status ?? "").toUpperCase()));
         if (targetMatches.length === 1 && terminal.length === 1) {
           // Once the exact target is terminal, replaying the unknown cancel can
@@ -391,7 +397,7 @@ export class UnknownWriteReconciliation {
         continue;
       }
       if (record.operation === "REPLACE_ORDER") {
-        const sourceMatches = orders.filter((order) => String(order.orderId ?? "") === record.targetOrderId);
+        const sourceMatches = orders.filter((order) => this.orderId(order) === record.targetOrderId);
         const source = sourceMatches.length === 1 ? sourceMatches[0] : undefined;
         const sourceStatus = String(source?.status ?? "").toUpperCase();
         if (!source || record.targetFingerprint === null || fingerprintOrder(source) !== record.targetFingerprint) {
@@ -415,7 +421,7 @@ export class UnknownWriteReconciliation {
         // to match this request uniquely before the unknown intent is cleared.
       }
       const matches = orders.filter((order) => {
-        const orderId = String(order.orderId ?? "");
+        const orderId = this.orderId(order);
         if (!orderId || record.payloadFingerprint === null || fingerprintOrder(order) !== record.payloadFingerprint) return false;
         if (record.baselineOrderIds.includes(orderId)) return false;
         if (record.operation === "REPLACE_ORDER" && orderId === record.targetOrderId) return false;
@@ -435,7 +441,7 @@ export class UnknownWriteReconciliation {
     const owners = new Map<string, string[]>();
     for (const [recordId, matches] of candidates) {
       for (const order of matches) {
-        const orderId = String(order.orderId ?? "");
+        const orderId = this.orderId(order);
         const recordOwners = owners.get(orderId) ?? [];
         recordOwners.push(recordId);
         owners.set(orderId, recordOwners);
@@ -445,7 +451,7 @@ export class UnknownWriteReconciliation {
     for (const record of this.pendingRecords) {
       const matches = candidates.get(record.id);
       if (!matches) continue;
-      const uniqueIds = new Set(matches.map((order) => String(order.orderId ?? "")));
+      const uniqueIds = new Set(matches.map((order) => this.orderId(order)));
       const hasSharedCandidate = [...uniqueIds].some((orderId) => (owners.get(orderId)?.length ?? 0) > 1);
       if (matches.length === 1 && uniqueIds.size === 1 && !hasSharedCandidate) {
         resolved.push(record);
