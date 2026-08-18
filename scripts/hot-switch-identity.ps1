@@ -24,16 +24,6 @@ function Get-HotSwitchRuntimeEntryPaths {
   )
 }
 
-function Get-HotSwitchLaunchEntryPaths {
-  param([Parameter(Mandatory = $true)][string]$Workspace)
-  return @(
-    ConvertTo-HotSwitchNormalizedPath -Path 'src/main.ts' -BasePath $Workspace
-    ConvertTo-HotSwitchNormalizedPath -Path 'dist/main.js' -BasePath $Workspace
-    ConvertTo-HotSwitchNormalizedPath -Path 'src/automation/cli.ts' -BasePath $Workspace
-    ConvertTo-HotSwitchNormalizedPath -Path 'dist/automation/cli.js' -BasePath $Workspace
-  )
-}
-
 function Test-HotSwitchApprovedRuntimeEntry {
   param(
     [Parameter(Mandatory = $true)][string]$Workspace,
@@ -42,6 +32,13 @@ function Test-HotSwitchApprovedRuntimeEntry {
 
   $normalized = ConvertTo-HotSwitchNormalizedPath -Path $EntryPath -BasePath $Workspace
   return (Get-HotSwitchRuntimeEntryPaths -Workspace $Workspace) -contains $normalized
+}
+
+function Test-HotSwitchApprovedNodeExecutable {
+  param([Parameter(Mandatory = $true)][string]$NodePath)
+  if ([string]::IsNullOrWhiteSpace($NodePath)) { return $false }
+  $leaf = [System.IO.Path]::GetFileName($NodePath).ToLowerInvariant()
+  return $leaf -eq 'node' -or $leaf -eq 'node.exe'
 }
 
 function Test-HotSwitchCommandLineEntry {
@@ -85,6 +82,7 @@ function Test-HotSwitchProcessIdentity {
   )
 
   if ($null -eq $ProcessDetails) { return $false }
+  if (-not (Test-HotSwitchApprovedNodeExecutable -NodePath $NodePath)) { return $false }
   if (-not (Test-HotSwitchApprovedRuntimeEntry -Workspace $Workspace -EntryPath $EntryPath)) { return $false }
   if ([string]::IsNullOrWhiteSpace([string]$ProcessDetails.ExecutablePath)) { return $false }
   if ([string]::IsNullOrWhiteSpace([string]$ProcessDetails.CommandLine)) { return $false }
