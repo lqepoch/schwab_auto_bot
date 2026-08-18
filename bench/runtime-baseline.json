@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-18T01:15:18.850Z",
+  "generatedAt": "2026-08-17T08:02:33.785Z",
   "sampleCount": 7,
   "nodeMajor": 24,
   "seed": 20260817,
@@ -21,9 +21,9 @@
       "unit": "ms"
     },
     "atomicPersistence.wallMs": {
-      "median": 715.441,
-      "p90": 1455.269,
-      "limit": 3638.173,
+      "median": 23.46,
+      "p90": 25.393,
+      "limit": 63.483,
       "unit": "ms"
     },
     "executionJournal.wallMs": {
