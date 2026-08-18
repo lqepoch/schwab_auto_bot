@@ -396,7 +396,10 @@ function replaceOrders(next: readonly Json[]): void {
   orders = snapshot;
 }
 function addOrder(order: Json): void {
-  ordersById.add(order);
+  // An authoritative REST poll may observe a just-accepted order before the
+  // caller publishes its local synthetic copy. Keep the broker row in that
+  // race because it carries fresher status/execution metadata.
+  if (!ordersById.addIfAbsent(order)) return;
   orders.push(order);
 }
 function getOrder(orderIdValue: string): Json | undefined {
