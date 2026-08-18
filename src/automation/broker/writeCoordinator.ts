@@ -45,8 +45,21 @@ export interface BrokerWriteLedger {
   ): Promise<UnknownWriteRecord | null>;
 }
 
+export interface PreparedBrokerWriteTransport {
+  /**
+   * Start the physical mutation request immediately. All quota waits, token
+   * refreshes, or other asynchronous admission work must complete in prepare().
+   */
+  send(): Promise<BrokerWriteResponse>;
+}
+
 export interface BrokerWriteTransport {
-  send(request: BrokerWriteRequest): Promise<BrokerWriteResponse>;
+  /**
+   * Complete every potentially blocking pre-send dependency before WAL fsync.
+   * This keeps the post-WAL path to the physical transport attempt await-free
+   * after its final stop/state validation.
+   */
+  prepare(request: BrokerWriteRequest): Promise<PreparedBrokerWriteTransport>;
 }
 
 export interface BrokerWriteGate {
@@ -220,8 +233,15 @@ export class BrokerWriteCoordinator {
       this.emitEvent({ event: "blocked", request, reason: "runtime-stopping" });
       throw new BrokerWriteStoppingError(request);
     }
+    let preparedTransport: PreparedBrokerWriteTransport;
     try {
       await this.guards.beforeFinalWrite?.(request);
+      await request.validateFinal?.();
+      await this.guards.assertReady(request);
+      preparedTransport = await this.transport.prepare(request);
+      if (this.guards.isStopping?.()) throw new BrokerWriteStoppingError(request);
+      // Admission/token preparation can wait. Revalidate once more before
+      // creating durable intent state so the WAL describes a current request.
       await request.validateFinal?.();
       await this.guards.assertReady(request);
     } catch (error) {
@@ -254,7 +274,7 @@ export class BrokerWriteCoordinator {
       // This is deliberately the only transport invocation in this primitive.
       // Retry policy belongs outside this coordinator and must not replay a
       // mutation after WAL persistence has succeeded.
-      response = await this.transport.send(request);
+      response = await preparedTransport.send();
     } catch (error) {
       const status = statusOf(error);
       const reason = reasonOf(error, status);

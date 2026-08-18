@@ -83,6 +83,7 @@ class FakeLedger {
 
 class FakeTransport {
   attempts = 0;
+  preparations = 0;
   private outcomes: Outcome[] = [];
   private blocked = false;
   private started: (() => void) | null = null;
@@ -101,18 +102,23 @@ class FakeTransport {
     this.releaseSend?.();
   }
 
-  async send(_request: BrokerWriteRequest): Promise<BrokerWriteResponse> {
-    this.attempts += 1;
-    this.started?.();
-    this.started = null;
-    if (this.blocked) {
-      await new Promise<void>((resolve) => { this.releaseSend = resolve; });
-      this.releaseSend = null;
-      this.blocked = false;
-    }
-    const outcome = this.outcomes.shift() ?? accepted("1000");
-    if (outcome instanceof Error) throw outcome;
-    return outcome;
+  async prepare(_request: BrokerWriteRequest) {
+    this.preparations += 1;
+    return {
+      send: async (): Promise<BrokerWriteResponse> => {
+        this.attempts += 1;
+        this.started?.();
+        this.started = null;
+        if (this.blocked) {
+          await new Promise<void>((resolve) => { this.releaseSend = resolve; });
+          this.releaseSend = null;
+          this.blocked = false;
+        }
+        const outcome = this.outcomes.shift() ?? accepted("1000");
+        if (outcome instanceof Error) throw outcome;
+        return outcome;
+      },
+    };
   }
 }
 
