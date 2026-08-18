@@ -60,6 +60,7 @@ import {
 } from "./policy/refreshOrder.ts";
 import { BrokerWriteCoordinator } from "./broker/writeCoordinator.ts";
 import { brokerOrderId } from "./broker/orderIdentity.ts";
+import { OrderLookup } from "./broker/orderLookup.ts";
 import {
   ACTIVE_ORDER_QUERY_LIMIT,
   ACTIVE_ORDER_STATUS_FILTERS,
@@ -309,6 +310,7 @@ const writer = new PriorityWriter(stamp);
 const finalWriteGate = new PriorityGate();
 let accountHash = "";
 let orders: Json[] = [];
+const ordersById = new OrderLookup<Json>((order) => orderId(order));
 let polling = false;
 let fullSnapshotReconciled = false;
 const evaluatingExitStrategies = new Set<string>();
@@ -388,6 +390,22 @@ function flatten(source: any[]): Json[] {
 function info(order: Json) { return orderInfo(order); }
 
 function orderId(order: Json): string { return brokerOrderId(order); }
+function replaceOrders(next: readonly Json[]): void {
+  const snapshot = [...next];
+  ordersById.replace(snapshot);
+  orders = snapshot;
+}
+function addOrder(order: Json): void {
+  ordersById.add(order);
+  orders.push(order);
+}
+function getOrder(orderIdValue: string): Json | undefined {
+  return ordersById.get(orderIdValue);
+}
+function getWorkingOrder(orderIdValue: string): Json | undefined {
+  const order = getOrder(orderIdValue);
+  return order && working.has(String(order.status)) ? order : undefined;
+}
 function quantity(order: Json): number { return Number(order.quantity ?? 0); }
 function remaining(order: Json): number {
   return Math.max(0, quantity(order) - Number(order.filledQuantity ?? 0));
@@ -850,7 +868,7 @@ const orderSnapshotCoordinator = new OrderSnapshotCoordinator<Json>({
   },
   reconcileUnknownWrites: async (snapshot) => reconcileUnknownWritesAfterFullSnapshot(snapshot),
   onAuthoritativeReplaced: async (incoming) => {
-    orders = [...incoming];
+    replaceOrders(incoming);
   },
   onFullReconciled: async (incoming) => {
     recordOrderTransitions("full", incoming);
@@ -860,7 +878,7 @@ const orderSnapshotCoordinator = new OrderSnapshotCoordinator<Json>({
     executionJournal.record("orders.snapshot.synced", { scope: "full", orders: incoming.length });
   },
   onFillsMerged: async (incoming, state) => {
-    orders = [...state.authoritative] as Json[];
+    replaceOrders(state.authoritative as Json[]);
     recordOrderTransitions("fills", incoming);
     executionJournal.record("orders.snapshot.synced", { scope: "fills", fills: incoming.length });
   },
@@ -962,15 +980,15 @@ function localOrder(payload: Json, id: string): Json {
 }
 
 function applyLocalSubmit(payload: Json, id: string): void {
-  orders.push(localOrder(payload, id));
+  addOrder(localOrder(payload, id));
   observedFillQuantities.set(id, 0);
   if (info(payload)?.closing) sellDue.set(id, Date.now() + EXIT_REFRESH_MS);
 }
 
 function applyLocalReplace(sourceId: string, payload: Json, replacementId: string): void {
-  const source = orders.find((order) => orderId(order) === sourceId);
+  const source = getOrder(sourceId);
   if (source) source.status = "REPLACED";
-  orders.push(localOrder(payload, replacementId));
+  addOrder(localOrder(payload, replacementId));
   observedFillQuantities.set(replacementId, 0);
   if (info(payload)?.closing) sellDue.set(replacementId, Date.now() + EXIT_REFRESH_MS);
 }
@@ -1151,7 +1169,7 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
   const preflight = preflightDecision.preflight;
   if (preflight === EXISTING_ORDER_REPLACE_NO_PREVIEW) {
     const replaceOrderId = preflightDecision.replaceOrderId;
-    const source = orders.find((order) => orderId(order) === replaceOrderId);
+    const source = getOrder(replaceOrderId);
     const sourceViolation = replacementSourceViolation(source, payload);
     if (sourceViolation) {
       executionJournal.record("broker.write.blocked", {
@@ -1221,11 +1239,11 @@ async function writeOrder(key: string, method: "POST" | "PUT", path: string, pay
     baselineOrderIds: () => baselineOrderIds(payload, replaceTargetOrderId ?? undefined),
     targetOrderId: replaceTargetOrderId ?? undefined,
     targetOrder: replaceTargetOrderId
-      ? () => orders.find((order) => orderId(order) === replaceTargetOrderId)
+      ? () => getOrder(replaceTargetOrderId)
       : undefined,
     validateFinal: replaceTargetOrderId
       ? () => {
-        const currentSource = orders.find((order) => orderId(order) === replaceTargetOrderId);
+        const currentSource = getOrder(replaceTargetOrderId);
         const violation = replacementSourceViolation(currentSource, payload);
         if (violation) throw new Error(violation);
       }
@@ -1248,7 +1266,7 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
     executionJournal.record("broker.cancel.skipped", { key, orderId: orderIdValue, reason: "read-only" });
     return;
   }
-  const source = orders.find((order) => orderId(order) === orderIdValue);
+  const source = getOrder(orderIdValue);
   assertCancelableTarget(source, key, orderIdValue);
   if (policy.disableSellOrders && (info(source ?? {})?.closing || key.startsWith("sell-") || key.startsWith("stale-recreate"))) {
     executionJournal.record("exit.cancel.blocked", {
@@ -1269,15 +1287,15 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
     path,
     baselineOrderIds: [orderIdValue],
     targetOrderId: orderIdValue,
-    targetOrder: () => orders.find((order) => orderId(order) === orderIdValue),
+    targetOrder: () => getOrder(orderIdValue),
     validateFinal: () => {
-      const currentTarget = orders.find((order) => orderId(order) === orderIdValue);
+      const currentTarget = getOrder(orderIdValue);
       assertCancelableTarget(currentTarget, key, orderIdValue);
     },
     priority,
     transportPriority: priority,
   });
-  const current = orders.find((order) => orderId(order) === orderIdValue);
+  const current = getOrder(orderIdValue);
   if (current) current.status = "CANCELED";
   executionJournal.record("broker.cancel.accepted", { key, orderId: orderIdValue, path });
 }
@@ -1534,7 +1552,7 @@ function queueFixedPriceRefresh(
     priority: 2,
     run: async () => {
       if (stopping || !policy.isExecutionWindowOpen()) return;
-      const current = orders.find((order) => orderId(order) === id);
+      const current = getWorkingOrder(id);
       if (!current || !working.has(String(current.status)) || !managedOpening(current)) return;
       const quotaIntervalMs = budget.fixedPriceRefreshIntervalMs();
       const intervalMs = effectiveFixedPriceRefreshIntervalMs(policy.fixedPriceRefreshIntervalMs, quotaIntervalMs);
@@ -1547,7 +1565,7 @@ function queueFixedPriceRefresh(
         intervalMs,
       });
       await fixedPriceRefreshPacer.admit(intervalMs);
-      const latest = orders.find((order) => orderId(order) === id);
+      const latest = getWorkingOrder(id);
       if (!latest || !working.has(String(latest.status)) || !managedOpening(latest)) return;
       const payload = payloadFrom(latest, 1, false, Math.round(Number(latest.price) * 100));
       const replacement = await writeOrder(
@@ -1692,7 +1710,7 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
     return;
   }
   const desiredPrice = action.priceCents === undefined ? logical.priceCents : explorer.setPrice(groupKey, logical.id, action.priceCents);
-  const current = logical.brokerOrderId === null ? null : orders.find((order) => orderId(order) === logical.brokerOrderId && working.has(String(order.status)));
+  const current = logical.brokerOrderId === null ? null : (getWorkingOrder(logical.brokerOrderId) ?? null);
   if (current) {
     if (recordRefreshSpreadSkip(current, "price-explorer")) {
       complete();
@@ -2378,7 +2396,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
     writer.enqueue({
       key: `sell-refresh:${id}`, priority,
       run: async () => {
-        const liveSell = orders.find((order) => orderId(order) === id);
+        const liveSell = getWorkingOrder(id);
         if (!liveSell || !working.has(String(liveSell.status))) return;
         // Revalidate with the shared account-level snapshot immediately before
         // the final Replace. The queue can wait behind unrelated writes, so
