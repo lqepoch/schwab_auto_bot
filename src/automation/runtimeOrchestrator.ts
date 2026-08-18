@@ -1,5 +1,5 @@
-import { appendFile, mkdir, readFile, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { SchwabActivityStream, type ActivityBatch } from "./stream/activityStream.ts";
 import { beginLogin, login, requireWeeklyReauthorization, SchwabTokenProvider, type AutomationAuthOptions } from "./auth/provider.ts";
@@ -22,6 +22,7 @@ import {
 import { completeNetDebitFill, completeOrderLimitFill } from "./execution/fillPrice.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction } from "./execution/priceExplorer.ts";
 import { ExecutionJournal } from "./observability/executionJournal.ts";
+import { DurableJsonlWriter } from "./observability/durableJsonl.ts";
 import { safeRuntimeError } from "./observability/runtimeError.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "./policy/exit.ts";
 import { acquireRuntimeLock } from "./state/runtimeLock.ts";
@@ -104,6 +105,19 @@ const executionJournal = new ExecutionJournal(root, runId, (error) => {
   executionJournalPersistenceFault ??= error;
   host.stderr.write(`${new Date().toISOString()} EXECUTION_JOURNAL_WRITE_FAILED error=${safeRuntimeError(error)}\n`);
   executionJournalStopHandler?.();
+});
+let operationalAuditStopHandler: ((source: string) => void) | null = null;
+function noteOperationalAuditFailure(source: string, error: unknown): void {
+  host.stderr.write(`${new Date().toISOString()} OPERATIONAL_AUDIT_WRITE_FAILED source=${source} error=${safeRuntimeError(error)}\n`);
+  operationalAuditStopHandler?.(source);
+}
+const sendEvidenceAudit = new DurableJsonlWriter(evidencePath, {
+  failureCode: "SEND_EVIDENCE_PERSISTENCE_FAILED",
+  onFailure: (error) => noteOperationalAuditFailure("send-evidence", error),
+});
+const policyAlertAudit = new DurableJsonlWriter(policyAlertPath, {
+  failureCode: "POLICY_ALERT_PERSISTENCE_FAILED",
+  onFailure: (error) => noteOperationalAuditFailure("policy-alert", error),
 });
 const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
 const readOnly = host.argv.includes("--read-only");
@@ -282,6 +296,9 @@ executionJournalStopHandler = () => {
   requestStop("execution-journal-persistence-failed");
 };
 if (executionJournalPersistenceFault !== null) executionJournalStopHandler();
+operationalAuditStopHandler = (source) => {
+  requestStop(`operational-audit-persistence-failed:${source}`);
+};
 let controlCheckRunning = false;
 let activityRestTimer: NodeJS.Timeout | null = null;
 const runtimeIntervals: NodeJS.Timeout[] = [];
@@ -419,8 +436,14 @@ function baselineOrderIds(payload: Json, targetOrderId?: string): string[] {
   return [...new Set(ids)];
 }
 
-function assertBrokerWritesAllowed(key: string, method: "POST" | "PUT" | "DELETE", path: string): void {
+function assertOperationalAuditsHealthy(): void {
   executionJournal.assertHealthy();
+  sendEvidenceAudit.assertHealthy();
+  policyAlertAudit.assertHealthy();
+}
+
+function assertBrokerWritesAllowed(key: string, method: "POST" | "PUT" | "DELETE", path: string): void {
+  assertOperationalAuditsHealthy();
   if (!fullSnapshotReconciled) {
     executionJournal.record("broker.write.blocked", {
       key, method, path: safePath(path), reason: "full-snapshot-reconciliation-required",
@@ -612,10 +635,10 @@ const brokerWriteCoordinator = new BrokerWriteCoordinator({
   },
   guards: {
     beforeFinalWrite: async () => {
-      executionJournal.assertHealthy();
+      assertOperationalAuditsHealthy();
       await ensureWeeklyReauthorization();
       policy.requireExecutionWindow();
-      executionJournal.assertHealthy();
+      assertOperationalAuditsHealthy();
     },
     assertReady: (request) => assertBrokerWritesAllowed(request.key, request.method, request.path),
     isStopping: () => stopping,
@@ -838,11 +861,10 @@ async function evidence(
   payload: Json,
   preflight: OrderWritePreflight | "NOT_APPLICABLE",
 ): Promise<void> {
-  await mkdir(dirname(evidencePath), { recursive: true });
-  await appendFile(evidencePath, `${JSON.stringify({
+  await sendEvidenceAudit.append({
     at: new Date().toISOString(), key, method, endpoint: path, preflight,
     payloadShape: { orderType: payload.orderType, price: payload.price, quantity: payload.quantity },
-  })}\n`);
+  });
 }
 
 function reportPolicyAlert(source: string, order: Json, code: string, message: string): void {
@@ -853,10 +875,9 @@ function reportPolicyAlert(source: string, order: Json, code: string, message: s
   const record = {
     at: new Date().toISOString(), source, orderId: id, code, price: order.price ?? null, message,
   };
+  executionJournal.record("policy.alert", record);
   stamp(`POLICY_ALERT code=${code} source=${source} order=${id} price=${String(order.price ?? "unknown")} detail=${message}`);
-  void mkdir(dirname(policyAlertPath), { recursive: true })
-    .then(() => appendFile(policyAlertPath, `${JSON.stringify(record)}\n`))
-    .catch((error) => stamp(`POLICY_ALERT_AUDIT_FAILED error=${safeRuntimeError(error)}`));
+  void policyAlertAudit.append(record).catch(() => undefined);
 }
 
 function reportWorkingOrderPolicyViolations(): void {
@@ -2542,6 +2563,18 @@ if (!readOnly) persistExplorer();
 const streamToStop = activityStream as SchwabActivityStream | null;
 if (streamToStop) await streamToStop.stop();
 await writer.waitIdle();
+const auditFlushResults = await Promise.allSettled([
+  sendEvidenceAudit.flush(),
+  policyAlertAudit.flush(),
+]);
+const auditFlushFailure = auditFlushResults.find(
+  (result): result is PromiseRejectedResult => result.status === "rejected",
+);
+if (auditFlushFailure) {
+  const code = safeRuntimeError(auditFlushFailure.reason);
+  executionJournal.record("runtime.operational-audit-flush-failed", { code });
+  stamp(`OPERATIONAL_AUDIT_FLUSH_FAILED error=${code}`);
+}
 const stateFlushResults = await Promise.allSettled([
   explorerStateStore.flush(),
   fixedPriceCycleStateStore.flush(),
@@ -2558,6 +2591,9 @@ if (stateFlushFailure) {
 await writeRuntimeState("stopped", stopReason);
 executionJournal.record("run.stopped", { reason: stopReason });
 await executionJournal.flush();
+if (auditFlushFailure) {
+  throw new Error("OPERATIONAL_AUDIT_PERSISTENCE_FAILED", { cause: auditFlushFailure.reason });
+}
 if (stateFlushFailure) {
   throw new Error("RUNTIME_STATE_PERSISTENCE_FAILED", { cause: stateFlushFailure.reason });
 }
