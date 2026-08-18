@@ -40,7 +40,7 @@ jobs:
         run: npm test
 
       - name: Audit dead files and dependency hygiene
-        run: npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+        run: npm run lint:deadcode
 
       - name: Run scheduled runtime performance suite
         shell: bash
