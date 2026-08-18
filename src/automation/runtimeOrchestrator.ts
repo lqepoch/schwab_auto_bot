@@ -133,17 +133,24 @@ function stamp(message: string): void {
   });
 }
 
+function handleRuntimeStateWriteFailure(store: string, error: unknown): void {
+  const code = safeRuntimeError(error);
+  executionJournal.record("runtime.state-persistence-failed", { store, code });
+  stamp(`RUNTIME_STATE_PERSISTENCE_FAILED store=${store} error=${code}`);
+  requestStop(`state-persistence-failed:${store}`);
+}
+
 const explorerStateStore = new PriceExplorerStateStore(explorerStatePath, {
   readOnly,
-  onWriteFailure: (error) => stamp(`PRICE_EXPLORER_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`),
+  onWriteFailure: (error) => handleRuntimeStateWriteFailure("price-explorer", error),
 });
 const fixedPriceCycleStateStore = new FixedPriceCycleStateStore(fixedPriceCycleStatePath, {
   readOnly,
-  onWriteFailure: (error) => stamp(`FIXED_PRICE_CYCLE_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`),
+  onWriteFailure: (error) => handleRuntimeStateWriteFailure("fixed-price-cycle", error),
 });
 const exitTemplateStateStore = new ExitTemplateStateStore(exitTemplateStatePath, {
   readOnly,
-  onWriteFailure: (error) => stamp(`EXIT_TEMPLATE_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`),
+  onWriteFailure: (error) => handleRuntimeStateWriteFailure("exit-template", error),
 });
 
 const ensureWeeklyReauthorization = createWeeklyReauthorizationEnsurer({
@@ -2518,12 +2525,25 @@ if (!readOnly) persistExplorer();
 const streamToStop = activityStream as SchwabActivityStream | null;
 if (streamToStop) await streamToStop.stop();
 await writer.waitIdle();
-await explorerStateStore.flush();
-await fixedPriceCycleStateStore.flush();
-await exitTemplateStateStore.flush();
+const stateFlushResults = await Promise.allSettled([
+  explorerStateStore.flush(),
+  fixedPriceCycleStateStore.flush(),
+  exitTemplateStateStore.flush(),
+]);
+const stateFlushFailure = stateFlushResults.find(
+  (result): result is PromiseRejectedResult => result.status === "rejected",
+);
+if (stateFlushFailure) {
+  const code = safeRuntimeError(stateFlushFailure.reason);
+  executionJournal.record("runtime.state-flush-failed", { code });
+  stamp(`RUNTIME_STATE_FLUSH_FAILED error=${code}`);
+}
 await writeRuntimeState("stopped", stopReason);
 executionJournal.record("run.stopped", { reason: stopReason });
 await executionJournal.flush();
+if (stateFlushFailure) {
+  throw new Error("RUNTIME_STATE_PERSISTENCE_FAILED", { cause: stateFlushFailure.reason });
+}
 
 } finally {
   unbindRuntimeAbortSignal();
