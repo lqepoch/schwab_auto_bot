@@ -98,8 +98,12 @@ const unknownWriteStatePath = join(root, ".state", "unknown-writes.json");
 const runId = randomUUID();
 const runtimeStartedAt = Date.now();
 const PREVIEW_REJECTION_COOLDOWN_MS = 30_000;
+let executionJournalPersistenceFault: unknown = null;
+let executionJournalStopHandler: (() => void) | null = null;
 const executionJournal = new ExecutionJournal(root, runId, (error) => {
+  executionJournalPersistenceFault ??= error;
   host.stderr.write(`${new Date().toISOString()} EXECUTION_JOURNAL_WRITE_FAILED error=${safeRuntimeError(error)}\n`);
+  executionJournalStopHandler?.();
 });
 const working = new Set(["PENDING_ACTIVATION", "QUEUED", "WORKING", "PARTIALLY_FILLED", "AWAITING_PARENT_ORDER"]);
 const readOnly = host.argv.includes("--read-only");
@@ -274,6 +278,10 @@ const evaluatingExitStrategies = new Set<string>();
 let lastFullOrderPollAt = 0;
 let stopping = false;
 let stopReason = "normal";
+executionJournalStopHandler = () => {
+  requestStop("execution-journal-persistence-failed");
+};
+if (executionJournalPersistenceFault !== null) executionJournalStopHandler();
 let controlCheckRunning = false;
 let activityRestTimer: NodeJS.Timeout | null = null;
 const runtimeIntervals: NodeJS.Timeout[] = [];
@@ -412,6 +420,7 @@ function baselineOrderIds(payload: Json, targetOrderId?: string): string[] {
 }
 
 function assertBrokerWritesAllowed(key: string, method: "POST" | "PUT" | "DELETE", path: string): void {
+  executionJournal.assertHealthy();
   if (!fullSnapshotReconciled) {
     executionJournal.record("broker.write.blocked", {
       key, method, path: safePath(path), reason: "full-snapshot-reconciliation-required",
@@ -603,8 +612,10 @@ const brokerWriteCoordinator = new BrokerWriteCoordinator({
   },
   guards: {
     beforeFinalWrite: async () => {
+      executionJournal.assertHealthy();
       await ensureWeeklyReauthorization();
       policy.requireExecutionWindow();
+      executionJournal.assertHealthy();
     },
     assertReady: (request) => assertBrokerWritesAllowed(request.key, request.method, request.path),
     isStopping: () => stopping,
@@ -2418,6 +2429,12 @@ unbindRuntimeAbortSignal = bindRuntimeAbortSignal(host.signal, () => {
   executionJournal.record("run.abort-requested", { source: "AutomationRuntimeOptions.signal" });
 });
 
+if (stopping) {
+  await completeStoppedBeforeStartup();
+  return;
+}
+executionJournal.record("run.journal-preflight", { readOnly });
+await executionJournal.flush();
 if (stopping) {
   await completeStoppedBeforeStartup();
   return;
