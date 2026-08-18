@@ -249,13 +249,11 @@ const budget = new RequestBudget({
 });
 const client = new SchwabRestClient();
 
-async function api(
+async function apiWithToken(
   path: string,
-  init: RequestInit = {},
-  priority: Priority = 0,
+  init: RequestInit,
+  token: string,
 ): Promise<{ body: any; headers: Headers; status: number }> {
-  await budget.admit(priority);
-  const token = await tokens.get();
   try {
     const response = await client.request<any>(path, init, token);
     latestBrokerRateLimit = brokerRateLimitFromHeaders(response.headers);
@@ -280,6 +278,16 @@ async function api(
     }
     throw error;
   }
+}
+
+async function api(
+  path: string,
+  init: RequestInit = {},
+  priority: Priority = 0,
+): Promise<{ body: any; headers: Headers; status: number }> {
+  await budget.admit(priority);
+  const token = await tokens.get();
+  return apiWithToken(path, init, token);
 }
 
 const writer = new PriorityWriter(stamp);
@@ -645,13 +653,23 @@ const brokerWriteCoordinator = new BrokerWriteCoordinator({
     },
   },
   transport: {
-    send: async (request) => {
+    prepare: async (request) => {
+      // Reserve quota and obtain a token before WAL fsync. Conservative unused
+      // reservations are acceptable; waiting after WAL would reopen a stop/
+      // state-change race before the actual network request starts.
+      await budget.admit(request.transportPriority ?? 0);
+      const token = await tokens.get();
       const body = request.payload === undefined ? undefined : JSON.stringify(request.payload);
-      const response = await api(request.path, {
+      const init: RequestInit = {
         method: request.method,
         ...(body === undefined ? {} : { body }),
-      }, request.transportPriority ?? 0);
-      return { status: response.status, headers: response.headers };
+      };
+      return {
+        send: async () => {
+          const response = await apiWithToken(request.path, init, token);
+          return { status: response.status, headers: response.headers };
+        },
+      };
     },
   },
   guards: {

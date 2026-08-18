@@ -94,12 +94,20 @@ class DeferredLedger {
 
 class CountingTransport {
   attempts = 0;
+  preparations = 0;
+  prepareWait: Promise<void> | null = null;
 
-  async send(_request: BrokerWriteRequest): Promise<BrokerWriteResponse> {
-    this.attempts += 1;
+  async prepare(_request: BrokerWriteRequest) {
+    this.preparations += 1;
+    if (this.prepareWait) await this.prepareWait;
     return {
-      status: 201,
-      headers: new Headers({ location: "/trader/v1/accounts/hash/orders/12345" }),
+      send: async (): Promise<BrokerWriteResponse> => {
+        this.attempts += 1;
+        return {
+          status: 201,
+          headers: new Headers({ location: "/trader/v1/accounts/hash/orders/12345" }),
+        };
+      },
     };
   }
 }
@@ -175,7 +183,7 @@ test("request-specific validation is repeated after WAL persistence and changed 
   ledger.release();
 
   await assert.rejects(pending, /TARGET_CHANGED_DURING_WAL_FSYNC/);
-  assert.equal(validations, 2);
+  assert.equal(validations, 3);
   assert.equal(transport.attempts, 0);
   assert.equal(ledger.discardCount, 1);
   assert.equal(ledger.records.size, 0);
@@ -223,8 +231,53 @@ test("successful writes pass the post-intent barrier and preserve one physical t
   }));
 
   assert.equal(result.orderId, "12345");
-  assert.equal(validations, 2);
+  assert.equal(validations, 3);
   assert.equal(transport.attempts, 1);
   assert.equal(ledger.discardCount, 0);
+  assert.equal(ledger.records.size, 0);
+});
+
+
+test("a stop arriving during quota/token preparation prevents WAL creation and broker transport", async () => {
+  const ledger = new DeferredLedger();
+  const transport = new CountingTransport();
+  const state = { stopping: false };
+  let releasePrepare!: () => void;
+  transport.prepareWait = new Promise<void>((resolve) => { releasePrepare = resolve; });
+
+  const pending = coordinator(ledger, transport, state).execute(request());
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(transport.preparations, 1);
+  state.stopping = true;
+  releasePrepare();
+
+  await assert.rejects(pending, BrokerWriteStoppingError);
+  assert.equal(transport.attempts, 0);
+  assert.equal(ledger.records.size, 0);
+  assert.equal(ledger.discardCount, 0);
+});
+
+test("request validation is refreshed after transport preparation before WAL persistence", async () => {
+  const ledger = new DeferredLedger();
+  const transport = new CountingTransport();
+  const state = { stopping: false };
+  let releasePrepare!: () => void;
+  transport.prepareWait = new Promise<void>((resolve) => { releasePrepare = resolve; });
+  let targetWorking = true;
+  let validations = 0;
+
+  const pending = coordinator(ledger, transport, state).execute(request({
+    validateFinal: () => {
+      validations += 1;
+      if (!targetWorking) throw new Error("TARGET_CHANGED_DURING_TRANSPORT_PREPARE");
+    },
+  }));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  targetWorking = false;
+  releasePrepare();
+
+  await assert.rejects(pending, /TARGET_CHANGED_DURING_TRANSPORT_PREPARE/);
+  assert.equal(validations, 2);
+  assert.equal(transport.attempts, 0);
   assert.equal(ledger.records.size, 0);
 });
