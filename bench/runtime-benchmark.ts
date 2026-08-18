@@ -6,10 +6,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { AUTOMATION_WORKING_ORDER_STATUSES } from "../src/automation/execution/orderWritePreflight.ts";
 import { orderInfo, type Json } from "../src/automation/policy/order.ts";
 import { parseRuntimePolicy } from "../src/automation/policy/runtime.ts";
-import {
-  buildPrimaryActiveOpeningOrderIds,
-  selectActiveOpeningOrders,
-} from "../src/automation/orderIndex.ts";
+import { RuntimeOrderIndexCache } from "../src/automation/orderRuntimeIndex.ts";
 import { atomicWriteJson } from "../src/utils/atomicJson.ts";
 import { ExecutionJournal } from "../src/automation/observability/executionJournal.ts";
 import { StreamerMessageSchema } from "../src/types/streamer.ts";
@@ -104,14 +101,19 @@ async function main(): Promise<void> {
   const groupKey = orderInfo(firstWorking)?.key;
   if (!groupKey) throw new Error("BENCHMARK_STRATEGY_KEY_INVALID");
 
+  const orderIndexCache = new RuntimeOrderIndexCache();
   for (let warmup = 0; warmup < 5; warmup += 1) {
-    buildPrimaryActiveOpeningOrderIds(corpus, policy, TRADING_DATE, working);
-    selectActiveOpeningOrders(corpus, groupKey, TRADING_DATE, policy.underlyings, working);
+    orderIndexCache.primaryOpeningOrderIds(corpus, warmup, policy, TRADING_DATE, working);
+    orderIndexCache.activeOpeningOrders(corpus, warmup, policy, TRADING_DATE, working, groupKey);
   }
   let startedAt = performance.now();
   for (let iteration = 0; iteration < ORDER_ITERATIONS; iteration += 1) {
-    buildPrimaryActiveOpeningOrderIds(corpus, policy, TRADING_DATE, working);
-    selectActiveOpeningOrders(corpus, groupKey, TRADING_DATE, policy.underlyings, working);
+    // A single authoritative order revision is normally queried by many
+    // strategies before the next REST/activity reconciliation. Force three
+    // rebuilds here so the benchmark measures both rebuild and cache-hit work.
+    const revision = Math.floor(iteration / 10);
+    orderIndexCache.primaryOpeningOrderIds(corpus, revision, policy, TRADING_DATE, working);
+    orderIndexCache.activeOpeningOrders(corpus, revision, policy, TRADING_DATE, working, groupKey);
   }
   const orderIndex = metric(ORDER_ITERATIONS * CORPUS_SIZE * 2, startedAt);
 

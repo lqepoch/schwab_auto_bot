@@ -28,7 +28,10 @@ test("local Replace projection cannot overwrite broker authority that won the re
 
   assert.match(block, /if \(!addOrder\(localOrder\(payload, replacementId\)\)\) return;/);
   assert.match(block, /const source = getOrder\(sourceId\);/);
-  assert.match(block, /if \(source && working\.has\(String\(source\.status\)\)\) source\.status = "REPLACED";/);
+  assert.match(
+    block,
+    /if \(source && working\.has\(String\(source\.status\)\)\) \{[\s\S]*?source\.status = "REPLACED";[\s\S]*?orderAuthorityRevision \+= 1;[\s\S]*?\}/,
+  );
   assert.ok(
     block.indexOf("if (!addOrder(localOrder(payload, replacementId))) return;")
       < block.indexOf("source.status = \"REPLACED\""),
@@ -40,7 +43,7 @@ test("local Cancel projection preserves a concurrently observed broker state", a
   const source = await runtimeSource();
   assert.match(
     source,
-    /const current = getOrder\(orderIdValue\);[\s\S]*?if \(current && working\.has\(String\(current\.status\)\)\) current\.status = "CANCELED";[\s\S]*?broker\.cancel\.accepted/,
+    /const current = getOrder\(orderIdValue\);[\s\S]*?if \(current && working\.has\(String\(current\.status\)\)\) \{[\s\S]*?current\.status = "CANCELED";[\s\S]*?orderAuthorityRevision \+= 1;[\s\S]*?\}[\s\S]*?broker\.cancel\.accepted/,
   );
   assert.doesNotMatch(source, /if \(current\) current\.status = "CANCELED";/);
 });
