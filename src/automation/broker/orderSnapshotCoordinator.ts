@@ -1,3 +1,5 @@
+import { brokerOrderId } from "./orderIdentity.ts";
+
 export type SnapshotScope = "full" | "fills";
 
 export type SnapshotState = Readonly<{
@@ -74,7 +76,9 @@ export class OrderSnapshotCoordinator<T> {
     this.onFailure = options.onFailure;
     this.clock = options.clock ?? { now: () => Date.now() };
     this.isStopping = options.isStopping ?? (() => false);
-    this.mergeKey = options.mergeKey ?? ((order) => String((order as { orderId?: unknown }).orderId ?? ""));
+    // Order snapshots are broker resources. Keep the default identity contract
+    // aligned with runtime authority and fail closed on missing/malformed IDs.
+    this.mergeKey = options.mergeKey ?? ((order) => brokerOrderId(order as Readonly<Record<string, unknown>>));
   }
 
   get state(): SnapshotState {
