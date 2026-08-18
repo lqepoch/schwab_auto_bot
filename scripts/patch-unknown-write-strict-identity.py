@@ -23,11 +23,20 @@ for old, new in anchors:
         raise SystemExit(f"UNKNOWN_WRITE_ANCHOR_MISMATCH count={count} anchor={old[:80]!r}")
     source = source.replace(old, new, 1)
 
+# Scope the mechanical replacement to reconcile(). The constructor's generic
+# default intentionally retains String(order.orderId ?? "") so the public
+# abstraction remains backward-compatible for callers that do not opt into the
+# strict Schwab broker identity contract.
+reconcile_anchor = "  async reconcile(orders: readonly BrokerOrderSnapshot[]): Promise<ReconciliationResult> {"
+if source.count(reconcile_anchor) != 1:
+    raise SystemExit("UNKNOWN_WRITE_RECONCILE_ANCHOR_MISMATCH")
+prefix, reconciliation = source.split(reconcile_anchor, 1)
 identity_anchor = 'String(order.orderId ?? "")'
-identity_count = source.count(identity_anchor)
+identity_count = reconciliation.count(identity_anchor)
 if identity_count != 5:
     raise SystemExit(f"UNKNOWN_WRITE_ORDER_ID_USAGE_MISMATCH:{identity_count}")
-source = source.replace(identity_anchor, "this.orderId(order)")
+reconciliation = reconciliation.replace(identity_anchor, "this.orderId(order)")
+source = prefix + reconcile_anchor + reconciliation
 state_path.write_text(source, encoding="utf-8")
 
 runtime_path = Path("src/automation/runtimeOrchestrator.ts")
