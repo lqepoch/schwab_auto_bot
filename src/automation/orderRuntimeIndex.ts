@@ -9,6 +9,7 @@ import { orderInfo, type Json } from "./policy/order.ts";
 import type { RuntimePolicy } from "./policy/runtime.ts";
 
 export type RuntimeOrderIndexSnapshot = Readonly<{
+  currentStrategyOrders: readonly Json[];
   activeOpeningOrdersByStrategy: ReadonlyMap<string, readonly Json[]>;
   activeClosingOrdersByStrategy: ReadonlyMap<string, readonly Json[]>;
   activeClosingOrders: readonly Json[];
@@ -55,20 +56,23 @@ export class RuntimeOrderIndexCache {
       && this.workingStatuses === workingStatuses
     ) return this.cached;
 
+    const currentStrategyOrders: Json[] = [];
     const activeOpeningOrdersByStrategy = new Map<string, Json[]>();
     const activeClosingOrdersByStrategy = new Map<string, Json[]>();
     const activeClosingOrders: Json[] = [];
     const primaryActiveOpeningOrdersByStrategy = new Map<string, Json>();
 
     for (const order of source) {
-      if (!workingStatuses.has(String(order.status))) continue;
-
       const meta = this.resolveInfo(order);
-      if (
+      const isCurrentStrategyOrder = Boolean(
         meta
         && meta.expiration === tradingDate
-        && policy.underlyings.has(meta.underlying)
-      ) {
+        && policy.underlyings.has(meta.underlying),
+      );
+      if (isCurrentStrategyOrder) currentStrategyOrders.push(order);
+      if (!workingStatuses.has(String(order.status))) continue;
+
+      if (isCurrentStrategyOrder && meta) {
         if (meta.opening) push(activeOpeningOrdersByStrategy, meta.key, order);
         if (meta.closing) {
           push(activeClosingOrdersByStrategy, meta.key, order);
@@ -98,6 +102,7 @@ export class RuntimeOrderIndexCache {
     }
 
     const snapshot: RuntimeOrderIndexSnapshot = {
+      currentStrategyOrders,
       activeOpeningOrdersByStrategy,
       activeClosingOrdersByStrategy,
       activeClosingOrders,
@@ -111,6 +116,17 @@ export class RuntimeOrderIndexCache {
     this.workingStatuses = workingStatuses;
     this.cached = snapshot;
     return snapshot;
+  }
+
+  currentOrders(
+    source: readonly Json[],
+    revision: number,
+    policy: RuntimePolicy,
+    tradingDate: string,
+    workingStatuses: ReadonlySet<string>,
+  ): readonly Json[] {
+    return this.snapshot(source, revision, policy, tradingDate, workingStatuses)
+      .currentStrategyOrders;
   }
 
   activeOpeningOrders(

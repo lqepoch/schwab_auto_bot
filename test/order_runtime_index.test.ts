@@ -46,7 +46,7 @@ function spread(
   };
 }
 
-test("caches active opening and closing views until authority revision changes", () => {
+test("caches current, active opening, and active closing views until authority revision changes", () => {
   const cache = new RuntimeOrderIndexCache();
   const opening = spread("101", 740, { price: 0.89 });
   const closing = spread("201", 740, { closing: true });
@@ -58,6 +58,7 @@ test("caches active opening and closing views until authority revision changes",
 
   const strategy = [...first.activeOpeningOrdersByStrategy.keys()][0];
   assert.ok(strategy);
+  assert.deepEqual(cache.currentOrders(source, 1, policy, tradingDate, working), [opening, closing]);
   assert.deepEqual(cache.activeOpeningOrders(source, 1, policy, tradingDate, working, strategy), [opening]);
   assert.deepEqual(cache.activeClosingOrders(source, 1, policy, tradingDate, working, strategy), [closing]);
   assert.deepEqual(cache.allActiveClosingOrders(source, 1, policy, tradingDate, working), [closing]);
@@ -67,6 +68,7 @@ test("caches active opening and closing views until authority revision changes",
   assert.equal(cache.snapshot(source, 1, policy, tradingDate, working), first);
   const refreshed = cache.snapshot(source, 2, policy, tradingDate, working);
   assert.notEqual(refreshed, first);
+  assert.deepEqual(cache.currentOrders(source, 2, policy, tradingDate, working), [opening, closing]);
   assert.deepEqual(cache.activeClosingOrders(source, 2, policy, tradingDate, working, strategy), []);
   assert.deepEqual(cache.allActiveClosingOrders(source, 2, policy, tradingDate, working), []);
 });
@@ -102,7 +104,7 @@ test("sorts active orders deterministically and selects one managed opening per 
   assert.equal(cache.primaryOpeningOrderIds(source, 1, policy, tradingDate, working).get(strategy), "101");
 });
 
-test("excludes terminal, foreign-date, and disallowed-underlying rows", () => {
+test("current strategy view retains terminal rows but excludes foreign-date and disallowed-underlying rows", () => {
   const cache = new RuntimeOrderIndexCache();
   const valid = spread("101", 742);
   const terminal = spread("102", 742, { status: "CANCELED" });
@@ -115,6 +117,7 @@ test("excludes terminal, foreign-date, and disallowed-underlying rows", () => {
   const source = [valid, terminal, old, otherUnderlying];
 
   const snapshot = cache.snapshot(source, 1, policy, tradingDate, working);
+  assert.deepEqual(snapshot.currentStrategyOrders.map((order) => order.orderId), ["101", "102"]);
   const active = [...snapshot.activeOpeningOrdersByStrategy.values()].flat();
   assert.deepEqual(active.map((order) => order.orderId), ["101"]);
   assert.deepEqual(snapshot.activeClosingOrders, []);
@@ -128,14 +131,20 @@ test("trading date participates in the cache key", () => {
   const first = cache.snapshot(source, 1, policy, tradingDate, working);
   const nextDate = cache.snapshot(source, 1, policy, "2026-08-19", working);
   assert.notEqual(nextDate, first);
+  assert.equal(nextDate.currentStrategyOrders.length, 0);
   assert.equal(nextDate.activeOpeningOrdersByStrategy.size, 0);
   assert.equal(nextDate.activeClosingOrders.length, 0);
   assert.equal(nextDate.primaryActiveOpeningOrders.length, 0);
   assert.equal(nextDate.primaryActiveOpeningOrderIds.size, 0);
 });
 
-test("an index rebuild resolves metadata once per working broker row", () => {
-  const source = [spread("101", 744), spread("102", 745), spread("201", 744, { closing: true })];
+test("an index rebuild resolves metadata exactly once per broker row", () => {
+  const source = [
+    spread("101", 744),
+    spread("102", 745),
+    spread("201", 744, { closing: true }),
+    spread("301", 744, { status: "FILLED" }),
+  ];
   let resolutions = 0;
   const cache = new RuntimeOrderIndexCache((order) => {
     resolutions += 1;
@@ -144,6 +153,7 @@ test("an index rebuild resolves metadata once per working broker row", () => {
 
   cache.snapshot(source, 1, policy, tradingDate, working);
   assert.equal(resolutions, source.length);
+  cache.currentOrders(source, 1, policy, tradingDate, working);
   cache.primaryOpeningOrders(source, 1, policy, tradingDate, working);
   cache.activeOpeningOrders(source, 1, policy, tradingDate, working, "missing");
   cache.allActiveClosingOrders(source, 1, policy, tradingDate, working);

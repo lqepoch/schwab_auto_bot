@@ -1119,14 +1119,11 @@ function recordRefreshSpreadSkip(order: Json, source: string): boolean {
 }
 
 function reportWorkingRefreshSpreadSkips(): void {
-  const today = newYorkDate();
-  for (const order of orders) {
+  for (const order of currentStrategyOrders()) {
     const meta = info(order);
     if (
       !working.has(String(order.status))
       || !meta
-      || meta.expiration !== today
-      || !policy.underlyings.has(meta.underlying)
       || !policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
     ) continue;
     recordRefreshSpreadSkip(order, "order-snapshot");
@@ -1479,7 +1476,7 @@ function rememberExitTemplate(strategy: string, order: Json): void {
 
 function reconcileExplorerSnapshot(): void {
   const liveByGroup = new Map<string, Set<string>>();
-  for (const order of orders) {
+  for (const order of currentStrategyOrders()) {
     const meta = managedOpening(order);
     if (!meta) continue;
     explorerTemplates.set(meta.key, order);
@@ -1570,6 +1567,16 @@ function activeClosingOrders(strategy: string): readonly Json[] {
     newYorkDate(),
     working,
     strategy,
+  );
+}
+
+function currentStrategyOrders(): readonly Json[] {
+  return runtimeOrderIndex.currentOrders(
+    orders,
+    orderAuthorityRevision,
+    policy,
+    newYorkDate(),
+    working,
   );
 }
 
@@ -1686,7 +1693,7 @@ function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template
           executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: "full-reconciliation-unavailable" });
           return;
         }
-        const stillWorking = orders.some((order) => working.has(String(order.status)) && info(order)?.closing && info(order)?.key === strategy);
+        const stillWorking = activeClosingOrders(strategy).length > 0;
         if (stillWorking) {
           executionJournal.record("order.stale-recreate.deferred", { direction: "closing", strategy, sourceOrderId: id, reason: "working-order-remains-after-reconciliation" });
           return;
@@ -1719,11 +1726,7 @@ function queueVerifiedStaleExitRecreate(strategy: string, source: Json, template
 function hasExitPriority(groupKey: string): boolean {
   if (policy.disableSellOrders) return false;
   if (liquidityExitRefreshes.has(groupKey)) return true;
-  return orders.some((order) => {
-    const meta = info(order);
-    return working.has(String(order.status)) && meta?.closing && meta.key === groupKey
-      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
-  });
+  return activeClosingOrders(groupKey).length > 0;
 }
 
 function isConfiguredExplorerGroup(groupKey: string): boolean {
@@ -1854,7 +1857,7 @@ async function executeExplorerAction(groupKey: string, action: ExplorerAction): 
 function detectExplorerFills(): void {
   const now = Date.now();
   const fillPriceSource = policy.repeatBuyAtOrderPrice ? "orderLimit" : "actualNet";
-  for (const order of orders) {
+  for (const order of currentStrategyOrders()) {
     const meta = managedOpening(order);
     if (!meta || order.status !== "FILLED") continue;
     const fill = policy.repeatBuyAtOrderPrice ? completeOrderLimitFill(order) : completeNetDebitFill(order);
@@ -2084,10 +2087,9 @@ async function fixedPriceRefreshRound(): Promise<boolean> {
 }
 
 function trackInventoryFillDeltas(): void {
-  const today = newYorkDate();
-  for (const order of orders) {
+  for (const order of currentStrategyOrders()) {
     const meta = info(order);
-    if (!meta || meta.expiration !== today || !policy.underlyings.has(meta.underlying)) continue;
+    if (!meta) continue;
     const id = orderId(order);
     const filled = Number(order.filledQuantity ?? 0);
     const previous = observedFillQuantities.get(id);
@@ -2165,12 +2167,9 @@ function availableFor(template: Json, current: Map<string, { long: number; short
 async function reconcilePositions(announce = true): Promise<void> {
   const current = await positions();
   const templates = new Map<string, Json>(exitTemplatesByStrategy);
-  for (const order of orders) {
+  for (const order of currentStrategyOrders()) {
     const meta = info(order);
-    if (
-      !meta || meta.expiration !== newYorkDate()
-      || !policy.underlyings.has(meta.underlying)
-    ) continue;
+    if (!meta) continue;
     if (!templates.has(meta.key) || meta.opening) {
       templates.set(meta.key, order);
       rememberExitTemplate(meta.key, order);
@@ -2280,34 +2279,31 @@ async function ensureFreshOrdersForExit(): Promise<boolean> {
 
 function exitTemplates(): Map<string, Json> {
   const latest = new Map<string, Json>();
-  for (const order of orders) {
+  const currentOrders = currentStrategyOrders();
+  for (const order of currentOrders) {
     const meta = info(order);
     if (
       order.status !== "FILLED" || !meta?.opening
-      || !policy.underlyings.has(meta.underlying)
-      || meta.expiration !== newYorkDate()
       || !policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
     ) continue;
     const previous = latest.get(meta.key);
     if (!previous || eventTime(order) > eventTime(previous)) latest.set(meta.key, order);
     recordOpeningFillLot(meta.key, order);
   }
-  for (const order of orders) {
+  for (const order of currentOrders) {
     const meta = info(order);
     if (
       meta?.closing && working.has(String(order.status))
-      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying)
       && policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
       && !latest.has(meta.key)
     ) {
       latest.set(meta.key, order);
     }
   }
-  for (const order of orders) {
+  for (const order of currentOrders) {
     const meta = info(order);
     if (
-      meta?.opening && meta.expiration === newYorkDate()
-      && policy.underlyings.has(meta.underlying)
+      meta?.opening
       && policy.isWithinStrikeRange(meta.underlying, meta.lowerStrike, meta.higherStrike)
       && (inventoryByStrategy.get(meta.key) ?? 0) > 0
       && !latest.has(meta.key)
