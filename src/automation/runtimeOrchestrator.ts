@@ -14,11 +14,8 @@ import { SchwabApiError } from "../utils/errors.ts";
 import { atomicWriteJson } from "../utils/atomicJson.ts";
 import { parseRuntimePolicy } from "./policy/runtime.ts";
 import { EXIT_ORDER_PRICE, orderInfo, orderPolicyViolation, type Json } from "./policy/order.ts";
-import {
-  buildPrimaryActiveOpeningOrderIds,
-  managedOpeningInfo,
-  selectActiveOpeningOrders,
-} from "./orderIndex.ts";
+import { managedOpeningInfo } from "./orderIndex.ts";
+import { RuntimeOrderIndexCache } from "./orderRuntimeIndex.ts";
 import { completeNetDebitFill, completeOrderLimitFill } from "./execution/fillPrice.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction } from "./execution/priceExplorer.ts";
 import { ExecutionJournal } from "./observability/executionJournal.ts";
@@ -312,6 +309,8 @@ const finalWriteGate = new PriorityGate();
 let accountHash = "";
 let orders: Json[] = [];
 const ordersById = new OrderLookup<Json>((order) => orderId(order));
+const runtimeOrderIndex = new RuntimeOrderIndexCache();
+let orderAuthorityRevision = 0;
 let polling = false;
 let fullSnapshotReconciled = false;
 const evaluatingExitStrategies = new Set<string>();
@@ -399,6 +398,7 @@ function replaceOrders(next: readonly Json[]): void {
   const snapshot = [...next];
   ordersById.replace(snapshot);
   orders = snapshot;
+  orderAuthorityRevision += 1;
 }
 function addOrder(order: Json): boolean {
   // An authoritative REST poll may observe a just-accepted order before the
@@ -406,6 +406,7 @@ function addOrder(order: Json): boolean {
   // race because it carries fresher status/execution metadata.
   if (!ordersById.addIfAbsent(order)) return false;
   orders.push(order);
+  orderAuthorityRevision += 1;
   return true;
 }
 function getOrder(orderIdValue: string): Json | undefined {
@@ -997,7 +998,10 @@ function applyLocalReplace(sourceId: string, payload: Json, replacementId: strin
   const source = getOrder(sourceId);
   // Never overwrite a broker-observed terminal or transitional state that
   // arrived while the Replace request was in flight.
-  if (source && working.has(String(source.status))) source.status = "REPLACED";
+  if (source && working.has(String(source.status))) {
+    source.status = "REPLACED";
+    orderAuthorityRevision += 1;
+  }
   observedFillQuantities.set(replacementId, 0);
   if (info(payload)?.closing) sellDue.set(replacementId, Date.now() + EXIT_REFRESH_MS);
 }
@@ -1308,7 +1312,10 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
   // A broker poll may have observed FILLED/REPLACED/PENDING_* while the Cancel
   // response was in flight. Preserve that fresher authority instead of
   // overwriting it with a local terminal projection.
-  if (current && working.has(String(current.status))) current.status = "CANCELED";
+  if (current && working.has(String(current.status))) {
+    current.status = "CANCELED";
+    orderAuthorityRevision += 1;
+  }
   executionJournal.record("broker.cancel.accepted", { key, orderId: orderIdValue, path });
 }
 
@@ -1539,12 +1546,36 @@ function queueExplorerActions(groupKey: string, actions: ExplorerAction[]): void
   }
 }
 
-function activeOpeningOrders(groupKey: string): Json[] {
-  return selectActiveOpeningOrders(orders, groupKey, newYorkDate(), policy.underlyings, working);
+function activeOpeningOrders(groupKey: string): readonly Json[] {
+  return runtimeOrderIndex.activeOpeningOrders(
+    orders,
+    orderAuthorityRevision,
+    policy,
+    newYorkDate(),
+    working,
+    groupKey,
+  );
 }
 
-function primaryActiveOpeningOrderIds(): Map<string, string> {
-  return buildPrimaryActiveOpeningOrderIds(orders, policy, newYorkDate(), working);
+function activeClosingOrders(strategy: string): readonly Json[] {
+  return runtimeOrderIndex.activeClosingOrders(
+    orders,
+    orderAuthorityRevision,
+    policy,
+    newYorkDate(),
+    working,
+    strategy,
+  );
+}
+
+function primaryActiveOpeningOrderIds(): ReadonlyMap<string, string> {
+  return runtimeOrderIndex.primaryOpeningOrderIds(
+    orders,
+    orderAuthorityRevision,
+    policy,
+    newYorkDate(),
+    working,
+  );
 }
 
 function queueFixedPriceRefresh(
@@ -2345,12 +2376,8 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
   if (policy.disableSellOrders) return;
   const now = Date.now();
   const inventory = inventoryByStrategy.get(strategy) ?? 0;
-  const activeClosingOrders = (): Json[] => orders.filter((order) => {
-    const meta = info(order);
-    return working.has(String(order.status)) && meta?.closing && meta.key === strategy
-      && meta.expiration === newYorkDate() && policy.underlyings.has(meta.underlying);
-  }).sort((left, right) => eventTime(left) - eventTime(right) || orderId(left).localeCompare(orderId(right)));
-  const active = activeClosingOrders();
+  const currentActiveClosingOrders = (): readonly Json[] => activeClosingOrders(strategy);
+  const active = currentActiveClosingOrders();
   if (inventory <= 0) {
     for (const sell of active) queueSellCancel(strategy, sell, "empty-inventory");
     return;
@@ -2461,7 +2488,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
   if (Date.now() - lastFullOrderPollAt >= 5_000 && !await ensureFreshOrdersForExit()) return;
   // A full reconciliation may have completed while its REST request was in
   // flight.  Do not enqueue a stale sell-submit decision.
-  if (!maySubmitExit(activeClosingOrders().length, sellSubmitInFlight.has(strategy))) {
+  if (!maySubmitExit(currentActiveClosingOrders().length, sellSubmitInFlight.has(strategy))) {
     executionJournal.record("exit.submit.skipped", { strategy, reason: "working-sell-found-after-reconciliation" });
     return;
   }
@@ -2481,7 +2508,7 @@ async function evaluateExitStrategy(strategy: string, template: Json, forceStart
           });
           return;
         }
-        const current = activeClosingOrders();
+        const current = currentActiveClosingOrders();
         if (current.length > 0) {
           executionJournal.record("exit.submit.skipped", {
             strategy, reason: "working-sell-found-before-preview", activeWorkingSells: current.map(orderId),
