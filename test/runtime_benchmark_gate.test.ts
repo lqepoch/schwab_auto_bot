@@ -71,16 +71,17 @@ function run(args: string[]) {
   });
 }
 
-test("PR profile gates stable local metrics while treating one shared-runner event-loop spike as observation", async () => {
+test("PR profile observes shared-runner event-loop and durable persistence latency", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-bench-gate-"));
   try {
     const baselinePath = join(root, "baseline.json");
     const currentPath = join(root, "current.json");
     await writeFile(baselinePath, JSON.stringify(baseline()), "utf8");
-    await writeFile(currentPath, JSON.stringify(sample({ eventLoop: 50 })), "utf8");
+    await writeFile(currentPath, JSON.stringify(sample({ eventLoop: 50, atomicPersistence: 500 })), "utf8");
     const result = run(["--baseline", baselinePath, "--current", currentPath]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /OBSERVE eventLoop\.p99Ms/);
+    assert.match(result.stdout, /OBSERVE atomicPersistence\.wallMs/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -101,19 +102,19 @@ test("PR profile still fails a deterministic hot-path regression", async () => {
   }
 });
 
-test("PR multi-sample profile tolerates one filesystem outlier while gating the median", async () => {
+test("default multi-sample profile keeps filesystem latency as evidence instead of a portable SLO", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-bench-gate-"));
   try {
     const baselinePath = join(root, "baseline.json");
     const samplesPath = join(root, "samples");
     await mkdir(samplesPath);
     await writeFile(baselinePath, JSON.stringify(baseline()), "utf8");
-    for (const [index, value] of [10, 250, 12].entries()) {
+    for (const [index, value] of [250, 500, 900].entries()) {
       await writeFile(join(samplesPath, `${index}.json`), JSON.stringify(sample({ atomicPersistence: value })), "utf8");
     }
     const result = run(["--baseline", baselinePath, "--current-dir", samplesPath, "--min-samples", "3"]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /PASS atomicPersistence\.wallMs sampleCount=3 currentMedian=12ms/);
+    assert.match(result.stdout, /OBSERVE atomicPersistence\.wallMs sampleCount=3 currentMedian=500ms/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -137,7 +138,7 @@ test("minimum sample contract rejects an accidentally undersized benchmark direc
   }
 });
 
-test("scheduled profile requires at least five samples and gates the median event-loop p99", async () => {
+test("event-loop gate requires at least five samples and gates the median p99", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-bench-gate-"));
   try {
     const baselinePath = join(root, "baseline.json");
@@ -155,7 +156,7 @@ test("scheduled profile requires at least five samples and gates the median even
   }
 });
 
-test("scheduled profile tolerates isolated noisy-neighbor spikes when the five-sample median stays within SLO", async () => {
+test("event-loop gate tolerates isolated noisy-neighbor spikes when the five-sample median stays within SLO", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-bench-gate-"));
   try {
     const baselinePath = join(root, "baseline.json");
@@ -168,6 +169,52 @@ test("scheduled profile tolerates isolated noisy-neighbor spikes when the five-s
     const result = run(["--baseline", baselinePath, "--current-dir", samplesPath, "--min-samples", "5", "--gate-event-loop"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /PASS eventLoop\.p99Ms sampleCount=5 currentMedian=25ms/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("atomic persistence gate requires five samples before enforcing a host-calibrated SLO", async () => {
+  const root = await mkdtemp(join(tmpdir(), "schwab-bench-gate-"));
+  try {
+    const baselinePath = join(root, "baseline.json");
+    const samplesPath = join(root, "samples");
+    await mkdir(samplesPath);
+    await writeFile(baselinePath, JSON.stringify(baseline()), "utf8");
+    for (const index of [0, 1, 2]) {
+      await writeFile(join(samplesPath, `${index}.json`), JSON.stringify(sample({ atomicPersistence: 150 })), "utf8");
+    }
+    const result = run([
+      "--baseline", baselinePath,
+      "--current-dir", samplesPath,
+      "--min-samples", "3",
+      "--gate-atomic-persistence",
+    ]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ATOMIC_PERSISTENCE_GATE_REQUIRES_5_SAMPLES:3/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("host-calibrated atomic persistence gate fails a five-sample median above its limit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "schwab-bench-gate-"));
+  try {
+    const baselinePath = join(root, "baseline.json");
+    const samplesPath = join(root, "samples");
+    await mkdir(samplesPath);
+    await writeFile(baselinePath, JSON.stringify(baseline()), "utf8");
+    for (const [index, value] of [90, 120, 150, 180, 240].entries()) {
+      await writeFile(join(samplesPath, `${index}.json`), JSON.stringify(sample({ atomicPersistence: value })), "utf8");
+    }
+    const result = run([
+      "--baseline", baselinePath,
+      "--current-dir", samplesPath,
+      "--min-samples", "5",
+      "--gate-atomic-persistence",
+    ]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /FAIL atomicPersistence\.wallMs sampleCount=5 currentMedian=150ms/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
