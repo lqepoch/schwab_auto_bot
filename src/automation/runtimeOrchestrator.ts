@@ -586,9 +586,9 @@ async function settleUnknownWrite(
   }
 }
 
-async function reconcileUnknownWritesAfterFullSnapshot(): Promise<void> {
+async function reconcileUnknownWritesAfterFullSnapshot(snapshot: readonly Json[] = orders): Promise<void> {
   try {
-    const result = await unknownWriteReconciliation.reconcile(orders);
+    const result = await unknownWriteReconciliation.reconcile(snapshot);
   for (const record of result.resolved) {
     reportedUnknownPending.delete(record.id);
     executionJournal.record("broker.write.unknown-reconciled", {
@@ -704,40 +704,43 @@ const brokerWriteCoordinator = new BrokerWriteCoordinator({
   }),
 });
 
+async function fetchOrderRange(
+  fromEnteredTime: string,
+  toEnteredTime: string,
+  priority: Priority,
+  status?: "FILLED",
+): Promise<Json[]> {
+  const query = new URLSearchParams({
+    fromEnteredTime,
+    toEnteredTime,
+    maxResults: "3000",
+  });
+  if (status) query.set("status", status);
+  const response = await api(`/trader/v1/accounts/${accountHash}/orders?${query}`, {}, priority);
+  if (!Array.isArray(response.body)) throw new Error("订单快照不是数组");
+  return flatten(response.body);
+}
+
 const orderSnapshotCoordinator = new OrderSnapshotCoordinator<Json>({
   fetch: async (scope, priority) => {
     const now = new Date();
     const lookbackMs = scope === "full" ? DEFAULT_FULL_ORDER_LOOKBACK_MS : 5 * 60_000;
-    const fetchRange = async (
-      fromEnteredTime: string,
-      toEnteredTime: string,
-      status?: "FILLED",
-    ): Promise<Json[]> => {
-      const query = new URLSearchParams({
-        fromEnteredTime,
-        toEnteredTime,
-        maxResults: "3000",
-      });
-      if (status) query.set("status", status);
-      const response = await api(`/trader/v1/accounts/${accountHash}/orders?${query}`, {}, priority);
-      if (!Array.isArray(response.body)) throw new Error("订单快照不是数组");
-      return flatten(response.body);
-    };
-
-    const primary = await fetchRange(
+    return fetchOrderRange(
       new Date(now.getTime() - lookbackMs).toISOString(),
       now.toISOString(),
+      priority,
       scope === "fills" ? "FILLED" : undefined,
     );
-    if (scope !== "full") return primary;
-
+  },
+  reconciliationSupplement: async (authoritative, priority) => {
+    const now = new Date();
     const recoveryPlan = planUnknownWriteRecovery(
       unknownWriteReconciliation.pending(),
       now.getTime(),
-      lookbackMs,
+      DEFAULT_FULL_ORDER_LOOKBACK_MS,
     );
     if (recoveryPlan.targetOrderIds.length === 0 && recoveryPlan.historyWindows.length === 0) {
-      return primary;
+      return [];
     }
 
     executionJournal.record("broker.write.recovery-read-plan", {
@@ -747,9 +750,9 @@ const orderSnapshotCoordinator = new OrderSnapshotCoordinator<Json>({
     });
 
     const recovered: Json[] = [];
-    const primaryIds = new Set(primary.map(orderId));
+    const authoritativeIds = new Set(authoritative.map(orderId));
     for (const targetOrderId of recoveryPlan.targetOrderIds) {
-      if (primaryIds.has(targetOrderId)) continue;
+      if (authoritativeIds.has(targetOrderId)) continue;
       const response = await api(
         `/trader/v1/accounts/${accountHash}/orders/${encodeURIComponent(targetOrderId)}`,
         {},
@@ -762,17 +765,15 @@ const orderSnapshotCoordinator = new OrderSnapshotCoordinator<Json>({
       recovered.push(...flatten(values as Json[]));
     }
     for (const window of recoveryPlan.historyWindows) {
-      recovered.push(...await fetchRange(window.fromEnteredTime, window.toEnteredTime));
+      recovered.push(...await fetchOrderRange(
+        window.fromEnteredTime,
+        window.toEnteredTime,
+        priority,
+      ));
     }
-
-    // Historical recovery rows exist only to reconcile durable unknown writes.
-    // If they overlap the ordinary snapshot, the current full-window row wins.
-    const merged = new Map<string, Json>();
-    for (const order of recovered) merged.set(orderId(order), order);
-    for (const order of primary) merged.set(orderId(order), order);
-    return [...merged.values()];
+    return recovered;
   },
-  reconcileUnknownWrites: async () => reconcileUnknownWritesAfterFullSnapshot(),
+  reconcileUnknownWrites: async (snapshot) => reconcileUnknownWritesAfterFullSnapshot(snapshot),
   onAuthoritativeReplaced: async (incoming) => {
     orders = [...incoming];
   },

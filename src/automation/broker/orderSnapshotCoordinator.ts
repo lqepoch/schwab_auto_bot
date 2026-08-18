@@ -14,8 +14,18 @@ export type SnapshotClock = Readonly<{
 
 export type SnapshotProvider<T> = (scope: SnapshotScope, priority: 0 | 1 | 2 | 3) => Promise<readonly T[]>;
 
+export type ReconciliationSupplementProvider<T> = (
+  authoritative: readonly T[],
+  priority: 0 | 1 | 2 | 3,
+) => Promise<readonly T[]>;
+
 export type OrderSnapshotCoordinatorOptions<T> = Readonly<{
   fetch: SnapshotProvider<T>;
+  /**
+   * Optional historical/exact rows used only to reconcile durable unknown
+   * writes. These rows never enter the live authoritative order snapshot.
+   */
+  reconciliationSupplement?: ReconciliationSupplementProvider<T>;
   reconcileUnknownWrites: (orders: readonly T[]) => Promise<void>;
   onAuthoritativeReplaced?: (orders: readonly T[], state: SnapshotState) => void | Promise<void>;
   onFullReconciled?: (orders: readonly T[], state: SnapshotState) => void | Promise<void>;
@@ -37,6 +47,7 @@ export type OrderSnapshotCoordinatorOptions<T> = Readonly<{
  */
 export class OrderSnapshotCoordinator<T> {
   private readonly fetch: SnapshotProvider<T>;
+  private readonly reconciliationSupplement?: ReconciliationSupplementProvider<T>;
   private readonly reconcileUnknownWrites: (orders: readonly T[]) => Promise<void>;
   private readonly onAuthoritativeReplaced?: (orders: readonly T[], state: SnapshotState) => void | Promise<void>;
   private readonly onFullReconciled?: (orders: readonly T[], state: SnapshotState) => void | Promise<void>;
@@ -55,6 +66,7 @@ export class OrderSnapshotCoordinator<T> {
 
   constructor(options: OrderSnapshotCoordinatorOptions<T>) {
     this.fetch = options.fetch;
+    this.reconciliationSupplement = options.reconciliationSupplement;
     this.reconcileUnknownWrites = options.reconcileUnknownWrites;
     this.onAuthoritativeReplaced = options.onAuthoritativeReplaced;
     this.onFullReconciled = options.onFullReconciled;
@@ -110,7 +122,19 @@ export class OrderSnapshotCoordinator<T> {
       this.authoritativeOrders = incoming;
       this.generationValue += 1;
       await this.onAuthoritativeReplaced?.(incoming, this.snapshotState());
-      await this.reconcileUnknownWrites(incoming);
+      let reconciliationOrders: readonly T[] = incoming;
+      if (this.reconciliationSupplement) {
+        const supplement = [...await this.reconciliationSupplement(incoming, priority)];
+        if (supplement.length > 0) {
+          // Recovery-only rows are merged for reconciliation evidence, with the
+          // ordinary current snapshot winning duplicate IDs. They never become
+          // authoritative orders consumed by trading policy or execution logic.
+          const merged = new Map(supplement.map((order) => [this.mergeKey(order), order]));
+          for (const order of incoming) merged.set(this.mergeKey(order), order);
+          reconciliationOrders = [...merged.values()];
+        }
+      }
+      await this.reconcileUnknownWrites(reconciliationOrders);
       if (this.fillsDuringFull.size > 0) {
         const merged = new Map(incoming.map((order) => [this.mergeKey(order), order]));
         for (const order of this.fillsDuringFull.values()) merged.set(this.mergeKey(order), order);
