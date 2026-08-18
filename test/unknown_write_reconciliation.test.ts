@@ -687,6 +687,96 @@ test("successful DELETE completion clears the WAL without requiring Location", a
   }
 });
 
+test("Replace unknown resolves when the exact matching source becomes terminal without REPLACED", async (t) => {
+  for (const status of ["CANCELED", "CANCELLED", "FILLED", "REJECTED", "EXPIRED"]) {
+    await t.test(status, async () => {
+      const { root, store } = await makeStore();
+      try {
+        await store.recordFailure({
+          operation: "REPLACE_ORDER",
+          method: "PUT",
+          key: `replace:source:${status}`,
+          path: "/trader/v1/accounts/hash/orders/source",
+          payload: order("successor", "WORKING", "0.91"),
+          targetOrderId: "source",
+          targetOrder: order("source", "WORKING", "0.90"),
+          baselineOrderIds: ["source"],
+          preSendAt: "2026-08-12T00:00:00.000Z",
+          status: 503,
+          reason: "server-error",
+        });
+        const result = await store.reconcile([order("source", status, "0.90")]);
+        assert.equal(result.resolved.length, 1);
+        assert.equal(result.pending.length, 0);
+        assert.equal(store.hasPending(), false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("Replace unknown remains pending while the exact source can still be replaced", async (t) => {
+  for (const status of ["WORKING", "QUEUED", "PENDING_REPLACE", "PENDING_CANCEL", "UNKNOWN"]) {
+    await t.test(status, async () => {
+      const { root, store } = await makeStore();
+      try {
+        await store.recordFailure({
+          operation: "REPLACE_ORDER",
+          method: "PUT",
+          key: `replace:source:${status}`,
+          path: "/trader/v1/accounts/hash/orders/source",
+          payload: order("successor", "WORKING", "0.91"),
+          targetOrderId: "source",
+          targetOrder: order("source", "WORKING", "0.90"),
+          baselineOrderIds: ["source"],
+          preSendAt: "2026-08-12T00:00:00.000Z",
+          status: 503,
+          reason: "server-error",
+        });
+        const result = await store.reconcile([order("source", status, "0.90")]);
+        assert.equal(result.resolved.length, 0);
+        assert.equal(result.pending[0]?.matchingOrderCount, 0);
+        assert.equal(store.hasPending(), true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("REPLACED source still requires one unique matching successor", async () => {
+  const { root, store } = await makeStore();
+  try {
+    await store.recordFailure({
+      operation: "REPLACE_ORDER",
+      method: "PUT",
+      key: "replace:source",
+      path: "/trader/v1/accounts/hash/orders/source",
+      payload: order("successor", "WORKING", "0.91"),
+      targetOrderId: "source",
+      targetOrder: order("source", "WORKING", "0.90"),
+      baselineOrderIds: ["source"],
+      preSendAt: "2026-08-12T00:00:00.000Z",
+      status: 503,
+      reason: "server-error",
+    });
+    const sourceOnly = await store.reconcile([order("source", "REPLACED", "0.90")]);
+    assert.equal(sourceOnly.resolved.length, 0);
+    assert.equal(sourceOnly.pending[0]?.matchingOrderCount, 0);
+    assert.equal(store.hasPending(), true);
+
+    const resolved = await store.reconcile([
+      order("source", "REPLACED", "0.90"),
+      order("successor", "WORKING", "0.91"),
+    ]);
+    assert.equal(resolved.resolved.length, 1);
+    assert.equal(store.hasPending(), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a Replace source fingerprint mismatch remains pending despite a unique successor", async () => {
   const { root, store } = await makeStore();
   try {
