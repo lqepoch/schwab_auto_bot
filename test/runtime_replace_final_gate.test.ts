@@ -14,7 +14,8 @@ test("runtime wires live Replace source validation into BrokerWriteCoordinator",
 
   assert.match(requestBlock, /targetOrder:\s*replaceTargetOrderId/);
   assert.match(requestBlock, /validateFinal:\s*replaceTargetOrderId/);
-  assert.match(requestBlock, /orders\.find\(\(order\) => orderId\(order\) === replaceTargetOrderId\)/);
+  assert.match(requestBlock, /targetOrder:[\s\S]*getOrder\(replaceTargetOrderId\)/);
+  assert.match(requestBlock, /const currentSource = getOrder\(replaceTargetOrderId\)/);
   assert.match(requestBlock, /replacementSourceViolation\(currentSource, payload\)/);
   assert.match(requestBlock, /if \(violation\) throw new Error\(violation\)/);
 });
