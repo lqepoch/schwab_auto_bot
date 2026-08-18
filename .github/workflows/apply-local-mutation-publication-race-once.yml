@@ -1,0 +1,68 @@
+name: Apply Local Mutation Publication Race Once
+
+on:
+  push:
+    branches:
+      - fix/local-mutation-publication-race-20260818
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message != 'fix: preserve broker authority during local mutation publication'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: fix/local-mutation-publication-race-20260818
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Apply local mutation publication patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-local-mutation-publication-race.py
+          rm scripts/patch-local-mutation-publication-race.py
+
+      - name: Validate mutation publication contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          npm run lint:deadcode
+          pwsh -NoProfile -File ./test/hot_switch_identity.test.ps1
+          mkdir -p .artifacts/runtime-benchmark
+          for run in 1 2 3; do
+            npm run benchmark:runtime -- --output ".artifacts/runtime-benchmark/run-${run}.json" >/dev/null
+          done
+          npm run benchmark:runtime:check -- --baseline bench/runtime-baseline.json --current-dir .artifacts/runtime-benchmark --min-samples 3
+          rm -rf .artifacts/runtime-benchmark
+          git diff --check
+          grep -q 'function addOrder(order: Json): boolean' src/automation/runtimeOrchestrator.ts
+          grep -q 'if (!addOrder(localOrder(payload, id))) return;' src/automation/runtimeOrchestrator.ts
+          grep -q 'if (!addOrder(localOrder(payload, replacementId))) return;' src/automation/runtimeOrchestrator.ts
+          grep -q 'if (current && working.has(String(current.status))) current.status = "CANCELED";' src/automation/runtimeOrchestrator.ts
+          ! grep -q 'if (current) current.status = "CANCELED";' src/automation/runtimeOrchestrator.ts
+
+      - name: Commit validated product changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: preserve broker authority during local mutation publication'
+          git push origin HEAD:fix/local-mutation-publication-race-20260818
