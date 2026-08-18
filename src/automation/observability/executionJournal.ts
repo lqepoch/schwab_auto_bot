@@ -11,6 +11,10 @@ export type ExecutionEvent = {
 /**
  * A per-run append-only audit stream. Events are serialized so readers never see
  * interleaved JSON records even when stream reconciliation and writes overlap.
+ *
+ * Any serialization or persistence failure is sticky for the lifetime of the
+ * journal: a later successful append cannot restore an audit event that was
+ * already lost. flush() therefore remains fail-closed after the first gap.
  */
 export class ExecutionJournal {
   readonly path: string;
@@ -18,6 +22,7 @@ export class ExecutionJournal {
   private tail = Promise.resolve();
   private directoryReady: Promise<void> | null = null;
   private readonly onFailure: (error: unknown) => void;
+  private persistenceFailure: unknown = null;
 
   constructor(root: string, runId: string, onFailure: (error: unknown) => void) {
     this.runId = runId;
@@ -27,19 +32,37 @@ export class ExecutionJournal {
   }
 
   record(event: string, data: Record<string, unknown> = {}): void {
-    const line = `${JSON.stringify({
-      at: new Date().toISOString(),
-      runId: this.runId,
-      event,
-      data: sanitizeJournalValue(data, "", new WeakSet<object>()) as Record<string, unknown>,
-    } satisfies ExecutionEvent)}\n`;
+    let line: string;
+    try {
+      line = `${JSON.stringify({
+        at: new Date().toISOString(),
+        runId: this.runId,
+        event,
+        data: sanitizeJournalValue(data, "", new WeakSet<object>()) as Record<string, unknown>,
+      } satisfies ExecutionEvent)}\n`;
+    } catch (error) {
+      this.noteFailure(error);
+      return;
+    }
+
     const write = this.tail.then(async () => {
       await this.ensureDirectory();
       await appendFile(this.path, line, "utf8");
     });
     this.tail = write.catch((error) => {
-      this.onFailure(error);
+      this.noteFailure(error);
     });
+  }
+
+  private noteFailure(error: unknown): void {
+    if (this.persistenceFailure !== null) return;
+    this.persistenceFailure = error;
+    try {
+      this.onFailure(error);
+    } catch {
+      // Reporting a journal failure must not replace the original durability
+      // fault or poison the serialized append tail.
+    }
   }
 
   private ensureDirectory(): Promise<void> {
@@ -53,8 +76,19 @@ export class ExecutionJournal {
     return this.directoryReady;
   }
 
+  get failed(): boolean {
+    return this.persistenceFailure !== null;
+  }
+
+  assertHealthy(): void {
+    if (this.persistenceFailure !== null) {
+      throw new Error("EXECUTION_JOURNAL_PERSISTENCE_FAILED", { cause: this.persistenceFailure });
+    }
+  }
+
   async flush(): Promise<void> {
     await this.tail;
+    this.assertHealthy();
   }
 }
 
