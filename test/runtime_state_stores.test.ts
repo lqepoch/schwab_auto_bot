@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -96,6 +96,30 @@ test("exit-template persistence filters invalid input and deep-snapshots nested 
     const persisted = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(persisted.strategy.orderLegCollection[0].instruction, "BUY_TO_OPEN");
     assert.equal(persisted.strategy.orderLegCollection[0].instrument.symbol, "QQQ_TEST");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("flush surfaces an unresolved write fault and a later complete snapshot heals the queue", async () => {
+  const root = await tempRoot();
+  const statePath = path.join(root, "blocked-state");
+  let failures = 0;
+  try {
+    await mkdir(statePath);
+    const store = new FixedPriceCycleStateStore(statePath, {
+      readOnly: false,
+      onWriteFailure: () => { failures += 1; },
+    });
+
+    store.save(new Set(["lost-if-ignored"]));
+    await assert.rejects(store.flush());
+    assert.equal(failures, 1);
+
+    await rm(statePath, { recursive: true, force: true });
+    store.save(new Set(["healed"]));
+    await store.flush();
+    assert.deepEqual([...await store.load()], ["healed"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
