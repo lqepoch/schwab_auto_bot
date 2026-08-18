@@ -66,7 +66,14 @@ const TERMINAL_CANCEL_TARGET_STATUSES = new Set(["CANCELED", "CANCELLED", "FILLE
 const SAFE_PATH_SEGMENT = "/accounts/[REDACTED]";
 const BROKER_CLOCK_SKEW_MS = 5_000;
 const BROKER_MATCH_WINDOW_MS = 60_000;
-const REPLACE_SOURCE_TERMINAL_STATUSES = new Set(["REPLACED"]);
+const REPLACE_SOURCE_APPLIED_STATUS = "REPLACED";
+const REPLACE_SOURCE_NONREPLACE_TERMINAL_STATUSES = new Set([
+  "CANCELED",
+  "CANCELLED",
+  "FILLED",
+  "REJECTED",
+  "EXPIRED",
+]);
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -387,11 +394,25 @@ export class UnknownWriteReconciliation {
         const sourceMatches = orders.filter((order) => String(order.orderId ?? "") === record.targetOrderId);
         const source = sourceMatches.length === 1 ? sourceMatches[0] : undefined;
         const sourceStatus = String(source?.status ?? "").toUpperCase();
-        if (!source || !REPLACE_SOURCE_TERMINAL_STATUSES.has(sourceStatus) || record.targetFingerprint === null || fingerprintOrder(source) !== record.targetFingerprint) {
+        if (!source || record.targetFingerprint === null || fingerprintOrder(source) !== record.targetFingerprint) {
           candidates.set(record.id, []);
           pendingReason.set(record.id, "no-unique-match");
           continue;
         }
+        if (REPLACE_SOURCE_NONREPLACE_TERMINAL_STATUSES.has(sourceStatus)) {
+          // The exact source is durably terminal without becoming REPLACED.
+          // A replayed PUT cannot be valid anymore, so the source itself is
+          // sufficient proof to retire this unknown Replace intent.
+          candidates.set(record.id, [source]);
+          continue;
+        }
+        if (sourceStatus !== REPLACE_SOURCE_APPLIED_STATUS) {
+          candidates.set(record.id, []);
+          pendingReason.set(record.id, "no-unique-match");
+          continue;
+        }
+        // REPLACED proves the source transition, but the successor still has
+        // to match this request uniquely before the unknown intent is cleared.
       }
       const matches = orders.filter((order) => {
         const orderId = String(order.orderId ?? "");
