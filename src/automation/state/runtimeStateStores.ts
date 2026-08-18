@@ -22,6 +22,7 @@ class SerializedJsonState<T> {
   private readonly encode: (value: T) => unknown;
   private readonly onWriteFailure: RuntimeStateWriteFailureHandler;
   private writeTail: Promise<void> = Promise.resolve();
+  private writeFailure: { error: unknown } | null = null;
 
   constructor(options: SerializedJsonStateOptions<T>) {
     this.path = options.path;
@@ -47,8 +48,14 @@ class SerializedJsonState<T> {
     // change before the prior disk write has finished.
     const snapshot = this.encode(value);
     this.writeTail = this.writeTail
-      .then(() => atomicWriteJson(this.path, snapshot))
+      .then(async () => {
+        await atomicWriteJson(this.path, snapshot);
+        // A complete state snapshot supersedes an earlier failed write. Once
+        // the newest authoritative view is durable, the queue is healthy again.
+        this.writeFailure = null;
+      })
       .catch((error) => {
+        this.writeFailure = { error };
         try {
           this.onWriteFailure(error);
         } catch {
@@ -60,6 +67,7 @@ class SerializedJsonState<T> {
 
   async flush(): Promise<void> {
     await this.writeTail;
+    if (this.writeFailure) throw this.writeFailure.error;
   }
 }
 
