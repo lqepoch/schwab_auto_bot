@@ -106,10 +106,8 @@ const executionJournal = new ExecutionJournal(root, runId, (error) => {
   host.stderr.write(`${new Date().toISOString()} EXECUTION_JOURNAL_WRITE_FAILED error=${safeRuntimeError(error)}\n`);
   executionJournalStopHandler?.();
 });
-let operationalAuditPersistenceFault: { source: string; error: unknown } | null = null;
 let operationalAuditStopHandler: ((source: string) => void) | null = null;
 function noteOperationalAuditFailure(source: string, error: unknown): void {
-  operationalAuditPersistenceFault ??= { source, error };
   host.stderr.write(`${new Date().toISOString()} OPERATIONAL_AUDIT_WRITE_FAILED source=${source} error=${safeRuntimeError(error)}\n`);
   operationalAuditStopHandler?.(source);
 }
@@ -301,9 +299,6 @@ if (executionJournalPersistenceFault !== null) executionJournalStopHandler();
 operationalAuditStopHandler = (source) => {
   requestStop(`operational-audit-persistence-failed:${source}`);
 };
-if (operationalAuditPersistenceFault !== null) {
-  operationalAuditStopHandler(operationalAuditPersistenceFault.source);
-}
 let controlCheckRunning = false;
 let activityRestTimer: NodeJS.Timeout | null = null;
 const runtimeIntervals: NodeJS.Timeout[] = [];
