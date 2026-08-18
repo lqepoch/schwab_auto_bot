@@ -58,6 +58,7 @@ import {
   refreshSpreadWidth,
 } from "./policy/refreshOrder.ts";
 import { BrokerWriteCoordinator } from "./broker/writeCoordinator.ts";
+import { brokerOrderId } from "./broker/orderIdentity.ts";
 import {
   ACTIVE_ORDER_QUERY_LIMIT,
   ACTIVE_ORDER_STATUS_FILTERS,
@@ -385,7 +386,7 @@ function flatten(source: any[]): Json[] {
 
 function info(order: Json) { return orderInfo(order); }
 
-function orderId(order: Json): string { return String(order.orderId); }
+function orderId(order: Json): string { return brokerOrderId(order); }
 function quantity(order: Json): number { return Number(order.quantity ?? 0); }
 function remaining(order: Json): number {
   return Math.max(0, quantity(order) - Number(order.filledQuantity ?? 0));
