@@ -1,0 +1,63 @@
+name: Apply Recovery Authority Isolation Once
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout staging branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: refactor/enterprise-convergence-20260817
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Apply recovery authority isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-recovery-authority-isolation.py
+          rm scripts/patch-recovery-authority-isolation.py
+
+      - name: Validate reconciliation-only recovery rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          pwsh -NoProfile -File ./test/hot_switch_identity.test.ps1
+          npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+          git diff --check
+          grep -q 'reconciliationSupplement' src/automation/broker/orderSnapshotCoordinator.ts
+          grep -q 'reconciliationSupplement: async (authoritative, priority)' src/automation/runtimeOrchestrator.ts
+          grep -q 'reconcileUnknownWritesAfterFullSnapshot(snapshot)' src/automation/runtimeOrchestrator.ts
+          grep -q 'never enter authoritative orders' test/order_snapshot_reconciliation_supplement.test.ts
+
+      - name: Commit validated change and remove workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'LQ'
+          git config user.email 'lqepoch@126.com'
+          git rm .github/workflows/apply-recovery-authority-isolation-once.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: isolate unknown-write recovery rows from live authority'
+          git push origin HEAD:refactor/enterprise-convergence-20260817
