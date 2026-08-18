@@ -44,9 +44,9 @@ class SerializedJsonState<T> {
 
   save(value: T): void {
     if (this.readOnly) return;
-    // Snapshot at enqueue time. Mutable Maps/Sets/PriceExplorer instances may
-    // change before the prior disk write has finished.
-    const snapshot = this.encode(value);
+    // Freeze the encoded payload at enqueue time. A queued disk write must not
+    // observe later mutations to nested order data or runtime state objects.
+    const snapshot = structuredClone(this.encode(value));
     this.writeTail = this.writeTail
       .then(async () => {
         await atomicWriteJson(this.path, snapshot);
@@ -72,14 +72,11 @@ class SerializedJsonState<T> {
 }
 
 function explorerSnapshot(value: unknown): ExplorerSnapshot {
-  if (
-    !value
-    || typeof value !== "object"
-    || Array.isArray(value)
-    || !("groups" in value)
-    || !(value as { groups?: unknown }).groups
-    || typeof (value as { groups?: unknown }).groups !== "object"
-  ) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !("groups" in value)) {
+    throw new Error("EXPLORER_STATE_INVALID");
+  }
+  const groups = (value as { groups?: unknown }).groups;
+  if (!groups || typeof groups !== "object" || Array.isArray(groups)) {
     throw new Error("EXPLORER_STATE_INVALID");
   }
   return value as ExplorerSnapshot;
@@ -176,12 +173,13 @@ export class ExitTemplateStateStore {
         if (!value || typeof value !== "object" || Array.isArray(value)) {
           throw new Error("EXIT_TEMPLATE_STATE_INVALID");
         }
-        return new Map(
-          Object.entries(value as Record<string, Json>)
-            .filter(([, template]) => Array.isArray(template?.orderLegCollection)),
-        );
+        const entries = Object.entries(value as Record<string, Json>);
+        if (entries.some(([, template]) => !template || typeof template !== "object" || !Array.isArray(template.orderLegCollection))) {
+          throw new Error("EXIT_TEMPLATE_STATE_INVALID");
+        }
+        return new Map(entries);
       },
-      encode: (value) => structuredClone(Object.fromEntries(value)),
+      encode: (value) => Object.fromEntries(value),
       onWriteFailure: options.onWriteFailure,
     });
   }
