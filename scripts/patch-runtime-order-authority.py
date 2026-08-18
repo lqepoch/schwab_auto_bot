@@ -228,6 +228,8 @@ text = text.replace(old_views, new_views, 1)
 # views keep their existing semantics through orderAuthority.all().
 text = text.replace('missingTrackedActiveOrderIds(orders, recent, orderId)', 'missingTrackedActiveOrderIds(orderAuthority.all(), recent, orderId)')
 text = text.replace('const ids = orders\n    .filter((order) => fingerprintOrder(order) === payloadFingerprint)', 'const ids = orderAuthority.all()\n    .filter((order) => fingerprintOrder(order) === payloadFingerprint)')
+text = text.replace('async function reconcileUnknownWritesAfterFullSnapshot(snapshot: readonly Json[] = orders): Promise<void> {', 'async function reconcileUnknownWritesAfterFullSnapshot(snapshot: readonly Json[] = orderAuthority.all()): Promise<void> {')
+text = text.replace('orders: orders.length,', 'orders: orderAuthority.all().length,')
 
 # Any remaining explicit full-authority iteration is read-only and should use
 # the authority accessor. The compile/source-contract gate below will catch any
