@@ -1,0 +1,63 @@
+name: Validate Execution Journal Fail Closed Once
+
+on:
+  push:
+    branches:
+      - refactor/enterprise-convergence-20260817
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Apply execution journal fail-closed wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-execution-journal-failclosed.py
+          rm scripts/patch-execution-journal-failclosed.py
+
+      - name: Validate journal durability boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          pwsh -NoProfile -File ./test/hot_switch_identity.test.ps1
+          npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+          git diff --check
+          grep -q 'executionJournalPersistenceFault' src/automation/runtimeOrchestrator.ts
+          grep -q 'execution-journal-persistence-failed' src/automation/runtimeOrchestrator.ts
+          grep -q 'run.journal-preflight' src/automation/runtimeOrchestrator.ts
+          test "$(grep -c 'executionJournal.assertHealthy();' src/automation/runtimeOrchestrator.ts)" -ge 3
+          grep -q 'persistenceFailure' src/automation/observability/executionJournal.ts
+          grep -q 'EXECUTION_JOURNAL_PERSISTENCE_FAILED' test/execution_journal.test.ts
+
+      - name: Commit validated integration and remove workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'LQ'
+          git config user.email 'lqepoch@126.com'
+          git rm .github/workflows/validate-execution-journal-failclosed-once.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: fail closed on execution journal persistence faults'
+          git push origin HEAD:refactor/enterprise-convergence-20260817
