@@ -60,3 +60,5 @@ jobs:
           git diff --cached --check
           git commit -m 'fix: prepare mutation transport before WAL persistence'
           git push origin HEAD:refactor/enterprise-convergence-20260817
+
+# trigger: 2026-08-18T10:43+08:00
