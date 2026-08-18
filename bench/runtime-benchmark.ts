@@ -103,7 +103,7 @@ async function main(): Promise<void> {
 
   const orderIndexCache = new RuntimeOrderIndexCache();
   for (let warmup = 0; warmup < 5; warmup += 1) {
-    orderIndexCache.primaryOpeningOrderIds(corpus, warmup, policy, TRADING_DATE, working);
+    orderIndexCache.primaryOpeningOrders(corpus, warmup, policy, TRADING_DATE, working);
     orderIndexCache.activeOpeningOrders(corpus, warmup, policy, TRADING_DATE, working, groupKey);
   }
   let startedAt = performance.now();
@@ -112,7 +112,7 @@ async function main(): Promise<void> {
     // strategies before the next REST/activity reconciliation. Force three
     // rebuilds here so the benchmark measures both rebuild and cache-hit work.
     const revision = Math.floor(iteration / 10);
-    orderIndexCache.primaryOpeningOrderIds(corpus, revision, policy, TRADING_DATE, working);
+    orderIndexCache.primaryOpeningOrders(corpus, revision, policy, TRADING_DATE, working);
     orderIndexCache.activeOpeningOrders(corpus, revision, policy, TRADING_DATE, working, groupKey);
   }
   const orderIndex = metric(ORDER_ITERATIONS * CORPUS_SIZE * 2, startedAt);

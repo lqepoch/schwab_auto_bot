@@ -1493,7 +1493,9 @@ function reconcileExplorerSnapshot(): void {
   // do not infer current work from a previous snapshot delta.
   if (policy.repeatBuyAtOrderPrice && fixedPriceRefreshRoundActive) {
     const primaryOpeningIds = primaryActiveOpeningOrderIds();
-    for (const order of orders) queueFixedPriceRefresh(order, "full-order-reconciliation", primaryOpeningIds);
+    for (const order of primaryActiveOpeningOrders()) {
+      queueFixedPriceRefresh(order, "full-order-reconciliation", primaryOpeningIds);
+    }
   }
   reconcileCurrentExitStrategies();
   persistExplorer();
@@ -1565,6 +1567,16 @@ function activeClosingOrders(strategy: string): readonly Json[] {
     newYorkDate(),
     working,
     strategy,
+  );
+}
+
+function primaryActiveOpeningOrders(): readonly Json[] {
+  return runtimeOrderIndex.primaryOpeningOrders(
+    orders,
+    orderAuthorityRevision,
+    policy,
+    newYorkDate(),
+    working,
   );
 }
 
@@ -2040,13 +2052,10 @@ async function fixedPriceRefreshRound(): Promise<boolean> {
     }
     fixedPriceRefreshRoundActive = true;
     const primaryOpeningIds = primaryActiveOpeningOrderIds();
-    const candidates = shuffled(orders.filter((order) => {
-      const meta = managedOpening(order);
-      if (meta === null || !working.has(String(order.status))) return false;
-      // Existing external duplicates are left untouched, but fixed-price mode
-      // maintains and refreshes only one working opening order per strategy.
-      return primaryOpeningIds.get(meta.key) === orderId(order);
-    }));
+    // Existing external duplicates stay untouched. The revision-aware order
+    // index has already selected exactly one managed working opening per
+    // strategy, so round startup no longer rescans the full broker snapshot.
+    const candidates = shuffled(primaryActiveOpeningOrders());
     for (const candidate of candidates) {
       if (stopping) break;
       queueFixedPriceRefresh(candidate, "round-start", primaryOpeningIds);
