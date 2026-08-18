@@ -442,7 +442,12 @@ function assertOperationalAuditsHealthy(): void {
   policyAlertAudit.assertHealthy();
 }
 
-function assertBrokerWritesAllowed(key: string, method: "POST" | "PUT" | "DELETE", path: string): void {
+function assertBrokerWritesAllowed(
+  key: string,
+  method: "POST" | "PUT" | "DELETE",
+  path: string,
+  ignoredIntentId?: string,
+): void {
   assertOperationalAuditsHealthy();
   if (!fullSnapshotReconciled) {
     executionJournal.record("broker.write.blocked", {
@@ -470,13 +475,14 @@ function assertBrokerWritesAllowed(key: string, method: "POST" | "PUT" | "DELETE
     });
     throw new Error("UNKNOWN_WRITE_STATE_PERSISTENCE_FAILED");
   }
-  if (!unknownWriteReconciliation.hasPending()) return;
+  const unresolved = unknownWriteReconciliation.pending().filter((record) => record.id !== ignoredIntentId);
+  if (unresolved.length === 0) return;
   executionJournal.record("broker.write.blocked", {
     key,
     method,
     path: safePath(path),
     reason: "unknown-write-pending-reconciliation",
-    pendingCount: unknownWriteReconciliation.pending().length,
+    pendingCount: unresolved.length,
   });
   throw new Error("UNKNOWN_WRITE_PENDING_RECONCILIATION");
 }
@@ -512,10 +518,15 @@ async function beginUnknownWrite(failure: UnknownWriteFailure) {
 }
 
 
-async function completeUnknownWrite(id: string, operation: UnknownWriteFailure["operation"], key: string): Promise<void> {
+async function completeUnknownWrite(
+  id: string,
+  operation: UnknownWriteFailure["operation"],
+  key: string,
+  outcome: "confirmed" | "not-sent" = "confirmed",
+): Promise<void> {
   try {
     await unknownWriteReconciliation.completeWrite(id);
-    executionJournal.record("broker.write.ledger-cleared", { id, operation, key, outcome: "confirmed" });
+    executionJournal.record("broker.write.ledger-cleared", { id, operation, key, outcome });
   } catch (error) {
     unknownWritePersistenceFault = error;
     executionJournal.record("broker.write.unknown-persistence-failed", { operation, key });
@@ -616,6 +627,16 @@ const brokerWriteCoordinator = new BrokerWriteCoordinator({
       await completeUnknownWrite(id, metadata?.operation ?? "PLACE_ORDER", metadata?.key ?? "coordinator");
       coordinatorIntentMetadata.delete(id);
     },
+    discardWrite: async (id) => {
+      const metadata = coordinatorIntentMetadata.get(id);
+      await completeUnknownWrite(
+        id,
+        metadata?.operation ?? "PLACE_ORDER",
+        metadata?.key ?? "coordinator",
+        "not-sent",
+      );
+      coordinatorIntentMetadata.delete(id);
+    },
     settleWrite: async (id, outcome) => {
       const metadata = coordinatorIntentMetadata.get(id);
       const record = await settleUnknownWrite(id, metadata?.operation ?? "PLACE_ORDER", metadata?.key ?? "coordinator", outcome);
@@ -639,6 +660,10 @@ const brokerWriteCoordinator = new BrokerWriteCoordinator({
       await ensureWeeklyReauthorization();
       policy.requireExecutionWindow();
       assertOperationalAuditsHealthy();
+    },
+    beforeTransportSend: (request, intent) => {
+      policy.requireExecutionWindow();
+      assertBrokerWritesAllowed(request.key, request.method, request.path, intent.id);
     },
     assertReady: (request) => assertBrokerWritesAllowed(request.key, request.method, request.path),
     isStopping: () => stopping,
