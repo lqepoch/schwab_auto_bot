@@ -88,8 +88,12 @@ async function main(): Promise<void> {
   };
 
   const gateEventLoop = hasFlag("--gate-event-loop");
+  const gateAtomicPersistence = hasFlag("--gate-atomic-persistence");
   if (gateEventLoop && samples.length < 5) {
     throw new Error(`EVENT_LOOP_GATE_REQUIRES_5_SAMPLES:${samples.length}`);
+  }
+  if (gateAtomicPersistence && samples.length < 5) {
+    throw new Error(`ATOMIC_PERSISTENCE_GATE_REQUIRES_5_SAMPLES:${samples.length}`);
   }
 
   let failed = false;
@@ -100,7 +104,12 @@ async function main(): Promise<void> {
       ? ((value - baselineMetric.median) / baselineMetric.median) * 100
       : 0;
     const eventLoopMetric = name === "eventLoop.p99Ms";
-    const gated = !eventLoopMetric || gateEventLoop;
+    const atomicPersistenceMetric = name === "atomicPersistence.wallMs";
+    const gated = eventLoopMetric
+      ? gateEventLoop
+      : atomicPersistenceMetric
+        ? gateAtomicPersistence
+        : true;
     const withinLimit = value <= baselineMetric.limit;
     const status = gated ? (withinLimit ? "PASS" : "FAIL") : "OBSERVE";
     if (gated && !withinLimit) failed = true;
