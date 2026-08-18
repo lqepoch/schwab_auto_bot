@@ -158,12 +158,21 @@ export function fingerprintOrder(value: unknown): string {
   return fingerprintPayload(value);
 }
 
+/**
+ * HTTP 4xx responses normally prove that Schwab rejected the mutation. A 408
+ * is different: it is a timeout signal whose end-to-end execution outcome is
+ * not strong enough for an automated trader to erase its durable intent.
+ */
+export function isExplicitBrokerRejection(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 408;
+}
+
 export function classifyUnknownReason(failure: Pick<UnknownWriteFailure, "status" | "reason">): UnknownWriteReason | null {
   const status = failure.status;
-  if (status !== undefined && status >= 400 && status < 500) return null;
+  if (status !== undefined && isExplicitBrokerRejection(status)) return null;
   const reason = String(failure.reason ?? "").toLowerCase();
   if (reason.includes("missing-location")) return "missing-location";
-  if (reason.includes("timeout") || reason.includes("aborted")) return "timeout";
+  if (status === 408 || reason.includes("timeout") || reason.includes("aborted")) return "timeout";
   if (reason.includes("network") || status === 0) return "network-error";
   if (status !== undefined && status >= 500) return "server-error";
   return "unknown-error";

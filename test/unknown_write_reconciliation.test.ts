@@ -105,6 +105,26 @@ test("explicit 4xx rejection is not recorded as unknown", async () => {
   }
 });
 
+test("HTTP 408 remains pending as an ambiguous timeout outcome", async () => {
+  const { root, store } = await makeStore();
+  try {
+    const record = await store.recordFailure({
+      operation: "PLACE_ORDER",
+      method: "POST",
+      key: "submit-timeout",
+      path: "/trader/v1/accounts/hash/orders",
+      payload: order("payload"),
+      status: 408,
+      reason: "SCHWAB_HTTP_408",
+    });
+    assert.equal(record?.reason, "timeout");
+    assert.equal(record?.status, 408);
+    assert.equal(store.hasPending(), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cancel unknown resolves only when the exact target is explicitly canceled", async () => {
   const { root, store } = await makeStore();
   try {
