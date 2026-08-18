@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { acquireRuntimeLock } from "../src/automation/state/runtimeLock.ts";
+
+function lockRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    pid: 2147483647,
+    runId: "stale",
+    acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+    ownerId: "stale-owner",
+    ...overrides,
+  };
+}
 
 test("rejects a second runtime while the first lock owner is alive", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-runtime-lock-"));
@@ -17,28 +28,55 @@ test("rejects a second runtime while the first lock owner is alive", async () =>
   }
 });
 
-test("reclaims a lock whose owner process no longer exists", async () => {
+test("reclaims a dead owner under an exclusive reclaim gate and leaves no gate artifact", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-runtime-lock-"));
   const path = join(root, "runtime.lock");
-  await writeFile(path, JSON.stringify({ schemaVersion: 1, pid: 2147483647, runId: "stale", acquiredAt: "2026-07-24T00:00:00.000Z" }), "utf8");
+  await writeFile(path, JSON.stringify(lockRecord()), "utf8");
   const lock = acquireRuntimeLock(path, "run-current");
   try {
     const value = JSON.parse(await readFile(path, "utf8"));
     assert.equal(value.runId, "run-current");
+    assert.match(value.ownerId, /^[0-9a-f-]{36}$/);
+    await assert.rejects(stat(`${path}.reclaim`), { code: "ENOENT" });
+    const names = await readdir(root);
+    assert.equal(names.some((name) => name.startsWith("runtime.lock.stale.2147483647.stale.stale-owner.")), true);
   } finally {
     lock.release();
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("rejects malformed, incomplete, and future-dated lock records fail-closed", async () => {
+test("an existing reclaim gate blocks takeover and leaves the observed lock untouched", async () => {
+  const root = await mkdtemp(join(tmpdir(), "schwab-runtime-lock-"));
+  const path = join(root, "runtime.lock");
+  const stale = lockRecord({ runId: "blocked-stale", ownerId: "blocked-owner" });
+  try {
+    await writeFile(path, JSON.stringify(stale), "utf8");
+    await writeFile(`${path}.reclaim`, JSON.stringify({ ownerId: "other-reclaimer" }), "utf8");
+
+    assert.throws(
+      () => acquireRuntimeLock(path, "replacement"),
+      /RUNTIME_LOCK_RECLAIM_IN_PROGRESS/,
+    );
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), stale);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects malformed, incomplete, ownerless, and future-dated lock records fail-closed", async () => {
   const root = await mkdtemp(join(tmpdir(), "schwab-runtime-lock-"));
   const path = join(root, "runtime.lock");
   try {
     for (const value of [
       "not-json",
-      JSON.stringify({ schemaVersion: 1, pid: 123, runId: "" }),
-      JSON.stringify({ schemaVersion: 1, pid: 123, runId: "future", acquiredAt: new Date(Date.now() + 60_000).toISOString() }),
+      JSON.stringify(lockRecord({ runId: "" })),
+      JSON.stringify({ schemaVersion: 1, pid: 123, runId: "ownerless", acquiredAt: new Date().toISOString() }),
+      JSON.stringify(lockRecord({
+        pid: 123,
+        runId: "future",
+        acquiredAt: new Date(Date.now() + 60_000).toISOString(),
+      })),
     ]) {
       await writeFile(path, value, "utf8");
       assert.throws(() => acquireRuntimeLock(path, "replacement"), /RUNTIME_LOCK_INVALID/);
@@ -54,12 +92,11 @@ test("treats EPERM while probing an owner PID as active", async () => {
   const path = join(root, "runtime.lock");
   const originalKill = process.kill;
   try {
-    await writeFile(path, JSON.stringify({
-      schemaVersion: 1,
+    await writeFile(path, JSON.stringify(lockRecord({
       pid: 123,
       runId: "permission-owner",
-      acquiredAt: new Date(Date.now() - 60_000).toISOString(),
-    }), "utf8");
+      ownerId: "permission-owner-id",
+    })), "utf8");
     Object.defineProperty(process, "kill", {
       configurable: true,
       value: () => { throw Object.assign(new Error("permission denied"), { code: "EPERM" }); },
@@ -91,15 +128,13 @@ test("reclaims malicious run IDs without using path separators in the stale file
   const root = await mkdtemp(join(tmpdir(), "schwab-runtime-lock-"));
   const path = join(root, "runtime.lock");
   const lockRunId = "../outside/../../run with spaces";
-  await writeFile(path, JSON.stringify({
-    schemaVersion: 1,
-    pid: 2147483647,
+  await writeFile(path, JSON.stringify(lockRecord({
     runId: lockRunId,
-    acquiredAt: new Date(Date.now() - 60_000).toISOString(),
-  }), "utf8");
+    ownerId: "owner/../../outside",
+  })), "utf8");
   const lock = acquireRuntimeLock(path, "current");
   try {
-    const names = await (await import("node:fs/promises")).readdir(root);
+    const names = await readdir(root);
     assert.ok(names.every((name) => !name.includes("/")));
     await assert.rejects(stat(join(root, "outside")), { code: "ENOENT" });
     assert.equal(JSON.parse(await readFile(path, "utf8")).runId, "current");
