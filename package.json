@@ -84,6 +84,7 @@
     "typecheck": "npm run typecheck:sdk && npm run typecheck:automation && npm run typecheck:runtime-native",
     "typecheck:test": "npm run build && tsc -p tsconfig.test.json --noEmit && npm run typecheck:examples && npm run typecheck:runtime-native && npm run typecheck:bench",
     "check": "npm run typecheck",
+    "lint:deadcode": "knip --include files,dependencies,unlisted,unresolved --reporter compact",
     "test:unit": "npm run build && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs",
     "test": "npm run typecheck:test && node --experimental-strip-types --test test/*.test.ts test/*.test.mjs",
     "benchmark:runtime": "node --experimental-strip-types bench/runtime-benchmark.ts",
@@ -99,6 +100,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.1",
+    "knip": "6.31.0",
     "typescript": "^7.0.2"
   }
 }
