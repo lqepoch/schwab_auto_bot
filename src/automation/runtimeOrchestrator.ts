@@ -20,11 +20,12 @@ import {
   selectActiveOpeningOrders,
 } from "./orderIndex.ts";
 import { completeNetDebitFill, completeOrderLimitFill } from "./execution/fillPrice.ts";
-import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction, type ExplorerSnapshot } from "./execution/priceExplorer.ts";
+import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction } from "./execution/priceExplorer.ts";
 import { ExecutionJournal } from "./observability/executionJournal.ts";
 import { safeRuntimeError } from "./observability/runtimeError.ts";
 import { EXIT_IDLE_BUY_FILL_DELAY_MS, EXIT_REFRESH_MS, LIQUIDITY_EXIT_DELAY_MS, LIQUIDITY_EXIT_REFRESH_MS, LIQUIDITY_EXIT_REFRESH_ROUNDS, exitEligibility, exitRefreshNeeded, maySubmitExit } from "./policy/exit.ts";
 import { acquireRuntimeLock } from "./state/runtimeLock.ts";
+import { ExitTemplateStateStore, FixedPriceCycleStateStore, PriceExplorerStateStore } from "./state/runtimeStateStores.ts";
 import { FixedPriceReplenishmentGuard, STALE_ORDER_RECREATE_RETRY_MS, mayRecreateStaleOrder, mayRecoverFixedPriceFill, mayReplenishFixedPrice } from "./execution/fixedPriceCycle.ts";
 import { effectiveFixedPriceRefreshIntervalMs, FixedPriceRefreshPacer } from "./scheduling/refreshPacer.ts";
 import { RefreshRoundLimit } from "./scheduling/refreshRoundLimit.ts";
@@ -132,6 +133,19 @@ function stamp(message: string): void {
   });
 }
 
+const explorerStateStore = new PriceExplorerStateStore(explorerStatePath, {
+  readOnly,
+  onWriteFailure: (error) => stamp(`PRICE_EXPLORER_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`),
+});
+const fixedPriceCycleStateStore = new FixedPriceCycleStateStore(fixedPriceCycleStatePath, {
+  readOnly,
+  onWriteFailure: (error) => stamp(`FIXED_PRICE_CYCLE_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`),
+});
+const exitTemplateStateStore = new ExitTemplateStateStore(exitTemplateStatePath, {
+  readOnly,
+  onWriteFailure: (error) => stamp(`EXIT_TEMPLATE_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`),
+});
+
 const ensureWeeklyReauthorization = createWeeklyReauthorizationEnsurer({
   requireWeeklyReauthorization: () => requireWeeklyReauthorization(new Date(), automationAuthOptions),
   reauthorizeInteractively: host.reauthorizeInteractively ?? (() => runInteractiveLogin({
@@ -186,44 +200,12 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function loadExplorer(): Promise<PriceExplorer> {
-  try {
-    const value = JSON.parse(await readFile(explorerStatePath, "utf8")) as ExplorerSnapshot;
-    if (!value || typeof value !== "object" || !value.groups || typeof value.groups !== "object") {
-      throw new Error("EXPLORER_STATE_INVALID");
-    }
-    return new PriceExplorer(value);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new PriceExplorer();
-    throw error;
-  }
-}
-
-async function loadFixedPriceCycle(): Promise<Set<string>> {
-  try {
-    const value = JSON.parse(await readFile(fixedPriceCycleStatePath, "utf8")) as unknown;
-    if (!Array.isArray(value) || value.some((id) => typeof id !== "string")) throw new Error("FIXED_PRICE_CYCLE_STATE_INVALID");
-    return new Set(value.slice(-1_000));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Set();
-    throw error;
-  }
-}
-
 function persistExplorer(): void {
-  if (readOnly) return;
-  const snapshot = explorer.snapshot();
-  explorerSavePending = explorerSavePending
-    .then(() => atomicWriteJson(explorerStatePath, snapshot))
-    .catch((error) => stamp(`PRICE_EXPLORER_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`));
+  explorerStateStore.save(explorer);
 }
 
 function persistFixedPriceCycle(): void {
-  if (readOnly) return;
-  const snapshot = [...fixedPriceCycleConsumedFills].slice(-1_000);
-  fixedPriceCycleSavePending = fixedPriceCycleSavePending
-    .then(() => atomicWriteJson(fixedPriceCycleStatePath, snapshot))
-    .catch((error) => stamp(`FIXED_PRICE_CYCLE_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`));
+  fixedPriceCycleStateStore.save(fixedPriceCycleConsumedFills);
 }
 
 const tokens = new SchwabTokenProvider(stamp, automationAuthOptions);
@@ -318,20 +300,17 @@ let exitPositionSnapshotEpoch = 0;
 const previewRejectedUntil = new Map<string, number>();
 const reportedPolicyAlerts = new Set<string>();
 const REFILL_WRITE_PRIORITY_SETTLEMENT_MS = 5_000;
-const explorer = await loadExplorer();
-const fixedPriceCycleConsumedFills = await loadFixedPriceCycle();
+const explorer = await explorerStateStore.load();
+const fixedPriceCycleConsumedFills = await fixedPriceCycleStateStore.load();
 // A strategy has at most one fixed-price opening order.  Reserve its refill
 // slot before a refill Submit's Preview so activity confirmation and a full snapshot cannot
 // race each other into duplicate buy submissions.
 const fixedPriceReplenishmentGuard = new FixedPriceReplenishmentGuard();
 let replenishmentWritePriorityUntil = 0;
 const explorerTemplates = new Map<string, Json>();
-const exitTemplatesByStrategy = await loadExitTemplates();
+const exitTemplatesByStrategy = await exitTemplateStateStore.load();
 const reportedUnpricedFills = new Set<string>();
 const reportedHistoricalFixedPriceFills = new Set<string>();
-let explorerSavePending = Promise.resolve();
-let fixedPriceCycleSavePending = Promise.resolve();
-let exitTemplateSavePending = Promise.resolve();
 const normalExplorerActionPacer = new ExplorerActionPacer({ cooldownMs: policy.orderCooldownMs });
 const fixedPriceRefreshPacer = new FixedPriceRefreshPacer();
 const refreshRoundLimit = new RefreshRoundLimit(policy.maxRefreshRounds);
@@ -360,17 +339,6 @@ function remaining(order: Json): number {
 }
 function eventTime(order: Json): number {
   return Date.parse(order.closeTime ?? order.cancelTime ?? order.enteredTime ?? 0);
-}
-
-async function loadExitTemplates(): Promise<Map<string, Json>> {
-  try {
-    const value = JSON.parse(await readFile(exitTemplateStatePath, "utf8")) as Record<string, Json>;
-    if (!value || typeof value !== "object") throw new Error("EXIT_TEMPLATE_STATE_INVALID");
-    return new Map(Object.entries(value).filter(([, template]) => Array.isArray(template?.orderLegCollection)));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
-    throw error;
-  }
 }
 
 function recordOpeningFillLot(strategy: string, order: Json): void {
@@ -1244,10 +1212,7 @@ function rememberExitTemplate(strategy: string, order: Json): void {
   const current = exitTemplatesByStrategy.get(strategy);
   if (current && orderId(current) === orderId(order)) return;
   exitTemplatesByStrategy.set(strategy, structuredClone(order));
-  const snapshot = Object.fromEntries(exitTemplatesByStrategy);
-  exitTemplateSavePending = exitTemplateSavePending
-    .then(() => atomicWriteJson(exitTemplateStatePath, snapshot))
-    .catch((error) => stamp(`EXIT_TEMPLATE_STATE_SAVE_FAILED error=${safeRuntimeError(error)}`));
+  exitTemplateStateStore.save(exitTemplatesByStrategy);
 }
 
 function reconcileExplorerSnapshot(): void {
@@ -2553,9 +2518,9 @@ if (!readOnly) persistExplorer();
 const streamToStop = activityStream as SchwabActivityStream | null;
 if (streamToStop) await streamToStop.stop();
 await writer.waitIdle();
-await explorerSavePending;
-await fixedPriceCycleSavePending;
-await exitTemplateSavePending;
+await explorerStateStore.flush();
+await fixedPriceCycleStateStore.flush();
+await exitTemplateStateStore.flush();
 await writeRuntimeState("stopped", stopReason);
 executionJournal.record("run.stopped", { reason: stopReason });
 await executionJournal.flush();
