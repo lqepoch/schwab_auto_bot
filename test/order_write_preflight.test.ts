@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AUTOMATION_WORKING_ORDER_STATUSES,
   EXISTING_ORDER_REPLACE_NO_PREVIEW,
   SUBMIT_PREVIEW_REQUIRED,
   nativeReplaceOrderId,
@@ -52,6 +53,16 @@ test("requires Preview for Submit and explicitly skips it only for an exact nati
   );
 });
 
+test("automation working statuses stay within Schwab's documented mutable contract", () => {
+  assert.deepEqual(AUTOMATION_WORKING_ORDER_STATUSES, [
+    "PENDING_ACTIVATION",
+    "QUEUED",
+    "WORKING",
+    "AWAITING_PARENT_ORDER",
+  ]);
+  assert.equal(AUTOMATION_WORKING_ORDER_STATUSES.includes("PARTIALLY_FILLED" as never), false);
+});
+
 test("allows price and quantity changes for a working Replace that preserves strategy identity", () => {
   const changed = structuredClone(workingOpening);
   changed.price = "0.88";
@@ -62,10 +73,14 @@ test("allows price and quantity changes for a working Replace that preserves str
   assert.equal(replacementSourceViolation(workingOpening, changed), null);
 });
 
-test("blocks Replace without a working source or when strategy identity changes", () => {
+test("blocks Replace without a working source, undocumented status, or preserved strategy identity", () => {
   assert.equal(replacementSourceViolation(undefined, workingOpening), "REPLACE_SOURCE_NOT_FOUND");
   assert.equal(
     replacementSourceViolation({ ...workingOpening, status: "FILLED" }, workingOpening),
+    "REPLACE_SOURCE_NOT_WORKING",
+  );
+  assert.equal(
+    replacementSourceViolation({ ...workingOpening, status: "PARTIALLY_FILLED" }, workingOpening),
     "REPLACE_SOURCE_NOT_WORKING",
   );
   const differentStrategy = structuredClone(workingOpening);
