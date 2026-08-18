@@ -1,0 +1,64 @@
+name: Apply Order Lookup Local Race Once
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-order-lookup-local-race-once.yml'
+      - 'scripts/patch-order-lookup-local-race.py'
+      - 'src/automation/broker/orderLookup.ts'
+      - 'test/order_lookup.test.ts'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'perf/runtime-order-lookup-20260818'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout staging branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: perf/runtime-order-lookup-20260818
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Apply local-publication race patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-order-lookup-local-race.py
+          rm scripts/patch-order-lookup-local-race.py
+
+      - name: Validate runtime lookup race handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          pwsh -NoProfile -File ./test/hot_switch_identity.test.ps1
+          npx --yes knip@6.31.0 --include files,dependencies,unlisted,unresolved --reporter compact
+          git diff --check
+          ! grep -q 'orders\.find(' src/automation/runtimeOrchestrator.ts
+          grep -q 'ordersById.addIfAbsent(order)' src/automation/runtimeOrchestrator.ts
+
+      - name: Commit validated product changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git reset .github/workflows/apply-order-lookup-local-race-once.yml
+          git commit -m 'fix: let broker authority win local order publication races'
+          git push origin HEAD:perf/runtime-order-lookup-20260818
