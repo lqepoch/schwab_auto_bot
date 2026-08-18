@@ -1,9 +1,10 @@
 name: Apply Prepared Mutation Transport Once
 
 on:
-  push:
+  pull_request:
     branches:
-      - refactor/enterprise-convergence-20260817
+      - main
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
@@ -13,9 +14,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Checkout
+      - name: Checkout staging branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: refactor/enterprise-convergence-20260817
           fetch-depth: 0
 
       - name: Setup Node.js 24
@@ -60,5 +62,3 @@ jobs:
           git diff --cached --check
           git commit -m 'fix: prepare mutation transport before WAL persistence'
           git push origin HEAD:refactor/enterprise-convergence-20260817
-
-# trigger: 2026-08-18T10:43+08:00
