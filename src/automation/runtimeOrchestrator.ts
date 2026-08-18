@@ -1091,10 +1091,9 @@ function reportPolicyAlert(source: string, order: Json, code: string, message: s
 
 function reportWorkingOrderPolicyViolations(): void {
   const today = newYorkDate();
-  for (const order of orders) {
-    if (!working.has(String(order.status))) continue;
+  for (const order of workingAllowedUnderlyingOrders()) {
     const meta = info(order);
-    if (!meta || !policy.underlyings.has(meta.underlying)) continue;
+    if (!meta) continue;
     const violation = orderPolicyViolation(order, policy, today, meta);
     if (violation) reportPolicyAlert("order-snapshot", order, violation.code, violation.message);
   }
@@ -1567,6 +1566,16 @@ function activeClosingOrders(strategy: string): readonly Json[] {
     newYorkDate(),
     working,
     strategy,
+  );
+}
+
+function workingAllowedUnderlyingOrders(): readonly Json[] {
+  return runtimeOrderIndex.workingAllowedOrders(
+    orders,
+    orderAuthorityRevision,
+    policy,
+    newYorkDate(),
+    working,
   );
 }
 

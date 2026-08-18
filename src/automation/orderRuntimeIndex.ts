@@ -9,6 +9,7 @@ import { orderInfo, type Json } from "./policy/order.ts";
 import type { RuntimePolicy } from "./policy/runtime.ts";
 
 export type RuntimeOrderIndexSnapshot = Readonly<{
+  workingAllowedUnderlyingOrders: readonly Json[];
   currentStrategyOrders: readonly Json[];
   activeOpeningOrdersByStrategy: ReadonlyMap<string, readonly Json[]>;
   activeClosingOrdersByStrategy: ReadonlyMap<string, readonly Json[]>;
@@ -56,6 +57,7 @@ export class RuntimeOrderIndexCache {
       && this.workingStatuses === workingStatuses
     ) return this.cached;
 
+    const workingAllowedUnderlyingOrders: Json[] = [];
     const currentStrategyOrders: Json[] = [];
     const activeOpeningOrdersByStrategy = new Map<string, Json[]>();
     const activeClosingOrdersByStrategy = new Map<string, Json[]>();
@@ -64,13 +66,17 @@ export class RuntimeOrderIndexCache {
 
     for (const order of source) {
       const meta = this.resolveInfo(order);
+      const allowedUnderlying = Boolean(meta && policy.underlyings.has(meta.underlying));
+      const isWorking = workingStatuses.has(String(order.status));
+      if (isWorking && allowedUnderlying) workingAllowedUnderlyingOrders.push(order);
+
       const isCurrentStrategyOrder = Boolean(
-        meta
-        && meta.expiration === tradingDate
-        && policy.underlyings.has(meta.underlying),
+        allowedUnderlying
+        && meta
+        && meta.expiration === tradingDate,
       );
       if (isCurrentStrategyOrder) currentStrategyOrders.push(order);
-      if (!workingStatuses.has(String(order.status))) continue;
+      if (!isWorking) continue;
 
       if (isCurrentStrategyOrder && meta) {
         if (meta.opening) push(activeOpeningOrdersByStrategy, meta.key, order);
@@ -102,6 +108,7 @@ export class RuntimeOrderIndexCache {
     }
 
     const snapshot: RuntimeOrderIndexSnapshot = {
+      workingAllowedUnderlyingOrders,
       currentStrategyOrders,
       activeOpeningOrdersByStrategy,
       activeClosingOrdersByStrategy,
@@ -116,6 +123,17 @@ export class RuntimeOrderIndexCache {
     this.workingStatuses = workingStatuses;
     this.cached = snapshot;
     return snapshot;
+  }
+
+  workingAllowedOrders(
+    source: readonly Json[],
+    revision: number,
+    policy: RuntimePolicy,
+    tradingDate: string,
+    workingStatuses: ReadonlySet<string>,
+  ): readonly Json[] {
+    return this.snapshot(source, revision, policy, tradingDate, workingStatuses)
+      .workingAllowedUnderlyingOrders;
   }
 
   currentOrders(
