@@ -63,6 +63,9 @@ jobs:
       - name: Build, typecheck, native-runtime audit, and unified contract tests
         run: npm test
 
+      - name: Detect dead code and dependency drift
+        run: npm run lint:deadcode
+
       - name: Validate PowerShell hot-switch identity contract
         shell: pwsh
         run: ./test/hot_switch_identity.test.ps1
