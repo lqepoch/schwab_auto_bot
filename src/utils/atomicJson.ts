@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
+import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export type AtomicJsonWriteOptions = {
@@ -13,8 +13,8 @@ export type AtomicJsonWriteOptions = {
  *
  * The temporary file is fsynced before rename and, on POSIX, the containing
  * directory is fsynced afterwards so an acknowledged write survives a crash
- * at the rename boundary. Explicit owner-only modes are also re-applied to an
- * existing directory instead of relying on mkdir's creation-only mode.
+ * at the rename boundary. directoryMode applies when the target directory is
+ * created; an existing caller-owned parent directory is never chmodded.
  */
 export async function atomicWriteJson(
   path: string,
@@ -26,9 +26,6 @@ export async function atomicWriteJson(
     recursive: true,
     ...(options.directoryMode === undefined ? {} : { mode: options.directoryMode }),
   });
-  if (options.directoryMode !== undefined && process.platform !== "win32") {
-    await chmod(directory, options.directoryMode);
-  }
 
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
