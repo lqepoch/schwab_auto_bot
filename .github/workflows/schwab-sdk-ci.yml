@@ -13,8 +13,7 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'tsconfig*.json'
-      - '.github/workflows/schwab-sdk-ci.yml'
-      - '.github/workflows/schwab-deep-ci.yml'
+      - '.github/workflows/**'
       - '.github/dependabot.yml'
   push:
     branches:
@@ -30,8 +29,7 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'tsconfig*.json'
-      - '.github/workflows/schwab-sdk-ci.yml'
-      - '.github/workflows/schwab-deep-ci.yml'
+      - '.github/workflows/**'
       - '.github/dependabot.yml'
 
 concurrency:
@@ -118,8 +116,16 @@ jobs:
           set -euo pipefail
           git diff --check
           test ! -d vendor
-          test ! -e .github/workflows/enterprise-convergence-once.yml
-          test ! -e .github/workflows/enterprise-finish-once.yml
+          if find .github/workflows -maxdepth 1 -type f \( -name '*-once.yml' -o -name '*-once.yaml' \) -print -quit | grep -q .; then
+            echo 'temporary one-shot workflow remains in the repository' >&2
+            find .github/workflows -maxdepth 1 -type f \( -name '*-once.yml' -o -name '*-once.yaml' \) -print >&2
+            exit 1
+          fi
+          if find scripts -type f -name 'patch-*.py' -print -quit | grep -q .; then
+            echo 'temporary mechanical patch script remains in the repository' >&2
+            find scripts -type f -name 'patch-*.py' -print >&2
+            exit 1
+          fi
           test ! -e scripts/enterprise-convergence-edit.mjs
           test ! -e scripts/enterprise-finish-edit.mjs
           if git grep -n 'vendor/schwab-api-nodejs' -- src test docs README.md package.json package-lock.json; then
