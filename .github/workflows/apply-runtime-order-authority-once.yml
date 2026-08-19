@@ -56,20 +56,48 @@ jobs:
           python3 scripts/patch-runtime-order-authority.py
           rm scripts/patch-runtime-order-authority.py
 
-      - name: Validate centralized order authority
+      - name: Typecheck integrated runtime
+        if: steps.pending.outputs.apply == 'true'
+        run: npm run typecheck
+
+      - name: Run focused order-authority tests
         if: steps.pending.outputs.apply == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          npm test
-          npm run lint:deadcode
-          pwsh -NoProfile -File ./test/hot_switch_identity.test.ps1
+          npm run build
+          node --experimental-strip-types --test test/runtime_order_authority.test.ts test/runtime_order_authority_wiring.test.ts
+
+      - name: Run complete test suite
+        if: steps.pending.outputs.apply == 'true'
+        run: npm test
+
+      - name: Detect dead code and dependency drift
+        if: steps.pending.outputs.apply == 'true'
+        run: npm run lint:deadcode
+
+      - name: Validate PowerShell hot-switch identity
+        if: steps.pending.outputs.apply == 'true'
+        shell: pwsh
+        run: ./test/hot_switch_identity.test.ps1
+
+      - name: Gate runtime benchmark medians
+        if: steps.pending.outputs.apply == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
           mkdir -p .artifacts/runtime-benchmark
           for run in 1 2 3; do
             npm run benchmark:runtime -- --output ".artifacts/runtime-benchmark/run-${run}.json" >/dev/null
           done
           npm run benchmark:runtime:check -- --baseline bench/runtime-baseline.json --current-dir .artifacts/runtime-benchmark --min-samples 3
           rm -rf .artifacts/runtime-benchmark
+
+      - name: Verify integration invariants
+        if: steps.pending.outputs.apply == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
           git diff --check
           grep -q 'const orderAuthority = new RuntimeOrderAuthority' src/automation/runtimeOrchestrator.ts
           ! grep -q 'let orderAuthorityRevision = 0' src/automation/runtimeOrchestrator.ts
@@ -88,5 +116,3 @@ jobs:
           git reset .github/workflows/apply-runtime-order-authority-once.yml
           git commit -m 'refactor: centralize runtime order authority'
           git push origin HEAD:refactor/runtime-order-authority-20260818
-
-# Re-run after PR #115 merged its staging artifacts before runtime wiring was published.
