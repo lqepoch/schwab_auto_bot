@@ -1,0 +1,80 @@
+name: Repair Runtime Authority Branch
+
+on:
+  push:
+    branches:
+      - fix/ci-runtime-authority-efficiency-20260819
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout repair branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: fix/ci-runtime-authority-efficiency-20260819
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Apply runtime authority migration and CI cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch-runtime-order-authority.py
+          rm -f scripts/patch-runtime-order-authority.py
+          rm -f .github/workflows/apply-runtime-order-authority-once.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/schwab-sdk-ci.yml')
+          text = path.read_text()
+          if '  merge_group:\n' not in text:
+              text = text.replace('on:\n  pull_request:\n', 'on:\n  merge_group:\n  workflow_dispatch:\n  pull_request:\n', 1)
+          elif '  workflow_dispatch:\n' not in text:
+              text = text.replace('on:\n  merge_group:\n', 'on:\n  merge_group:\n  workflow_dispatch:\n', 1)
+          path.write_text(text)
+          PY
+
+      - name: Validate centralized order authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+          npm run lint:deadcode
+          pwsh -NoProfile -File ./test/hot_switch_identity.test.ps1
+          mkdir -p .artifacts/runtime-benchmark
+          for run in 1 2 3; do
+            npm run benchmark:runtime -- --output ".artifacts/runtime-benchmark/run-${run}.json" >/dev/null
+          done
+          npm run benchmark:runtime:check -- --baseline bench/runtime-baseline.json --current-dir .artifacts/runtime-benchmark --min-samples 3
+          rm -rf .artifacts/runtime-benchmark
+          git diff --check
+          grep -q 'const orderAuthority = new RuntimeOrderAuthority' src/automation/runtimeOrchestrator.ts
+          grep -q 'orderAuthority.workingAllowedOrders()' src/automation/runtimeOrchestrator.ts
+          ! grep -q 'const orderMetadataCache = new RuntimeOrderMetadataCache' src/automation/runtimeOrchestrator.ts
+          ! grep -q 'const orderIndexCache = new RuntimeOrderIndexCache' src/automation/runtimeOrchestrator.ts
+
+      - name: Commit validated repairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/repair-runtime-authority-branch.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: finish runtime order authority migration'
+          git push origin HEAD:fix/ci-runtime-authority-efficiency-20260819
