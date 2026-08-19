@@ -1,9 +1,8 @@
 name: Repair Runtime Authority Branch
 
 on:
-  push:
-    branches:
-      - fix/ci-runtime-authority-efficiency-20260819
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +10,7 @@ permissions:
 
 jobs:
   repair:
-    if: github.actor != 'github-actions[bot]'
+    if: github.head_ref == 'fix/ci-runtime-authority-efficiency-20260819' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
