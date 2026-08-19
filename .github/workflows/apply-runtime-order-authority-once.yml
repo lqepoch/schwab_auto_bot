@@ -88,3 +88,5 @@ jobs:
           git reset .github/workflows/apply-runtime-order-authority-once.yml
           git commit -m 'refactor: centralize runtime order authority'
           git push origin HEAD:refactor/runtime-order-authority-20260818
+
+# Re-run after PR #115 merged its staging artifacts before runtime wiring was published.
