@@ -11,10 +11,11 @@ export type Job = {
 
 export class PriorityWriter {
   private readonly onError: (message: string) => void;
-  private queues: Job[][] = [[], [], [], []];
-  private keys = new Set<string>();
+  private readonly queues: Job[][] = [[], [], [], []];
+  private readonly keys = new Set<string>();
+  private readonly idleWaiters = new Set<() => void>();
   private active = 0;
-  private activeByPriority = [0, 0, 0, 0];
+  private readonly activeByPriority = [0, 0, 0, 0];
   private consecutiveHighPriority = 0;
   private readonly maxActive = 8;
   private readonly maxFollowupActive = 2;
@@ -42,10 +43,20 @@ export class PriorityWriter {
     });
   }
 
-  async waitIdle(): Promise<void> {
-    while (this.active > 0 || this.queues.some((queue) => queue.length > 0)) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+  waitIdle(): Promise<void> {
+    if (this.isIdle()) return Promise.resolve();
+    return new Promise((resolve) => this.idleWaiters.add(resolve));
+  }
+
+  private isIdle(): boolean {
+    return this.active === 0 && this.queues.every((queue) => queue.length === 0);
+  }
+
+  private resolveIdleWaiters(): void {
+    if (!this.isIdle() || this.idleWaiters.size === 0) return;
+    const waiters = [...this.idleWaiters];
+    this.idleWaiters.clear();
+    for (const resolve of waiters) resolve();
   }
 
   private drain(): void {
@@ -95,6 +106,7 @@ export class PriorityWriter {
       this.active -= 1;
       this.activeByPriority[job.priority] -= 1;
       this.drain();
+      this.resolveIdleWaiters();
     }
   }
 }
