@@ -14,9 +14,6 @@ import { SchwabApiError } from "../utils/errors.ts";
 import { atomicWriteJson } from "../utils/atomicJson.ts";
 import { parseRuntimePolicy } from "./policy/runtime.ts";
 import { EXIT_ORDER_PRICE, orderPolicyViolation, type Json } from "./policy/order.ts";
-import { managedOpeningInfo } from "./orderIndex.ts";
-import { RuntimeOrderMetadataCache } from "./orderMetadataCache.ts";
-import { RuntimeOrderIndexCache } from "./orderRuntimeIndex.ts";
 import { completeNetDebitFill, completeOrderLimitFill } from "./execution/fillPrice.ts";
 import { MAX_ACTIVE_ORDERS, PriceExplorer, type ExplorerAction } from "./execution/priceExplorer.ts";
 import { ExecutionJournal } from "./observability/executionJournal.ts";
@@ -59,7 +56,7 @@ import {
 import { BrokerWriteCoordinator } from "./broker/writeCoordinator.ts";
 import { brokerOrderId } from "./broker/orderIdentity.ts";
 import { exactOrderRoot } from "./broker/exactOrderResponse.ts";
-import { OrderLookup } from "./broker/orderLookup.ts";
+import { RuntimeOrderAuthority } from "./broker/runtimeOrderAuthority.ts";
 import {
   ACTIVE_ORDER_QUERY_LIMIT,
   ACTIVE_ORDER_STATUS_FILTERS,
@@ -308,11 +305,11 @@ async function api(
 const writer = new PriorityWriter(stamp);
 const finalWriteGate = new PriorityGate();
 let accountHash = "";
-let orders: Json[] = [];
-const ordersById = new OrderLookup<Json>((order) => orderId(order));
-const orderMetadata = new RuntimeOrderMetadataCache();
-const runtimeOrderIndex = new RuntimeOrderIndexCache((order) => orderMetadata.get(order));
-let orderAuthorityRevision = 0;
+const orderAuthority = new RuntimeOrderAuthority({
+  policy,
+  tradingDate: newYorkDate,
+  workingStatuses: working,
+});
 let polling = false;
 let fullSnapshotReconciled = false;
 const evaluatingExitStrategies = new Set<string>();
@@ -393,31 +390,13 @@ function flatten(source: any[]): Json[] {
   return output;
 }
 
-function info(order: Json) { return orderMetadata.get(order); }
+function info(order: Json) { return orderAuthority.info(order); }
 
 function orderId(order: Json): string { return brokerOrderId(order); }
-function replaceOrders(next: readonly Json[]): void {
-  const snapshot = [...next];
-  ordersById.replace(snapshot);
-  orders = snapshot;
-  orderAuthorityRevision += 1;
-}
-function addOrder(order: Json): boolean {
-  // An authoritative REST poll may observe a just-accepted order before the
-  // caller publishes its local synthetic copy. Keep the broker row in that
-  // race because it carries fresher status/execution metadata.
-  if (!ordersById.addIfAbsent(order)) return false;
-  orders.push(order);
-  orderAuthorityRevision += 1;
-  return true;
-}
-function getOrder(orderIdValue: string): Json | undefined {
-  return ordersById.get(orderIdValue);
-}
-function getWorkingOrder(orderIdValue: string): Json | undefined {
-  const order = getOrder(orderIdValue);
-  return order && working.has(String(order.status)) ? order : undefined;
-}
+function replaceOrders(next: readonly Json[]): void { orderAuthority.replace(next); }
+function addOrder(order: Json): boolean { return orderAuthority.addIfAbsent(order); }
+function getOrder(orderIdValue: string): Json | undefined { return orderAuthority.get(orderIdValue); }
+function getWorkingOrder(orderIdValue: string): Json | undefined { return orderAuthority.getWorking(orderIdValue); }
 function quantity(order: Json): number { return Number(order.quantity ?? 0); }
 function remaining(order: Json): number {
   return Math.max(0, quantity(order) - Number(order.filledQuantity ?? 0));
@@ -482,7 +461,7 @@ function unknownOperation(method: "POST" | "PUT" | "DELETE"): UnknownWriteFailur
 
 function baselineOrderIds(payload: Json, targetOrderId?: string): string[] {
   const payloadFingerprint = fingerprintOrder(payload);
-  const ids = orders
+  const ids = orderAuthority.all()
     .filter((order) => fingerprintOrder(order) === payloadFingerprint)
     .map(orderId);
   if (targetOrderId) ids.push(targetOrderId);
@@ -627,7 +606,7 @@ async function settleUnknownWrite(
   }
 }
 
-async function reconcileUnknownWritesAfterFullSnapshot(snapshot: readonly Json[] = orders): Promise<void> {
+async function reconcileUnknownWritesAfterFullSnapshot(snapshot: readonly Json[] = orderAuthority.all()): Promise<void> {
   try {
     const result = await unknownWriteReconciliation.reconcile(snapshot);
   for (const record of result.resolved) {
@@ -816,7 +795,7 @@ async function fetchLiveAuthoritativeOrders(now: Date, priority: Priority): Prom
       lookbackMs: ACTIVE_ORDER_SWEEP_LOOKBACK_MS,
     });
   } else {
-    const missingActiveIds = missingTrackedActiveOrderIds(orders, recent, orderId);
+    const missingActiveIds = missingTrackedActiveOrderIds(orderAuthority.all(), recent, orderId);
     for (const orderIdValue of missingActiveIds) {
       supplemental.push(...await fetchExactOrderTree(orderIdValue, priority));
     }
@@ -997,13 +976,10 @@ function applyLocalReplace(sourceId: string, payload: Json, replacementId: strin
   // Publish the synthetic replacement only when REST authority has not already
   // observed it. A concurrent broker poll wins, including its fill/status data.
   if (!addOrder(localOrder(payload, replacementId))) return;
-  const source = getOrder(sourceId);
   // Never overwrite a broker-observed terminal or transitional state that
-  // arrived while the Replace request was in flight.
-  if (source && working.has(String(source.status))) {
-    source.status = "REPLACED";
-    orderAuthorityRevision += 1;
-  }
+  // arrived while the Replace request was in flight. The authority owns the
+  // projection and cache invalidation as one operation.
+  orderAuthority.projectWorkingStatus(sourceId, "REPLACED");
   observedFillQuantities.set(replacementId, 0);
   if (info(payload)?.closing) sellDue.set(replacementId, Date.now() + EXIT_REFRESH_MS);
 }
@@ -1306,14 +1282,10 @@ async function cancelOrder(key: string, orderIdValue: string, priority: Priority
     priority,
     transportPriority: priority,
   });
-  const current = getOrder(orderIdValue);
   // A broker poll may have observed FILLED/REPLACED/PENDING_* while the Cancel
-  // response was in flight. Preserve that fresher authority instead of
-  // overwriting it with a local terminal projection.
-  if (current && working.has(String(current.status))) {
-    current.status = "CANCELED";
-    orderAuthorityRevision += 1;
-  }
+  // response was in flight. Preserve that fresher authority and let the
+  // authority own cache invalidation for a successful local projection.
+  orderAuthority.projectWorkingStatus(orderIdValue, "CANCELED");
   executionJournal.record("broker.cancel.accepted", { key, orderId: orderIdValue, path });
 }
 
@@ -1461,8 +1433,7 @@ async function runActivityRestConfirmation(): Promise<void> {
 }
 
 function managedOpening(order: Json): ReturnType<typeof info> {
-  const meta = info(order);
-  return managedOpeningInfo(order, policy, newYorkDate(), meta);
+  return orderAuthority.managedOpening(order);
 }
 
 function rememberExitTemplate(strategy: string, order: Json): void {
@@ -1548,75 +1519,31 @@ function queueExplorerActions(groupKey: string, actions: ExplorerAction[]): void
 }
 
 function activeOpeningOrders(groupKey: string): readonly Json[] {
-  return runtimeOrderIndex.activeOpeningOrders(
-    orders,
-    orderAuthorityRevision,
-    policy,
-    newYorkDate(),
-    working,
-    groupKey,
-  );
+  return orderAuthority.activeOpeningOrders(groupKey);
 }
 
 function activeClosingOrders(strategy: string): readonly Json[] {
-  return runtimeOrderIndex.activeClosingOrders(
-    orders,
-    orderAuthorityRevision,
-    policy,
-    newYorkDate(),
-    working,
-    strategy,
-  );
+  return orderAuthority.activeClosingOrders(strategy);
 }
 
 function workingAllowedUnderlyingOrders(): readonly Json[] {
-  return runtimeOrderIndex.workingAllowedOrders(
-    orders,
-    orderAuthorityRevision,
-    policy,
-    newYorkDate(),
-    working,
-  );
+  return orderAuthority.workingAllowedOrders();
 }
 
 function currentStrategyOrders(): readonly Json[] {
-  return runtimeOrderIndex.currentOrders(
-    orders,
-    orderAuthorityRevision,
-    policy,
-    newYorkDate(),
-    working,
-  );
+  return orderAuthority.currentOrders();
 }
 
 function allActiveClosingOrders(): readonly Json[] {
-  return runtimeOrderIndex.allActiveClosingOrders(
-    orders,
-    orderAuthorityRevision,
-    policy,
-    newYorkDate(),
-    working,
-  );
+  return orderAuthority.allActiveClosingOrders();
 }
 
 function primaryActiveOpeningOrders(): readonly Json[] {
-  return runtimeOrderIndex.primaryOpeningOrders(
-    orders,
-    orderAuthorityRevision,
-    policy,
-    newYorkDate(),
-    working,
-  );
+  return orderAuthority.primaryOpeningOrders();
 }
 
 function primaryActiveOpeningOrderIds(): ReadonlyMap<string, string> {
-  return runtimeOrderIndex.primaryOpeningOrderIds(
-    orders,
-    orderAuthorityRevision,
-    policy,
-    newYorkDate(),
-    working,
-  );
+  return orderAuthority.primaryOpeningOrderIds();
 }
 
 function queueFixedPriceRefresh(
@@ -2267,7 +2194,7 @@ async function runRefreshPreflight(): Promise<boolean> {
     if (admitted) {
       executionJournal.record("refresh.preflight.reconciled", {
         snapshots: ["orders", "positions"],
-        orders: orders.length,
+        orders: orderAuthority.all().length,
       });
     }
     return admitted;
