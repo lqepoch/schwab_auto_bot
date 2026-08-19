@@ -31,6 +31,27 @@ test("PriorityWriter preserves FIFO within a priority and runs higher priority f
   assert.deepEqual(events, ["low-1", "low-2", "high"]);
 });
 
+test("PriorityWriter waitIdle resolves every waiter as soon as the final job completes", async () => {
+  const gate = deferred<void>();
+  const writer = new PriorityWriter(() => undefined);
+  writer.enqueue(job("blocked", 0, async () => gate.promise));
+
+  let firstResolved = false;
+  let secondResolved = false;
+  const first = writer.waitIdle().then(() => { firstResolved = true; });
+  const second = writer.waitIdle().then(() => { secondResolved = true; });
+  await Promise.resolve();
+  assert.equal(firstResolved, false);
+  assert.equal(secondResolved, false);
+
+  gate.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(firstResolved, true);
+  assert.equal(secondResolved, true);
+  await Promise.all([first, second]);
+  await writer.waitIdle();
+});
+
 test("PriorityWriter de-duplicates a key until the first job is released", async () => {
   const gate = deferred<void>();
   const events: string[] = [];
