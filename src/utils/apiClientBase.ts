@@ -38,11 +38,13 @@ export abstract class AuthorizedApiClient {
     options: RequestOptions<T> | undefined,
     preserveResponse: boolean,
   ): Promise<T | HttpResponse<T>> {
-    // 先记录请求的基本信息，方便问题排查
     const opts = options ?? {};
     const method = (opts.method ?? 'GET').toUpperCase();
     const safeToRetryAfterRefresh = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
-    this.logger.info('发起已授权的 REST 请求', { path, method });
+    // Per-request start messages are diagnostic detail. Keep the default info
+    // stream focused on state transitions and failures so polling workloads do
+    // not pay synchronous console I/O for every authorized transport.
+    this.logger.debug('发起已授权的 REST 请求', { path, method });
 
     // Read requests may reuse TokenManager's short validated memory snapshot.
     // Mutation-like methods force a durable store read so another process's
@@ -79,24 +81,23 @@ export abstract class AuthorizedApiClient {
   protected buildQuery(
     params?: Record<string, QueryValue | QueryValue[]>,
   ): Record<string, string | number | boolean> | undefined {
-    // 将可能为数组的查询条件统一序列化成字符串
     if (!params) return undefined;
 
-    const entries = Object.entries(params).flatMap(([key, value]) => {
-      if (value === undefined || value === null) return [];
+    const query: Record<string, string | number | boolean> = {};
+    let size = 0;
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null) continue;
       if (Array.isArray(value)) {
         const joined = value
           .filter((item): item is string | number | boolean => item !== undefined && item !== null)
           .join(',');
-        return joined ? [[key, joined]] : [];
+        if (!joined) continue;
+        query[key] = joined;
+      } else {
+        query[key] = value;
       }
-      return [[key, value]];
-    });
-
-    if (!entries.length) {
-      // 没有有效参数则返回 undefined，避免出现多余的 ?
-      return undefined;
+      size += 1;
     }
-    return Object.fromEntries(entries) as Record<string, string | number | boolean>;
+    return size === 0 ? undefined : query;
   }
 }
