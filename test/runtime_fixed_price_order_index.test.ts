@@ -8,14 +8,14 @@ async function runtimeSource(): Promise<string> {
   return readFile(runtimeSourceUrl, "utf8");
 }
 
-test("fixed-price round selection uses the revision-aware primary-order cache", async () => {
+test("fixed-price round selection uses the authority-owned revision-aware primary-order cache", async () => {
   const source = await runtimeSource();
   assert.match(
     source,
-    /function primaryActiveOpeningOrders\(\): readonly Json\[\][\s\S]*?runtimeOrderIndex\.primaryOpeningOrders\(/,
+    /function primaryActiveOpeningOrders\(\): readonly Json\[\][\s\S]*?orderAuthority\.primaryOpeningOrders\(\)/,
   );
   assert.match(source, /const candidates = shuffled\(primaryActiveOpeningOrders\(\)\);/);
-  assert.doesNotMatch(source, /const candidates = shuffled\(orders\.filter\(/);
+  assert.doesNotMatch(source, /const candidates = shuffled\(orderAuthority\.all\(\)\.filter\(/);
 });
 
 test("full-order reconciliation queues only cached primary managed openings", async () => {
@@ -26,6 +26,6 @@ test("full-order reconciliation queues only cached primary managed openings", as
   );
   assert.doesNotMatch(
     source,
-    /if \(policy\.repeatBuyAtOrderPrice && fixedPriceRefreshRoundActive\) \{[\s\S]*?for \(const order of orders\) queueFixedPriceRefresh\(order, "full-order-reconciliation"/,
+    /if \(policy\.repeatBuyAtOrderPrice && fixedPriceRefreshRoundActive\) \{[\s\S]*?for \(const order of orderAuthority\.all\(\)\) queueFixedPriceRefresh\(order, "full-order-reconciliation"/,
   );
 });
