@@ -5,6 +5,7 @@ export const PRICE_MAX_CENTS = ENTRY_PRICE_MAX_CENTS;
 export const PRICE_STEP_CENTS = 1;
 export const FILL_WINDOW_MS = 10_000;
 export const MAX_ACTIVE_ORDERS = 3;
+const MAX_CONSUMED_FILL_IDS = 500;
 
 export type ExplorerAction = {
   generation: number;
@@ -18,6 +19,7 @@ export type ExplorerAction = {
 type FillEvent = { id: string; at: number };
 type LogicalOrder = {
   id: string;
+  generation: number;
   brokerOrderId: string | null;
   priceCents: number;
   createdAt: number;
@@ -48,28 +50,36 @@ export class PriceExplorer {
 
   constructor(snapshot: ExplorerSnapshot = { groups: {} }) {
     this.groups = structuredClone(snapshot.groups);
+    for (const group of Object.values(this.groups)) {
+      for (const logical of Object.values(group.logicalOrders)) {
+        if (!Number.isInteger(logical.generation) || logical.generation < 0) logical.generation = group.generation;
+      }
+    }
+    this.compactAll();
   }
 
   snapshot(): ExplorerSnapshot {
+    this.compactAll();
     return { groups: structuredClone(this.groups) };
   }
 
   registerWorkingOrder(groupKey: string, brokerOrderId: string, priceCents: number, createdAt: number): string {
     const group = this.group(groupKey);
+    const normalizedPrice = clampPrice(priceCents);
     const existing = Object.values(group.logicalOrders).find((order) => order.brokerOrderId === brokerOrderId);
     if (existing) {
-      existing.priceCents = clampPrice(priceCents);
+      existing.priceCents = normalizedPrice;
       existing.filled = false;
       return existing.id;
     }
     const reusable = Object.values(group.logicalOrders)
-      .filter((order) => order.brokerOrderId === null && !order.filled && order.priceCents === priceCents)
+      .filter((order) => order.generation === group.generation && order.brokerOrderId === null && !order.filled && order.priceCents === normalizedPrice)
       .sort((left, right) => left.createdAt - right.createdAt)[0];
     if (reusable) {
       reusable.brokerOrderId = brokerOrderId;
       return reusable.id;
     }
-    const id = this.newLogicalOrder(group, priceCents, createdAt);
+    const id = this.newLogicalOrder(group, normalizedPrice, createdAt);
     group.logicalOrders[id].brokerOrderId = brokerOrderId;
     return id;
   }
@@ -131,6 +141,7 @@ export class PriceExplorer {
         logical.brokerOrderId = null;
       }
     }
+    this.compactGroup(group);
   }
 
   activeLogicalOrders(groupKey: string): ReadonlyArray<LogicalOrder> {
@@ -151,7 +162,7 @@ export class PriceExplorer {
       logical.brokerOrderId = null;
     }
     group.consumedFillIds.push(brokerOrderId);
-    group.consumedFillIds = group.consumedFillIds.slice(-500);
+    group.consumedFillIds = group.consumedFillIds.slice(-MAX_CONSUMED_FILL_IDS);
 
     const price = actualPriceCents;
     const bucket = (group.fills[String(price)] ?? []).filter((event) => at - event.at <= FILL_WINDOW_MS);
@@ -159,6 +170,7 @@ export class PriceExplorer {
     group.fills[String(price)] = bucket;
     if (bucket.length < 2) {
       const logicalId = this.newLogicalOrder(group, price, at);
+      this.compactGroup(group);
       return { triggered: false, generation: group.generation, actions: [{
         generation: group.generation, dueAt: at, logicalId, kind: "ensure", priceCents: price,
       }] };
@@ -194,6 +206,7 @@ export class PriceExplorer {
       this.schedule(group, { generation, dueAt: at + 8_000, logicalId: explore, kind: "refresh" });
       this.schedule(group, { generation, dueAt: at + 8_200, logicalId: baseline, kind: "refresh" });
     }
+    this.compactGroup(group);
     return { triggered: true, generation, actions: this.due(groupKey, at) };
   }
 
@@ -206,6 +219,7 @@ export class PriceExplorer {
   acknowledge(groupKey: string, completed: ExplorerAction): void {
     const group = this.group(groupKey);
     group.tasks = group.tasks.filter((action) => !sameAction(action, completed));
+    this.compactGroup(group);
   }
 
   resolveThree(groupKey: string, generation: number, now: number): ExplorerAction[] {
@@ -236,6 +250,7 @@ export class PriceExplorer {
       kind: "set-price",
       priceCents: clampPrice(delayed.priceCents + 1),
     });
+    this.compactGroup(group);
     return this.due(groupKey, now);
   }
 
@@ -257,12 +272,12 @@ export class PriceExplorer {
     return actions;
   }
 
-  /** Restores unfilled logical orders that lost their broker order before submission. */
+  /** Restores current-generation unfilled logical orders that lost their broker order before submission. */
   planMissingOrderRecovery(groupKey: string, now: number): ExplorerAction[] {
     const group = this.group(groupKey);
     const slots = Math.max(0, MAX_ACTIVE_ORDERS - this.activeLogicalOrders(groupKey).length);
     return Object.values(group.logicalOrders)
-      .filter((order) => !order.filled && order.brokerOrderId === null && !this.hasPendingActionForLogicalOrder(groupKey, order.id))
+      .filter((order) => order.generation === group.generation && !order.filled && order.brokerOrderId === null && !this.hasPendingActionForLogicalOrder(groupKey, order.id))
       .sort((left, right) => left.priceCents - right.priceCents || left.createdAt - right.createdAt || left.id.localeCompare(right.id))
       .slice(0, slots)
       .map((order) => ({
@@ -287,7 +302,14 @@ export class PriceExplorer {
 
   private newLogicalOrder(group: Group, priceCents: number, createdAt: number): string {
     const id = `l${group.nextLogicalId++}`;
-    group.logicalOrders[id] = { id, brokerOrderId: null, priceCents: clampPrice(priceCents), createdAt, filled: false };
+    group.logicalOrders[id] = {
+      id,
+      generation: group.generation,
+      brokerOrderId: null,
+      priceCents: clampPrice(priceCents),
+      createdAt,
+      filled: false,
+    };
     return id;
   }
 
@@ -299,6 +321,24 @@ export class PriceExplorer {
 
   private schedule(group: Group, action: ExplorerAction): void {
     group.tasks.push(action);
+  }
+
+  private compactAll(): void {
+    for (const group of Object.values(this.groups)) this.compactGroup(group);
+  }
+
+  private compactGroup(group: Group): void {
+    group.tasks = group.tasks.filter((action) => action.generation === group.generation);
+    if (group.consumedFillIds.length > MAX_CONSUMED_FILL_IDS) {
+      group.consumedFillIds = group.consumedFillIds.slice(-MAX_CONSUMED_FILL_IDS);
+    }
+    const retained = new Set(group.firstBatch);
+    if (group.delayed) retained.add(group.delayed);
+    for (const action of group.tasks) retained.add(action.logicalId);
+    for (const [id, logical] of Object.entries(group.logicalOrders)) {
+      if (retained.has(id) || logical.brokerOrderId !== null) continue;
+      if (logical.filled || logical.generation !== group.generation) delete group.logicalOrders[id];
+    }
   }
 }
 
