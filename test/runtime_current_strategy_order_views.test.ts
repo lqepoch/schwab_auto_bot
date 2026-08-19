@@ -16,11 +16,11 @@ function block(source: string, startMarker: string, endMarker: string): string {
   return source.slice(start, end);
 }
 
-test("current-date strategy consumers reuse one revision-aware order view", async () => {
+test("current-date strategy consumers reuse the centralized revision-aware order view", async () => {
   const source = await runtimeSource();
   assert.match(
     source,
-    /function currentStrategyOrders\(\): readonly Json\[\][\s\S]*?runtimeOrderIndex\.currentOrders\(/,
+    /function currentStrategyOrders\(\): readonly Json\[\][\s\S]*?orderAuthority\.currentOrders\(\)/,
   );
 
   for (const [start, end] of [
@@ -36,11 +36,11 @@ test("current-date strategy consumers reuse one revision-aware order view", asyn
   }
 });
 
-test("non-0DTE working-order policy audit uses the broader cached working view", async () => {
+test("non-0DTE working-order policy audit uses the broader centralized working view", async () => {
   const source = await runtimeSource();
   const value = block(source, "function reportWorkingOrderPolicyViolations", "function recordRefreshSpreadSkip");
   assert.match(value, /for \(const order of workingAllowedUnderlyingOrders\(\)\)/);
-  assert.doesNotMatch(value, /for \(const order of orders\)/);
+  assert.doesNotMatch(value, /for \(const order of orderAuthority\.all\(\)\)/);
   assert.doesNotMatch(value, /currentStrategyOrders\(\)/);
   assert.match(value, /orderPolicyViolation\(order, policy, today, meta\)/);
 });
