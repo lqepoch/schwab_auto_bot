@@ -18,13 +18,25 @@ import { ReauthRequiredError } from '../utils/errors.ts';
 
 const AUTH_URL = 'https://api.schwabapi.com/v1/oauth/authorize';
 const TOKEN_URL = 'https://api.schwabapi.com/v1/oauth/token';
+const DEFAULT_TOKEN_READ_CACHE_MS = 1_000;
 
 export interface TokenManagerOptions {
   safetyWindowMs?: number;
+  /**
+   * Maximum age of an in-process validated token snapshot used by ordinary
+   * read requests. Set to 0 to force every call through the durable store.
+   * Mutation callers can request a fresh durable read regardless of this TTL.
+   */
+  tokenReadCacheMs?: number;
   logger?: Logger;
   fetch?: typeof fetch;
   timeoutMs?: number;
   onInvalidGrant?: (details: { description?: string; body: unknown }) => void;
+}
+
+export interface AccessTokenReadOptions {
+  /** Bypass the short-lived in-process snapshot and read the durable store. */
+  fresh?: boolean;
 }
 
 /**
@@ -34,6 +46,7 @@ export class TokenManager {
   private readonly config: SchwabAuthConfig;
   private readonly store: TokenStoreAdapter;
   private readonly safetyWindow: number;
+  private readonly tokenReadCacheMs: number;
   private readonly basicAuthHeader: string;
   private readonly refreshPromises = new Map<string, Promise<PersistedToken>>();
   private readonly logger: Logger;
@@ -41,6 +54,8 @@ export class TokenManager {
   private readonly timeoutMs: number;
   private readonly invalidGrantObserver?: (details: { description?: string; body: unknown }) => void;
   private reauthRequired = false;
+  private validatedToken: PersistedToken | null = null;
+  private validatedTokenAt = 0;
 
   constructor(config: SchwabAuthConfig, store?: TokenStoreAdapter, options: TokenManagerOptions = {}) {
     this.config = config;
@@ -55,6 +70,7 @@ export class TokenManager {
       });
 
     this.safetyWindow = options.safetyWindowMs ?? config.tokenSafetyWindowMs ?? 60_000;
+    this.tokenReadCacheMs = Math.max(0, options.tokenReadCacheMs ?? DEFAULT_TOKEN_READ_CACHE_MS);
     this.fetchImpl = options.fetch ?? fetch;
     this.timeoutMs = Math.max(1, options.timeoutMs ?? 30_000);
     this.invalidGrantObserver = options.onInvalidGrant;
@@ -64,6 +80,7 @@ export class TokenManager {
       redirectUri: this.config.redirectUri,
       tokenStorePath: this.store.path ?? '[custom token store adapter]',
       safetyWindowMs: this.safetyWindow,
+      tokenReadCacheMs: this.tokenReadCacheMs,
     });
   }
 
@@ -122,10 +139,10 @@ export class TokenManager {
   }
 
   /** 获取仍在有效期内的访问令牌，若即将过期则尝试提前刷新。 */
-  async getValidToken(): Promise<PersistedToken | null> {
-    this.logger.info('尝试读取可用访问令牌');
+  async getValidToken(options: AccessTokenReadOptions = {}): Promise<PersistedToken | null> {
+    this.logger.info('尝试读取可用访问令牌', { fresh: options.fresh === true });
     if (this.reauthRequired) throw new ReauthRequiredError();
-    const cached = await this.loadPersistedToken();
+    const cached = await this.loadPersistedToken(options.fresh !== true);
     if (!cached) {
       this.logger.warn('未找到本地缓存的令牌');
       return null;
@@ -157,8 +174,8 @@ export class TokenManager {
   }
 
   /** 获取可用令牌；若不存在缓存则要求调用方完成授权交换。 */
-  async requireAccessToken(): Promise<PersistedToken> {
-    const token = await this.getValidToken();
+  async requireAccessToken(options: AccessTokenReadOptions = {}): Promise<PersistedToken> {
+    const token = await this.getValidToken(options);
     if (!token) {
       this.logger.error('未找到缓存令牌，需要先执行授权');
       throw new Error('No cached Schwab token found. Call exchangeCodeForToken() first.');
@@ -177,6 +194,7 @@ export class TokenManager {
     this.logger.info('准备手动持久化令牌');
     const persisted = this.decorateToken(token);
     await this.store.save(persisted);
+    this.cacheValidatedToken(persisted);
     this.reauthRequired = false;
     this.logger.info('令牌持久化完成', { expiresAt: persisted.expires_at });
     return persisted;
@@ -218,6 +236,7 @@ export class TokenManager {
           description: analysis.description,
         });
         this.emitInvalidGrant({ description: analysis.description, body: analysis.sanitizedBody });
+        this.clearValidatedToken();
         this.reauthRequired = true;
         throw new ReauthRequiredError(
           isRefresh
@@ -259,6 +278,7 @@ export class TokenManager {
     this.logger.info('成功从 OAuth 服务器获取令牌', withDuration(start));
     const persisted = this.decorateToken(token);
     await this.store.save(persisted);
+    this.cacheValidatedToken(persisted);
     if (!isRefresh) this.reauthRequired = false;
     return persisted;
   }
@@ -277,17 +297,47 @@ export class TokenManager {
     return `${this.config.clientId}:${refreshToken}`;
   }
 
-  private async loadPersistedToken(): Promise<PersistedToken | null> {
+  private async loadPersistedToken(allowMemory: boolean): Promise<PersistedToken | null> {
+    if (allowMemory) {
+      const memory = this.readValidatedToken();
+      if (memory) return memory;
+    }
+
     const raw = await this.store.load();
-    if (raw === null) return null;
+    if (raw === null) {
+      this.clearValidatedToken();
+      return null;
+    }
     const parsed = PersistedTokenSchema.safeParse(raw);
     if (!parsed.success) {
+      this.clearValidatedToken();
       this.logger.error('令牌存储适配器返回无效令牌，fail-closed', {
         issues: parsed.error.issues,
       });
       return null;
     }
+    this.cacheValidatedToken(parsed.data);
     return parsed.data;
+  }
+
+  private readValidatedToken(): PersistedToken | null {
+    if (!this.validatedToken || this.tokenReadCacheMs <= 0) return null;
+    const now = Date.now();
+    if (now - this.validatedTokenAt > this.tokenReadCacheMs) return null;
+    // Refresh boundaries always re-read the durable store so another process's
+    // refresh-token rotation cannot be hidden behind this process-local cache.
+    if (this.validatedToken.expires_at - now <= this.safetyWindow) return null;
+    return this.validatedToken;
+  }
+
+  private cacheValidatedToken(token: PersistedToken): void {
+    this.validatedToken = token;
+    this.validatedTokenAt = Date.now();
+  }
+
+  private clearValidatedToken(): void {
+    this.validatedToken = null;
+    this.validatedTokenAt = 0;
   }
 
   private analyzeOAuthError(rawBody: string): {

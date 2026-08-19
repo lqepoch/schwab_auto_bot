@@ -41,8 +41,13 @@ export abstract class AuthorizedApiClient {
     // 先记录请求的基本信息，方便问题排查
     const opts = options ?? {};
     const method = (opts.method ?? 'GET').toUpperCase();
+    const safeToRetryAfterRefresh = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
     this.logger.info('发起已授权的 REST 请求', { path, method });
-    const token = await this.tokens.requireAccessToken();
+
+    // Read requests may reuse TokenManager's short validated memory snapshot.
+    // Mutation-like methods force a durable store read so another process's
+    // credential rotation cannot be hidden by the read-path optimization.
+    const token = await this.tokens.requireAccessToken({ fresh: !safeToRetryAfterRefresh });
     const send = (accessToken: string): Promise<T | HttpResponse<T>> => {
       const request = { ...opts, accessToken };
       return preserveResponse
@@ -52,11 +57,16 @@ export abstract class AuthorizedApiClient {
     try {
       return await send(token.access_token);
     } catch (error) {
-      const safeToRetryAfterRefresh = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
-      if (safeToRetryAfterRefresh && error instanceof SchwabApiError && error.status === 401 && token.refresh_token) {
-        this.logger.warn('捕获 401 响应，尝试刷新访问令牌后重试', { path });
-        const refreshed = await this.tokens.refreshAccessToken(token.refresh_token);
-        return await send(refreshed.access_token);
+      if (safeToRetryAfterRefresh && error instanceof SchwabApiError && error.status === 401) {
+        this.logger.warn('捕获 401 响应，重新读取持久化令牌后尝试一次安全重试', { path });
+        const latest = await this.tokens.requireAccessToken({ fresh: true });
+        if (latest.access_token !== token.access_token) {
+          return await send(latest.access_token);
+        }
+        if (latest.refresh_token) {
+          const refreshed = await this.tokens.refreshAccessToken(latest.refresh_token);
+          return await send(refreshed.access_token);
+        }
       }
       this.logger.error('REST 请求失败', {
         path,
