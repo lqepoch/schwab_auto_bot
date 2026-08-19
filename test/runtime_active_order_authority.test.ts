@@ -16,7 +16,7 @@ test("runtime hydrates and refreshes active orders outside the short recent wind
   assert.match(helper, /activeOrderSweepDue\(lastActiveOrderSweepAt, now\.getTime\(\)\)/);
   assert.match(helper, /for \(const status of ACTIVE_ORDER_STATUS_FILTERS\)/);
   assert.match(helper, /ACTIVE_ORDER_SWEEP_LOOKBACK_MS/);
-  assert.match(helper, /missingTrackedActiveOrderIds\(orders, recent, orderId\)/);
+  assert.match(helper, /missingTrackedActiveOrderIds\(orderAuthority\.all\(\), recent, orderId\)/);
   assert.match(helper, /fetchExactOrderTree\(orderIdValue, priority\)/);
   assert.match(helper, /mergeCurrentAuthority\(recent, supplemental, orderId\)/);
 

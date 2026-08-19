@@ -8,14 +8,14 @@ async function runtimeSource(): Promise<string> {
   return readFile(runtimeSourceUrl, "utf8");
 }
 
-test("local accepted Submit initializes fill state only when its synthetic row wins publication", async () => {
+test("local accepted Submit initializes fill state only when its synthetic row wins authority publication", async () => {
   const source = await runtimeSource();
-  assert.match(source, /function addOrder\(order: Json\): boolean/);
-  assert.match(source, /if \(!ordersById\.addIfAbsent\(order\)\) return false;/);
+  assert.match(source, /function addOrder\(order: Json\): boolean \{ return orderAuthority\.addIfAbsent\(order\); \}/);
   assert.match(
     source,
     /function applyLocalSubmit[\s\S]*?if \(!addOrder\(localOrder\(payload, id\)\)\) return;[\s\S]*?observedFillQuantities\.set\(id, 0\);/,
   );
+  assert.doesNotMatch(source, /ordersById\.addIfAbsent/);
 });
 
 test("local Replace projection cannot overwrite broker authority that won the response race", async () => {
@@ -27,23 +27,20 @@ test("local Replace projection cannot overwrite broker authority that won the re
   const block = source.slice(start, end);
 
   assert.match(block, /if \(!addOrder\(localOrder\(payload, replacementId\)\)\) return;/);
-  assert.match(block, /const source = getOrder\(sourceId\);/);
-  assert.match(
-    block,
-    /if \(source && working\.has\(String\(source\.status\)\)\) \{[\s\S]*?source\.status = "REPLACED";[\s\S]*?orderAuthorityRevision \+= 1;[\s\S]*?\}/,
-  );
+  assert.match(block, /orderAuthority\.projectWorkingStatus\(sourceId, "REPLACED"\);/);
   assert.ok(
     block.indexOf("if (!addOrder(localOrder(payload, replacementId))) return;")
-      < block.indexOf("source.status = \"REPLACED\""),
+      < block.indexOf("orderAuthority.projectWorkingStatus(sourceId, \"REPLACED\")"),
     "replacement publication must be decided before projecting the source status",
   );
+  assert.doesNotMatch(block, /source\.status = "REPLACED"/);
 });
 
-test("local Cancel projection preserves a concurrently observed broker state", async () => {
+test("local Cancel projection preserves a concurrently observed broker state through authority ownership", async () => {
   const source = await runtimeSource();
   assert.match(
     source,
-    /const current = getOrder\(orderIdValue\);[\s\S]*?if \(current && working\.has\(String\(current\.status\)\)\) \{[\s\S]*?current\.status = "CANCELED";[\s\S]*?orderAuthorityRevision \+= 1;[\s\S]*?\}[\s\S]*?broker\.cancel\.accepted/,
+    /orderAuthority\.projectWorkingStatus\(orderIdValue, "CANCELED"\);[\s\S]*?broker\.cancel\.accepted/,
   );
-  assert.doesNotMatch(source, /if \(current\) current\.status = "CANCELED";/);
+  assert.doesNotMatch(source, /current\.status = "CANCELED"/);
 });

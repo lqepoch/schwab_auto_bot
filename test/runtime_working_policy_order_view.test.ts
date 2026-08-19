@@ -8,11 +8,11 @@ async function runtimeSource(): Promise<string> {
   return readFile(runtimeSourceUrl, "utf8");
 }
 
-test("working-order policy audit consumes the cached allowed-underlying view", async () => {
+test("working-order policy audit consumes the authority-owned allowed-underlying view", async () => {
   const source = await runtimeSource();
   assert.match(
     source,
-    /function workingAllowedUnderlyingOrders\(\): readonly Json\[\][\s\S]*?runtimeOrderIndex\.workingAllowedOrders\(/,
+    /function workingAllowedUnderlyingOrders\(\): readonly Json\[\][\s\S]*?orderAuthority\.workingAllowedOrders\(\)/,
   );
 
   const start = source.indexOf("function reportWorkingOrderPolicyViolations");
@@ -22,6 +22,6 @@ test("working-order policy audit consumes the cached allowed-underlying view", a
   const block = source.slice(start, end);
   assert.match(block, /for \(const order of workingAllowedUnderlyingOrders\(\)\)/);
   assert.match(block, /orderPolicyViolation\(order, policy, today, meta\)/);
-  assert.doesNotMatch(block, /for \(const order of orders\)/);
+  assert.doesNotMatch(block, /for \(const order of orderAuthority\.all\(\)\)/);
   assert.doesNotMatch(block, /currentStrategyOrders\(\)/);
 });
