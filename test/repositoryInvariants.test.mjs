@@ -30,6 +30,7 @@ test('unified and deep CI share one repository invariant entrypoint', async () =
 
 test('shared repository invariant script retains the permanent safety guards', async () => {
   const source = await readFile(paths.script, 'utf8');
+  const staleVendorPath = 'vendor/schwab-' + 'api-nodejs';
   for (const contract of [
     'set -euo pipefail',
     'git diff --check',
@@ -39,7 +40,7 @@ test('shared repository invariant script retains the permanent safety guards', a
     "-name 'patch-*.py'",
     'scripts/enterprise-convergence-edit.mjs',
     'scripts/enterprise-finish-edit.mjs',
-    'vendor/schwab-api-nodejs',
+    staleVendorPath,
     'npx --yes kn',
   ]) {
     assert.equal(source.includes(contract), true, `missing invariant contract: ${contract}`);
