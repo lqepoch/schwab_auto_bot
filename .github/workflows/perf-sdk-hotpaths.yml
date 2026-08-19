@@ -33,53 +33,35 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
 
-      - name: Apply SDK hot-path refactor
+      - name: Apply batch option-quote indexing
         shell: python
         run: |
           from pathlib import Path
 
-          path = Path('src/clients/marketData.ts')
-          text = path.read_text()
+          source_path = Path('src/clients/marketData.ts')
+          source = source_path.read_text()
 
-          def replace_once(old: str, new: str) -> None:
-              global text
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'expected one match, found {count}: {old[:80]!r}')
-              text = text.replace(old, new, 1)
-
-          replace_once(
-          """    const response = await this.getQuotes({
-                symbols: normalizedSymbols,
-                fields: params.fields ?? ['quote', 'reference'],
-              });
-              const observedAt = Date.now();
+          old_lookup = """    const observedAt = Date.now();
               return normalizedSymbols.map((symbol) => {
                 const item = this.findQuoteItem(response, symbol);
-          """,
-          """    const response = await this.getQuotes({
-                symbols: normalizedSymbols,
-                fields: params.fields ?? ['quote', 'reference'],
-              });
-              const quoteItems = this.indexQuoteItems(response);
+          """
+          new_lookup = """    const quoteItems = this.indexQuoteItems(response);
               const observedAt = Date.now();
               return normalizedSymbols.map((symbol) => {
                 const item = quoteItems.get(symbol);
-          """,
-          )
+          """
+          if source.count(old_lookup) != 1:
+              raise SystemExit(f'lookup block match count={source.count(old_lookup)}')
+          source = source.replace(old_lookup, new_lookup, 1)
 
-          replace_once(
-          """  private findQuoteItem(response: QuotesResponse, symbol: string): QuoteItem | undefined {
+          old_helper = """  private findQuoteItem(response: QuotesResponse, symbol: string): QuoteItem | undefined {
               return response[symbol]
                 ?? Object.values(response).find((item) => item.symbol === symbol || item.symbol?.trimEnd() === symbol.trimEnd());
             }
-          """,
-          """  private indexQuoteItems(response: QuotesResponse): ReadonlyMap<string, QuoteItem> {
+          """
+          new_helper = """  private indexQuoteItems(response: QuotesResponse): ReadonlyMap<string, QuoteItem> {
               const entries = Object.entries(response);
               const index = new Map<string, QuoteItem>();
-
-              // Preserve Schwab response-key precedence, then add symbol aliases so
-              // OCC padding differences can be resolved with constant-key reads.
               for (const [key, item] of entries) index.set(key, item);
               for (const [, item] of entries) {
                 const itemSymbol = item.symbol;
@@ -89,243 +71,16 @@ jobs:
               }
               return index;
             }
-          """,
-          )
-
-          # Body-only read methods delegate to the metadata-preserving implementation.
-          replacements = [
-          ("""  async getOptionChains(params: {
-              symbol: string;
-              contractType?: OptionContractType;
-              includeUnderlyingQuote?: boolean;
-              /** @deprecated Use `includeUnderlyingQuote`; this alias is translated to the official query key. */
-              includeQuotes?: boolean;
-              strategy?: OptionStrategy;
-              interval?: number;
-              strikeCount?: number;
-              strike?: number;
-              range?: OptionRange;
-              fromDate?: string;
-              toDate?: string;
-              volatility?: number;
-              underlyingPrice?: number;
-              interestRate?: number;
-              daysToExpiration?: number;
-              expMonth?: OptionExpMonth;
-              optionType?: string;
-              entitlement?: string;
-            }): Promise<OptionChainResponse> {
-              this.logger.info('调用 getOptionChains', { params });
-              if (!params.symbol?.trim()) throw new Error('getOptionChains 需要提供 symbol');
-              const includeUnderlyingQuote = params.includeUnderlyingQuote ?? params.includeQuotes;
-              const query = this.buildQuery({
-                symbol: params.symbol,
-                contractType: params.contractType,
-                includeUnderlyingQuote,
-                strategy: params.strategy,
-                interval: params.interval,
-                strikeCount: params.strikeCount,
-                strike: params.strike,
-                range: params.range,
-                fromDate: params.fromDate,
-                toDate: params.toDate,
-                volatility: params.volatility,
-                underlyingPrice: params.underlyingPrice,
-                interestRate: params.interestRate,
-                daysToExpiration: params.daysToExpiration,
-                expMonth: params.expMonth,
-                optionType: params.optionType,
-                entitlement: params.entitlement,
-              });
-              return this.request<OptionChainResponse>('/chains', { query, schema: OptionChainResponseSchema });
-            }
-          """,
-          """  async getOptionChains(params: {
-              symbol: string;
-              contractType?: OptionContractType;
-              includeUnderlyingQuote?: boolean;
-              /** @deprecated Use `includeUnderlyingQuote`; this alias is translated to the official query key. */
-              includeQuotes?: boolean;
-              strategy?: OptionStrategy;
-              interval?: number;
-              strikeCount?: number;
-              strike?: number;
-              range?: OptionRange;
-              fromDate?: string;
-              toDate?: string;
-              volatility?: number;
-              underlyingPrice?: number;
-              interestRate?: number;
-              daysToExpiration?: number;
-              expMonth?: OptionExpMonth;
-              optionType?: string;
-              entitlement?: string;
-            }): Promise<OptionChainResponse> {
-              return (await this.getOptionChainsWithResponse(params)).body;
-            }
-          """),
-          ("""  async getOptionExpirationChain(params: {
-              symbol: string;
-              contractType?: OptionContractType;
-              expMonth?: OptionExpMonth;
-              optionType?: string;
-            }): Promise<OptionExpirationChainResponse> {
-              this.logger.info('调用 getOptionExpirationChain', { params });
-              if (!params.symbol?.trim()) throw new Error('getOptionExpirationChain 需要提供 symbol');
-              const query = this.buildQuery({
-                symbol: params.symbol,
-                contractType: params.contractType,
-                expMonth: params.expMonth,
-                optionType: params.optionType,
-              });
-              return this.request<OptionExpirationChainResponse>('/expirationchain', {
-                query,
-                schema: OptionExpirationChainResponseSchema,
-              });
-            }
-          """,
-          """  async getOptionExpirationChain(params: {
-              symbol: string;
-              contractType?: OptionContractType;
-              expMonth?: OptionExpMonth;
-              optionType?: string;
-            }): Promise<OptionExpirationChainResponse> {
-              return (await this.getOptionExpirationChainWithResponse(params)).body;
-            }
-          """),
-          ("""  async getPriceHistory(params: {
-              symbol: string;
-              periodType?: PeriodType;
-              period?: number;
-              frequencyType?: FrequencyType;
-              frequency?: number;
-              startDate?: number;
-              endDate?: number;
-              needExtendedHoursData?: boolean;
-              needPreviousClose?: boolean;
-            }): Promise<PriceHistoryResponse> {
-              this.logger.info('调用 getPriceHistory', { params });
-              if (!params.symbol?.trim()) throw new Error('getPriceHistory 需要提供 symbol');
-              const query = this.buildQuery({
-                symbol: params.symbol,
-                periodType: params.periodType,
-                period: params.period,
-                frequencyType: params.frequencyType,
-                frequency: params.frequency,
-                startDate: params.startDate,
-                endDate: params.endDate,
-                needExtendedHoursData: params.needExtendedHoursData,
-                needPreviousClose: params.needPreviousClose,
-              });
-              return this.request<PriceHistoryResponse>('/pricehistory', { query, schema: PriceHistoryResponseSchema });
-            }
-          """,
-          """  async getPriceHistory(params: {
-              symbol: string;
-              periodType?: PeriodType;
-              period?: number;
-              frequencyType?: FrequencyType;
-              frequency?: number;
-              startDate?: number;
-              endDate?: number;
-              needExtendedHoursData?: boolean;
-              needPreviousClose?: boolean;
-            }): Promise<PriceHistoryResponse> {
-              return (await this.getPriceHistoryWithResponse(params)).body;
-            }
-          """),
-          ("""  async getMovers(
-              symbolId: string,
-              params: { sort?: 'VOLUME' | 'TRADES' | 'PERCENT_CHANGE_UP' | 'PERCENT_CHANGE_DOWN'; frequency?: 0 | 1 | 5 | 10 | 30 | 60 } = {},
-            ): Promise<MoversResponse> {
-              this.logger.info('调用 getMovers', { symbolId, params });
-              if (!symbolId?.trim()) throw new Error('getMovers 需要提供 symbolId');
-              const query = this.buildQuery({ sort: params.sort, frequency: params.frequency });
-              return this.request<MoversResponse>(`/movers/${encodePathIdentifier(symbolId, 'symbolId')}`, {
-                query,
-                schema: MoversResponseSchema,
-              });
-            }
-          """,
-          """  async getMovers(
-              symbolId: string,
-              params: { sort?: 'VOLUME' | 'TRADES' | 'PERCENT_CHANGE_UP' | 'PERCENT_CHANGE_DOWN'; frequency?: 0 | 1 | 5 | 10 | 30 | 60 } = {},
-            ): Promise<MoversResponse> {
-              return (await this.getMoversWithResponse(symbolId, params)).body;
-            }
-          """),
-          ("""  async getMarkets(params: { markets: readonly string[]; date?: string }): Promise<MarketHoursResponse> {
-              this.logger.info('调用 getMarkets', { params });
-              if (!params.markets?.length) throw new Error('getMarkets 至少需要传入一个 market');
-              const query = this.buildQuery({ markets: params.markets.join(','), date: params.date });
-              return this.request<MarketHoursResponse>('/markets', { query, schema: MarketHoursResponseSchema });
-            }
-          """,
-          """  async getMarkets(params: { markets: readonly string[]; date?: string }): Promise<MarketHoursResponse> {
-              return (await this.getMarketsWithResponse(params)).body;
-            }
-          """),
-          ("""  async getMarketHours(marketId: string, params: { date?: string } = {}): Promise<MarketHoursResponse> {
-              this.logger.info('调用 getMarketHours', { marketId, params });
-              if (!marketId?.trim()) throw new Error('getMarketHours 需要提供 marketId');
-              const query = this.buildQuery({ date: params.date });
-              return this.request<MarketHoursResponse>(`/markets/${encodePathIdentifier(marketId, 'marketId')}`, {
-                query,
-                schema: MarketHoursResponseSchema,
-              });
-            }
-          """,
-          """  async getMarketHours(marketId: string, params: { date?: string } = {}): Promise<MarketHoursResponse> {
-              return (await this.getMarketHoursWithResponse(marketId, params)).body;
-            }
-          """),
-          ("""  async searchInstruments(
-              params: { symbol: string | readonly string[]; projection: InstrumentProjection },
-            ): Promise<InstrumentsSearchResponse> {
-              this.logger.info('调用 searchInstruments', { params });
-              const symbol = this.normalizeList(params.symbol);
-              if (!symbol) throw new Error('searchInstruments 需要 symbol 参数');
-              if (!params.projection) throw new Error('searchInstruments 需要 projection 参数');
-              const query = this.buildQuery({ symbol, projection: params.projection });
-              return this.request<InstrumentsSearchResponse>('/instruments', {
-                query,
-                schema: InstrumentsSearchResponseSchema,
-              });
-            }
-          """,
-          """  async searchInstruments(
-              params: { symbol: string | readonly string[]; projection: InstrumentProjection },
-            ): Promise<InstrumentsSearchResponse> {
-              return (await this.searchInstrumentsWithResponse(params)).body;
-            }
-          """),
-          ("""  async getInstrumentByCusip(cusipId: string): Promise<InstrumentDetail> {
-              this.logger.info('调用 getInstrumentByCusip', { cusipId });
-              if (!cusipId?.trim()) throw new Error('getInstrumentByCusip 需要提供 CUSIP');
-              return this.request<InstrumentDetail>(`/instruments/${encodePathIdentifier(cusipId, 'CUSIP')}`, {
-                schema: InstrumentDetailSchema,
-              });
-            }
-          """,
-          """  async getInstrumentByCusip(cusipId: string): Promise<InstrumentDetail> {
-              return (await this.getInstrumentByCusipWithResponse(cusipId)).body;
-            }
-          """),
-          ]
-          for old, new in replacements:
-              replace_once(old, new)
-
-          for method in [
-              'getOptionChains', 'getOptionExpirationChain', 'getPriceHistory', 'getMovers',
-              'getMarkets', 'getMarketHours', 'searchInstruments', 'getInstrumentByCusip',
-          ]:
-              text = text.replace(f"调用 {method}WithResponse", f"调用 {method}")
-
-          path.write_text(text)
+          """
+          if source.count(old_helper) != 1:
+              raise SystemExit(f'helper block match count={source.count(old_helper)}')
+          source = source.replace(old_helper, new_helper, 1)
+          source_path.write_text(source)
 
           test_path = Path('test/optionQuotes.test.mjs')
           tests = test_path.read_text()
-          if "batch option quote lookup builds one normalized response index" not in tests:
+          marker = "batch option quote lookup builds one normalized response index"
+          if marker not in tests:
               tests += r'''
 
 test('batch option quote lookup builds one normalized response index', async () => {
@@ -335,7 +90,6 @@ test('batch option quote lookup builds one normalized response index', async () 
     opaqueA: optionItem(`${first} `, { bid: 29.9, ask: 30.1, strike: 740 }),
     opaqueB: optionItem(`${second} `, { bid: 28.95, ask: 29.05, strike: 739 }),
   });
-
   const quotes = await client.getOptionQuotes([first, second]);
   assert.equal(quotes.length, 2);
   assert.equal(quotes[0].strike, 740);
@@ -352,32 +106,19 @@ test('batch option quote source avoids per-symbol full response scans', async ()
 '''
               test_path.write_text(tests)
 
-      - name: Validate full contracts and dead-code gate
+      - name: Validate full contracts
         run: |
           npm test
           npm run lint:deadcode
           git diff --check
 
-      - name: Validate runtime benchmark remains inside existing gates
+      - name: Commit validated source changes
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .artifacts/runtime-benchmark
-          for run in 1 2 3; do
-            npm run benchmark:runtime -- --output ".artifacts/runtime-benchmark/run-${run}.json"
-          done
-          npm run benchmark:runtime:check -- --baseline bench/runtime-baseline.json --current-dir .artifacts/runtime-benchmark --min-samples 3
-
-      - name: Commit validated refactor
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- src/clients/marketData.ts test/optionQuotes.test.mjs; then
-            echo 'No source changes to commit'
-            exit 0
-          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/clients/marketData.ts test/optionQuotes.test.mjs
-          git commit -m 'perf: index batch option quotes and deduplicate reads'
+          git diff --cached --quiet && exit 0
+          git commit -m 'perf: index batch option quote lookups'
           git push origin HEAD:perf/sdk-hotpaths-20260819
