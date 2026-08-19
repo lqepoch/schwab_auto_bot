@@ -117,9 +117,10 @@ export class MarketDataApiClient extends AuthorizedApiClient {
       symbols: normalizedSymbols,
       fields: params.fields ?? ['quote', 'reference'],
     });
+    const quoteItems = this.indexQuoteItems(response);
     const observedAt = Date.now();
     return normalizedSymbols.map((symbol) => {
-      const item = this.findQuoteItem(response, symbol);
+      const item = quoteItems.get(symbol);
       if (!item) throw new Error(`Schwab 未返回期权行情: ${symbol}`);
       if (item.assetMainType !== 'OPTION') {
         throw new Error(`请求的 symbol 不是期权合约: ${symbol} assetMainType=${String(item.assetMainType)}`);
@@ -206,29 +207,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     optionType?: string;
     entitlement?: string;
   }): Promise<OptionChainResponse> {
-    this.logger.info('调用 getOptionChains', { params });
-    if (!params.symbol?.trim()) throw new Error('getOptionChains 需要提供 symbol');
-    const includeUnderlyingQuote = params.includeUnderlyingQuote ?? params.includeQuotes;
-    const query = this.buildQuery({
-      symbol: params.symbol,
-      contractType: params.contractType,
-      includeUnderlyingQuote,
-      strategy: params.strategy,
-      interval: params.interval,
-      strikeCount: params.strikeCount,
-      strike: params.strike,
-      range: params.range,
-      fromDate: params.fromDate,
-      toDate: params.toDate,
-      volatility: params.volatility,
-      underlyingPrice: params.underlyingPrice,
-      interestRate: params.interestRate,
-      daysToExpiration: params.daysToExpiration,
-      expMonth: params.expMonth,
-      optionType: params.optionType,
-      entitlement: params.entitlement,
-    });
-    return this.request<OptionChainResponse>('/chains', { query, schema: OptionChainResponseSchema });
+    return (await this.getOptionChainsWithResponse(params)).body;
   }
 
   async getOptionChainsWithResponse(params: {
@@ -251,7 +230,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     optionType?: string;
     entitlement?: string;
   }): Promise<HttpResponse<OptionChainResponse>> {
-    this.logger.info('调用 getOptionChainsWithResponse', { params });
+    this.logger.info('调用 getOptionChains', { params });
     if (!params.symbol?.trim()) throw new Error('getOptionChains 需要提供 symbol');
     const includeUnderlyingQuote = params.includeUnderlyingQuote ?? params.includeQuotes;
     const query = this.buildQuery({ ...params, includeUnderlyingQuote, includeQuotes: undefined });
@@ -265,18 +244,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     expMonth?: OptionExpMonth;
     optionType?: string;
   }): Promise<OptionExpirationChainResponse> {
-    this.logger.info('调用 getOptionExpirationChain', { params });
-    if (!params.symbol?.trim()) throw new Error('getOptionExpirationChain 需要提供 symbol');
-    const query = this.buildQuery({
-      symbol: params.symbol,
-      contractType: params.contractType,
-      expMonth: params.expMonth,
-      optionType: params.optionType,
-    });
-    return this.request<OptionExpirationChainResponse>('/expirationchain', {
-      query,
-      schema: OptionExpirationChainResponseSchema,
-    });
+    return (await this.getOptionExpirationChainWithResponse(params)).body;
   }
 
   async getOptionExpirationChainWithResponse(params: {
@@ -285,7 +253,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     expMonth?: OptionExpMonth;
     optionType?: string;
   }): Promise<HttpResponse<OptionExpirationChainResponse>> {
-    this.logger.info('调用 getOptionExpirationChainWithResponse', { params });
+    this.logger.info('调用 getOptionExpirationChain', { params });
     if (!params.symbol?.trim()) throw new Error('getOptionExpirationChain 需要提供 symbol');
     const query = this.buildQuery(params);
     return this.requestWithResponse<OptionExpirationChainResponse>('/expirationchain', {
@@ -306,20 +274,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     needExtendedHoursData?: boolean;
     needPreviousClose?: boolean;
   }): Promise<PriceHistoryResponse> {
-    this.logger.info('调用 getPriceHistory', { params });
-    if (!params.symbol?.trim()) throw new Error('getPriceHistory 需要提供 symbol');
-    const query = this.buildQuery({
-      symbol: params.symbol,
-      periodType: params.periodType,
-      period: params.period,
-      frequencyType: params.frequencyType,
-      frequency: params.frequency,
-      startDate: params.startDate,
-      endDate: params.endDate,
-      needExtendedHoursData: params.needExtendedHoursData,
-      needPreviousClose: params.needPreviousClose,
-    });
-    return this.request<PriceHistoryResponse>('/pricehistory', { query, schema: PriceHistoryResponseSchema });
+    return (await this.getPriceHistoryWithResponse(params)).body;
   }
 
   async getPriceHistoryWithResponse(params: {
@@ -333,7 +288,7 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     needExtendedHoursData?: boolean;
     needPreviousClose?: boolean;
   }): Promise<HttpResponse<PriceHistoryResponse>> {
-    this.logger.info('调用 getPriceHistoryWithResponse', { params });
+    this.logger.info('调用 getPriceHistory', { params });
     if (!params.symbol?.trim()) throw new Error('getPriceHistory 需要提供 symbol');
     const query = this.buildQuery(params);
     return this.requestWithResponse<PriceHistoryResponse>('/pricehistory', { query, schema: PriceHistoryResponseSchema });
@@ -344,20 +299,14 @@ export class MarketDataApiClient extends AuthorizedApiClient {
     symbolId: string,
     params: { sort?: 'VOLUME' | 'TRADES' | 'PERCENT_CHANGE_UP' | 'PERCENT_CHANGE_DOWN'; frequency?: 0 | 1 | 5 | 10 | 30 | 60 } = {},
   ): Promise<MoversResponse> {
-    this.logger.info('调用 getMovers', { symbolId, params });
-    if (!symbolId?.trim()) throw new Error('getMovers 需要提供 symbolId');
-    const query = this.buildQuery({ sort: params.sort, frequency: params.frequency });
-    return this.request<MoversResponse>(`/movers/${encodePathIdentifier(symbolId, 'symbolId')}`, {
-      query,
-      schema: MoversResponseSchema,
-    });
+    return (await this.getMoversWithResponse(symbolId, params)).body;
   }
 
   async getMoversWithResponse(
     symbolId: string,
     params: { sort?: 'VOLUME' | 'TRADES' | 'PERCENT_CHANGE_UP' | 'PERCENT_CHANGE_DOWN'; frequency?: 0 | 1 | 5 | 10 | 30 | 60 } = {},
   ): Promise<HttpResponse<MoversResponse>> {
-    this.logger.info('调用 getMoversWithResponse', { symbolId, params });
+    this.logger.info('调用 getMovers', { symbolId, params });
     if (!symbolId?.trim()) throw new Error('getMovers 需要提供 symbolId');
     const query = this.buildQuery(params);
     return this.requestWithResponse<MoversResponse>(`/movers/${encodePathIdentifier(symbolId, 'symbolId')}`, {
@@ -368,14 +317,11 @@ export class MarketDataApiClient extends AuthorizedApiClient {
 
   /** `GET /markets`：批量查询市场开闭市时间。 */
   async getMarkets(params: { markets: readonly string[]; date?: string }): Promise<MarketHoursResponse> {
-    this.logger.info('调用 getMarkets', { params });
-    if (!params.markets?.length) throw new Error('getMarkets 至少需要传入一个 market');
-    const query = this.buildQuery({ markets: params.markets.join(','), date: params.date });
-    return this.request<MarketHoursResponse>('/markets', { query, schema: MarketHoursResponseSchema });
+    return (await this.getMarketsWithResponse(params)).body;
   }
 
   async getMarketsWithResponse(params: { markets: readonly string[]; date?: string }): Promise<HttpResponse<MarketHoursResponse>> {
-    this.logger.info('调用 getMarketsWithResponse', { params });
+    this.logger.info('调用 getMarkets', { params });
     if (!params.markets?.length) throw new Error('getMarkets 至少需要传入一个 market');
     const query = this.buildQuery({ markets: params.markets.join(','), date: params.date });
     return this.requestWithResponse<MarketHoursResponse>('/markets', { query, schema: MarketHoursResponseSchema });
@@ -383,20 +329,14 @@ export class MarketDataApiClient extends AuthorizedApiClient {
 
   /** `GET /markets/{market}`：查询单个市场开闭市时间。 */
   async getMarketHours(marketId: string, params: { date?: string } = {}): Promise<MarketHoursResponse> {
-    this.logger.info('调用 getMarketHours', { marketId, params });
-    if (!marketId?.trim()) throw new Error('getMarketHours 需要提供 marketId');
-    const query = this.buildQuery({ date: params.date });
-    return this.request<MarketHoursResponse>(`/markets/${encodePathIdentifier(marketId, 'marketId')}`, {
-      query,
-      schema: MarketHoursResponseSchema,
-    });
+    return (await this.getMarketHoursWithResponse(marketId, params)).body;
   }
 
   async getMarketHoursWithResponse(
     marketId: string,
     params: { date?: string } = {},
   ): Promise<HttpResponse<MarketHoursResponse>> {
-    this.logger.info('调用 getMarketHoursWithResponse', { marketId, params });
+    this.logger.info('调用 getMarketHours', { marketId, params });
     if (!marketId?.trim()) throw new Error('getMarketHours 需要提供 marketId');
     const query = this.buildQuery(params);
     return this.requestWithResponse<MarketHoursResponse>(`/markets/${encodePathIdentifier(marketId, 'marketId')}`, {
@@ -409,21 +349,13 @@ export class MarketDataApiClient extends AuthorizedApiClient {
   async searchInstruments(
     params: { symbol: string | readonly string[]; projection: InstrumentProjection },
   ): Promise<InstrumentsSearchResponse> {
-    this.logger.info('调用 searchInstruments', { params });
-    const symbol = this.normalizeList(params.symbol);
-    if (!symbol) throw new Error('searchInstruments 需要 symbol 参数');
-    if (!params.projection) throw new Error('searchInstruments 需要 projection 参数');
-    const query = this.buildQuery({ symbol, projection: params.projection });
-    return this.request<InstrumentsSearchResponse>('/instruments', {
-      query,
-      schema: InstrumentsSearchResponseSchema,
-    });
+    return (await this.searchInstrumentsWithResponse(params)).body;
   }
 
   async searchInstrumentsWithResponse(
     params: { symbol: string | readonly string[]; projection: InstrumentProjection },
   ): Promise<HttpResponse<InstrumentsSearchResponse>> {
-    this.logger.info('调用 searchInstrumentsWithResponse', { params });
+    this.logger.info('调用 searchInstruments', { params });
     const symbol = this.normalizeList(params.symbol);
     if (!symbol) throw new Error('searchInstruments 需要 symbol 参数');
     if (!params.projection) throw new Error('searchInstruments 需要 projection 参数');
@@ -436,24 +368,34 @@ export class MarketDataApiClient extends AuthorizedApiClient {
 
   /** `GET /instruments/{cusip}`：通过 CUSIP 查询单个标的基本信息。 */
   async getInstrumentByCusip(cusipId: string): Promise<InstrumentDetail> {
-    this.logger.info('调用 getInstrumentByCusip', { cusipId });
-    if (!cusipId?.trim()) throw new Error('getInstrumentByCusip 需要提供 CUSIP');
-    return this.request<InstrumentDetail>(`/instruments/${encodePathIdentifier(cusipId, 'CUSIP')}`, {
-      schema: InstrumentDetailSchema,
-    });
+    return (await this.getInstrumentByCusipWithResponse(cusipId)).body;
   }
 
   async getInstrumentByCusipWithResponse(cusipId: string): Promise<HttpResponse<InstrumentDetail>> {
-    this.logger.info('调用 getInstrumentByCusipWithResponse', { cusipId });
+    this.logger.info('调用 getInstrumentByCusip', { cusipId });
     if (!cusipId?.trim()) throw new Error('getInstrumentByCusip 需要提供 CUSIP');
     return this.requestWithResponse<InstrumentDetail>(`/instruments/${encodePathIdentifier(cusipId, 'CUSIP')}`, {
       schema: InstrumentDetailSchema,
     });
   }
 
-  private findQuoteItem(response: QuotesResponse, symbol: string): QuoteItem | undefined {
-    return response[symbol]
-      ?? Object.values(response).find((item) => item.symbol === symbol || item.symbol?.trimEnd() === symbol.trimEnd());
+  private indexQuoteItems(response: QuotesResponse): ReadonlyMap<string, QuoteItem> {
+    const entries = Object.entries(response);
+    const index = new Map<string, QuoteItem>();
+
+    // Keep direct Schwab response keys authoritative, then add aliases for the
+    // symbol carried by each quote row. This preserves existing lookup priority
+    // while turning batch fallback matching into one linear index build.
+    for (const [key, item] of entries) index.set(key, item);
+    for (const [key, item] of entries) {
+      const normalizedKey = key.trimEnd();
+      if (normalizedKey && !index.has(normalizedKey)) index.set(normalizedKey, item);
+      const itemSymbol = item.symbol;
+      if (itemSymbol && !index.has(itemSymbol)) index.set(itemSymbol, item);
+      const normalizedSymbol = itemSymbol?.trimEnd();
+      if (normalizedSymbol && !index.has(normalizedSymbol)) index.set(normalizedSymbol, item);
+    }
+    return index;
   }
 
   private normalizeOptionQuote(item: QuoteItem, observedAt: number): NormalizedOptionQuote {
