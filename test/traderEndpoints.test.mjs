@@ -17,9 +17,15 @@ function makeClient(responses = {}) {
     async requestWithResponse(path, options) {
       calls.push({ kind: 'requestWithResponse', path, options });
       const response = responses[path];
-      return typeof response === 'function'
-        ? response(options)
-        : response ?? { body: undefined, headers: new Headers(), status: 200 };
+      const resolved = typeof response === 'function' ? response(options) : response ?? [];
+      if (
+        resolved
+        && typeof resolved === 'object'
+        && !Array.isArray(resolved)
+        && 'body' in resolved
+        && 'headers' in resolved
+      ) return resolved;
+      return { body: resolved, headers: new Headers(), status: 200 };
     },
   };
   const tokens = {
