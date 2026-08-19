@@ -69,14 +69,11 @@ export class TraderApiClient extends AuthorizedApiClient {
 
   /** `GET /accounts/accountNumbers`：获取账号明文与 hashValue 映射。 */
   async getAccountNumbers(): Promise<AccountNumberHash[]> {
-    this.logger.info('调用 getAccountNumbers');
-    return this.request<AccountNumberHash[]>('/accounts/accountNumbers', {
-      schema: AccountNumberHashesSchema,
-    });
+    return (await this.getAccountNumbersWithResponse()).body;
   }
 
   async getAccountNumbersWithResponse(): Promise<HttpResponse<AccountNumberHash[]>> {
-    this.logger.info('调用 getAccountNumbersWithResponse');
+    this.logger.info('调用 getAccountNumbers');
     return this.requestWithResponse<AccountNumberHash[]>('/accounts/accountNumbers', {
       schema: AccountNumberHashesSchema,
     });
@@ -161,7 +158,7 @@ export class TraderApiClient extends AuthorizedApiClient {
     return this.requestWithResponse<Order>(
       `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/orders/${encodeNumericIdentifier(orderId, 'orderId')}`,
       {
-      schema: OrderSchema,
+        schema: OrderSchema,
       },
     );
   }
@@ -206,15 +203,11 @@ export class TraderApiClient extends AuthorizedApiClient {
 
   /** `GET /orders`：跨账户批量检索订单。 */
   async getOrdersAcrossAccounts(params: OrdersQuery): Promise<Order[]> {
-    this.logger.info('调用 getOrdersAcrossAccounts', { params });
-    return this.request<Order[]>('/orders', {
-      query: this.buildQuery(params),
-      schema: OrdersResponseSchema,
-    });
+    return (await this.getOrdersAcrossAccountsWithResponse(params)).body;
   }
 
   async getOrdersAcrossAccountsWithResponse(params: OrdersQuery): Promise<HttpResponse<Order[]>> {
-    this.logger.info('调用 getOrdersAcrossAccountsWithResponse', { params });
+    this.logger.info('调用 getOrdersAcrossAccounts', { params });
     return this.requestWithResponse<Order[]>('/orders', {
       query: this.buildQuery(params),
       schema: OrdersResponseSchema,
@@ -244,18 +237,14 @@ export class TraderApiClient extends AuthorizedApiClient {
 
   /** `GET /accounts/{accountNumber}/transactions`：查询账户交易记录。 */
   async getTransactions(accountNumber: string, params: TransactionsParams): Promise<Transaction[]> {
-    this.logger.info('调用 getTransactions', { accountNumber, params });
-    return this.request<Transaction[]>(`/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/transactions`, {
-      query: this.buildQuery(params),
-      schema: TransactionsResponseSchema,
-    });
+    return (await this.getTransactionsWithResponse(accountNumber, params)).body;
   }
 
   async getTransactionsWithResponse(
     accountNumber: string,
     params: TransactionsParams,
   ): Promise<HttpResponse<Transaction[]>> {
-    this.logger.info('调用 getTransactionsWithResponse', { accountNumber, params });
+    this.logger.info('调用 getTransactions', { accountNumber, params });
     return this.requestWithResponse<Transaction[]>(`/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/transactions`, {
       query: this.buildQuery(params),
       schema: TransactionsResponseSchema,
@@ -264,11 +253,7 @@ export class TraderApiClient extends AuthorizedApiClient {
 
   /** `GET /accounts/{accountNumber}/transactions/{transactionId}`：读取单笔交易明细。 */
   async getTransaction(accountNumber: string, transactionId: number | string): Promise<Transaction> {
-    this.logger.info('调用 getTransaction', { accountNumber, transactionId });
-    const data = await this.request<Transaction | Transaction[]>(
-      `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/transactions/${encodeNumericIdentifier(transactionId, 'transactionId')}`,
-      { schema: TransactionOrArraySchema },
-    );
+    const data = (await this.getTransactionWithResponse(accountNumber, transactionId)).body;
     if (Array.isArray(data)) {
       if (data.length === 0) {
         this.logger.error('getTransaction 返回空数组', { accountNumber, transactionId });
@@ -283,7 +268,7 @@ export class TraderApiClient extends AuthorizedApiClient {
     accountNumber: string,
     transactionId: number | string,
   ): Promise<HttpResponse<Transaction | Transaction[]>> {
-    this.logger.info('调用 getTransactionWithResponse', { accountNumber, transactionId });
+    this.logger.info('调用 getTransaction', { accountNumber, transactionId });
     return this.requestWithResponse<Transaction | Transaction[]>(
       `/accounts/${encodePathIdentifier(accountNumber, 'accountNumber')}/transactions/${encodeNumericIdentifier(transactionId, 'transactionId')}`,
       { schema: TransactionOrArraySchema },
@@ -292,14 +277,11 @@ export class TraderApiClient extends AuthorizedApiClient {
 
   /** `GET /userPreference`：拉取用户偏好设定与 Streamer 登录参数。 */
   async getUserPreferences(): Promise<UserPreference[] | UserPreference> {
-    this.logger.info('调用 getUserPreferences');
-    return this.request<UserPreference[] | UserPreference>('/userPreference', {
-      schema: UserPreferencesResponseSchema,
-    });
+    return (await this.getUserPreferencesWithResponse()).body;
   }
 
   async getUserPreferencesWithResponse(): Promise<HttpResponse<UserPreference[] | UserPreference>> {
-    this.logger.info('调用 getUserPreferencesWithResponse');
+    this.logger.info('调用 getUserPreferences');
     return this.requestWithResponse<UserPreference[] | UserPreference>('/userPreference', {
       schema: UserPreferencesResponseSchema,
     });
