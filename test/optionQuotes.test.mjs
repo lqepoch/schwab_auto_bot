@@ -119,3 +119,25 @@ test('getOptionQuote rejects non-option assets', async () => {
   });
   await assert.rejects(() => client.getOptionQuote('QQQ'), /不是期权合约/);
 });
+
+test('batch option quote lookup resolves padded symbols from one response index', async () => {
+  const first = 'QQQ   260814P00740000';
+  const second = 'QQQ   260814P00739000';
+  const { client, calls } = makeClient({
+    opaqueA: optionItem(`${first} `, { bid: 29.9, ask: 30.1, strike: 740 }),
+    opaqueB: optionItem(`${second} `, { bid: 28.95, ask: 29.05, strike: 739 }),
+  });
+
+  const quotes = await client.getOptionQuotes([first, second]);
+  assert.equal(quotes.length, 2);
+  assert.equal(quotes[0].strike, 740);
+  assert.equal(quotes[1].strike, 739);
+  assert.equal(calls.length, 1);
+});
+
+test('batch option quote source does not perform a full response find per requested symbol', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../src/clients/marketData.ts', import.meta.url), 'utf8');
+  assert.match(source, /const quoteItems = this\.indexQuoteItems\(response\);/);
+  assert.doesNotMatch(source, /Object\.values\(response\)\.find/);
+});
