@@ -30,23 +30,11 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
 
-      - name: Apply runtime authority migration and CI cleanup
+      - name: Apply runtime authority migration
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/patch-runtime-order-authority.py
-          rm -f scripts/patch-runtime-order-authority.py
-          rm -f .github/workflows/apply-runtime-order-authority-once.yml
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('.github/workflows/schwab-sdk-ci.yml')
-          text = path.read_text()
-          if '  merge_group:\n' not in text:
-              text = text.replace('on:\n  pull_request:\n', 'on:\n  merge_group:\n  workflow_dispatch:\n  pull_request:\n', 1)
-          elif '  workflow_dispatch:\n' not in text:
-              text = text.replace('on:\n  merge_group:\n', 'on:\n  merge_group:\n  workflow_dispatch:\n', 1)
-          path.write_text(text)
-          PY
 
       - name: Validate centralized order authority
         shell: bash
@@ -67,13 +55,16 @@ jobs:
           ! grep -q 'const orderMetadataCache = new RuntimeOrderMetadataCache' src/automation/runtimeOrchestrator.ts
           ! grep -q 'const orderIndexCache = new RuntimeOrderIndexCache' src/automation/runtimeOrchestrator.ts
 
-      - name: Commit validated repairs
+      - name: Commit validated source repair
         shell: bash
         run: |
           set -euo pipefail
-          rm -f .github/workflows/repair-runtime-authority-branch.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add src/automation/runtimeOrchestrator.ts
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+            exit 0
+          fi
           git commit -m 'fix: finish runtime order authority migration'
           git push origin HEAD:fix/ci-runtime-authority-efficiency-20260819
