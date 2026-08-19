@@ -31,6 +31,9 @@ on:
       - 'tsconfig*.json'
       - '.github/workflows/**'
       - '.github/dependabot.yml'
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
 
 concurrency:
   group: schwab-unified-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
