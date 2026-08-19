@@ -8,11 +8,11 @@ async function runtimeSource(): Promise<string> {
   return readFile(runtimeSourceUrl, "utf8");
 }
 
-test("sell adoption consumes the cached account-wide active closing view", async () => {
+test("sell adoption consumes the authority-owned account-wide active closing view", async () => {
   const source = await runtimeSource();
   assert.match(
     source,
-    /function allActiveClosingOrders\(\): readonly Json\[\][\s\S]*?runtimeOrderIndex\.allActiveClosingOrders\(/,
+    /function allActiveClosingOrders\(\): readonly Json\[\][\s\S]*?orderAuthority\.allActiveClosingOrders\(\)/,
   );
   const start = source.indexOf("function adoptSells");
   const end = source.indexOf("async function positions", start);
@@ -20,10 +20,10 @@ test("sell adoption consumes the cached account-wide active closing view", async
   assert.notEqual(end, -1);
   const block = source.slice(start, end);
   assert.match(block, /for \(const order of allActiveClosingOrders\(\)\)/);
-  assert.doesNotMatch(block, /for \(const order of orders\)/);
+  assert.doesNotMatch(block, /for \(const order of orderAuthority\.all\(\)\)/);
 });
 
-test("exit worker scheduling uses strategy-key closing lookups without full authority scans", async () => {
+test("exit worker scheduling uses strategy-key authority lookups without full authority scans", async () => {
   const source = await runtimeSource();
   const dueStart = source.indexOf("function nextExitWorkerDue");
   const scheduleStart = source.indexOf("function scheduleExitWorker", dueStart);
@@ -32,6 +32,6 @@ test("exit worker scheduling uses strategy-key closing lookups without full auth
   const block = source.slice(dueStart, scheduleStart);
   assert.match(block, /const nextSellRefresh = activeClosingOrders\(strategy\)/);
   assert.match(block, /return activeClosingOrders\(strategy\)\.length > 0;/);
-  assert.doesNotMatch(block, /orders\.filter\(/);
-  assert.doesNotMatch(block, /orders\.some\(/);
+  assert.doesNotMatch(block, /orderAuthority\.all\(\)\.filter\(/);
+  assert.doesNotMatch(block, /orderAuthority\.all\(\)\.some\(/);
 });
