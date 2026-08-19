@@ -49,6 +49,80 @@ test("recovers an unfilled logical order that a previous runtime acknowledged wi
   }]);
 });
 
+test("generation rollover drops stale unbound recovery while retaining broker-bound orders", () => {
+  const explorer = new PriceExplorer();
+  const first = explorer.recordCompleteFill("QQQ:vertical", "fill-1", 90, 1_000);
+  assert.equal(first.actions[0].logicalId, "l1");
+  const workingId = explorer.registerWorkingOrder("QQQ:vertical", "working-1", 88, 1_500);
+  assert.equal(workingId, "l2");
+
+  const pair = explorer.recordCompleteFill("QQQ:vertical", "fill-2", 90, 2_000);
+  assert.equal(pair.generation, 1);
+  assert.equal(explorer.order("QQQ:vertical", "l1"), null);
+  assert.equal(explorer.order("QQQ:vertical", workingId)?.brokerOrderId, "working-1");
+  assert.deepEqual(explorer.activeLogicalOrders("QQQ:vertical").map((order) => order.id), [workingId]);
+});
+
+test("legacy snapshots seed missing logical generations without reusing logical ids", () => {
+  const restored = new PriceExplorer({
+    groups: {
+      "QQQ:vertical": {
+        width: 1,
+        generation: 4,
+        nextLogicalId: 3,
+        fills: {},
+        consumedFillIds: [],
+        logicalOrders: {
+          l2: { id: "l2", brokerOrderId: null, priceCents: 90, createdAt: 10, filled: false },
+        },
+        firstBatch: [],
+        delayed: null,
+        tasks: [],
+      },
+    },
+  } as any);
+
+  assert.deepEqual(restored.planMissingOrderRecovery("QQQ:vertical", 20), [{
+    generation: 4,
+    dueAt: 20,
+    logicalId: "l2",
+    kind: "ensure",
+    priceCents: 90,
+    binding: false,
+  }]);
+  assert.equal(restored.registerWorkingOrder("QQQ:vertical", "broker-3", 91, 30), "l3");
+});
+
+test("compaction keeps filled first-batch evidence until three-order resolution", () => {
+  const explorer = new PriceExplorer({
+    groups: {
+      "QQQ:vertical": {
+        width: 3,
+        generation: 2,
+        nextLogicalId: 5,
+        fills: {},
+        consumedFillIds: [],
+        logicalOrders: {
+          l1: { id: "l1", generation: 1, brokerOrderId: null, priceCents: 88, createdAt: 1, filled: true },
+          l2: { id: "l2", generation: 2, brokerOrderId: null, priceCents: 89, createdAt: 2, filled: true },
+          l3: { id: "l3", generation: 2, brokerOrderId: null, priceCents: 90, createdAt: 3, filled: false },
+          l4: { id: "l4", generation: 2, brokerOrderId: null, priceCents: 90, createdAt: 4, filled: false },
+        },
+        firstBatch: ["l2", "l3"],
+        delayed: "l4",
+        tasks: [{ generation: 2, dueAt: 100, logicalId: "l2", kind: "resolve-three" }],
+      },
+    },
+  } as any);
+
+  assert.equal(explorer.order("QQQ:vertical", "l1"), null);
+  assert.equal(explorer.order("QQQ:vertical", "l2")?.filled, true);
+  assert.deepEqual(
+    explorer.resolveThree("QQQ:vertical", 2, 100).map((action) => [action.kind, action.logicalId, action.priceCents]),
+    [["ensure", "l2", 89], ["ensure", "l3", 90]],
+  );
+});
+
 test("one logical order's scheduled action does not block a peer's round recovery", () => {
   const explorer = new PriceExplorer();
   explorer.registerWorkingOrder("QQQ:vertical", "one", 88, 1);
