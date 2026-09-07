@@ -985,6 +985,73 @@ test("catalog workflow evidence includes actual OSS shard sources", () => {
   assert.equal(networkAccessAttempted(manifest, false, sourceObjects), false);
 });
 
+test("preflight inspects a local catalog and blocks when an OSS shard lacks configuration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "backtest-preflight-catalog-"));
+  try {
+    const catalog = Buffer.from(JSON.stringify({
+      schemaVersion: 1,
+      datasetId: "fixture-2016",
+      feed: "alpaca",
+      timeframe: "1m",
+      adjustmentMode: "raw",
+      shards: [{
+        uri: "oss://market-data/archive/symbol=AAPL/year=2016/revision=1/bars.csv",
+        sha256: HASH_B,
+        schema: "canonical-minute-bars-v1",
+        format: "csv",
+        compression: "none",
+        startDate: "2016-01-04",
+        endDate: "2016-01-05",
+        symbols: ["AAPL"],
+      }],
+    }));
+    const catalogPath = join(root, "catalog.json");
+    const manifestPath = join(root, "manifest.json");
+    await writeFile(catalogPath, catalog);
+    const manifest = parseManifest(baseManifest({
+      sourceObject: {
+        kind: "catalog",
+        uri: pathToFileURL(catalogPath).href,
+        sha256: sha256Hex(catalog),
+        schema: "minute-bars-catalog-v1",
+        format: "json",
+        compression: "none",
+      },
+    }));
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const report = await runPreflight(manifestPath, {});
+    assert.equal(report.status, "BLOCKED");
+    assert.equal((report.oss as { required: boolean }).required, true);
+    assert.equal((report.oss as { networkAccessAttempted: boolean }).networkAccessAttempted, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("preflight fails closed when a local catalog cannot be parsed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "backtest-preflight-invalid-catalog-"));
+  try {
+    const catalogPath = join(root, "catalog.json");
+    const manifestPath = join(root, "manifest.json");
+    const catalog = Buffer.from("not-json");
+    await writeFile(catalogPath, catalog);
+    const manifest = parseManifest(baseManifest({
+      sourceObject: {
+        kind: "catalog",
+        uri: pathToFileURL(catalogPath).href,
+        sha256: sha256Hex(catalog),
+        schema: "minute-bars-catalog-v1",
+        format: "json",
+        compression: "none",
+      },
+    }));
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await assert.rejects(runPreflight(manifestPath, {}), /BACKTEST_CATALOG_JSON_INVALID/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("source adapter exposes only read operations", async () => {
   const source = await readFile(new URL("../src/backtest/objectStore.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\.(list|put|post|delete)\s*\(/);

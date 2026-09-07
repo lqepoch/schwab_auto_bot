@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { digestJson, sha256Hex, compareCodeUnits } from "./fingerprints.ts";
 import { barSummary, filterBars, type MinuteBar } from "./bars.ts";
-import { readDatasetBars } from "./catalog.ts";
+import { inspectCatalogSourceObjects, readDatasetBars } from "./catalog.ts";
 import {
   assertRunnableManifest,
   loadManifest,
@@ -100,6 +100,7 @@ export async function runPreflight(
 ): Promise<BacktestArtifact> {
   const manifest = await loadManifest(manifestPath);
   const protocol = sourceProtocol(manifest.sourceObject);
+  const catalogSourceObjects = await inspectCatalogSourceObjects(manifestPath, manifest);
   const oss = readOssConfiguration(env);
   const warnings: string[] = [];
   if (manifest.adjustmentMode === "unknown") warnings.push("ADJUSTMENT_MODE_UNKNOWN_WILL_FAIL_BACKTEST");
@@ -107,7 +108,7 @@ export async function runPreflight(
   warnings.push("SESSION_DECLARATION_NOT_CALENDAR_VERIFIED");
   warnings.push("ADJUSTMENT_MODE_IS_DECLARATIVE_UNTIL_PROVIDER_EVIDENCE_IS_CAPTURED");
   const actionUsesOss = isOssUri(manifest.corporateActions.uri);
-  const ossRequired = protocol === "oss" || actionUsesOss;
+  const ossRequired = protocol === "oss" || actionUsesOss || sourceObjectsUseOss(catalogSourceObjects);
   const blocked = ossRequired && !oss.configured;
   if (blocked) warnings.push("OSS_CONFIG_MISSING_NO_NETWORK_PROBE_PERFORMED");
   return {

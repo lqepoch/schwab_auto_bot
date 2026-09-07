@@ -160,6 +160,12 @@ npm run backtest:run -- \
   --output-dir .artifacts/backtest/2016
 ```
 
+对本地 `catalog` manifest，`preflight` 只读取并校验 catalog 自身的精确文件和哈希，
+不会读取任何 bars 或发出网络请求；它会扫描声明的 shard URI。只要其中存在
+`oss://` shard，就把 `oss.required` 标记为 `true`，缺少 OSS 配置时返回 `BLOCKED`，
+但 `networkAccessAttempted` 仍为 `false`。catalog 无法安全读取时直接 fail-closed，
+不会把它误报成 local-only。
+
 使用 archive 原始 manifest 时，先执行一次精确 import。该操作只会对所给
 `manifest.json` 发起 HEAD/GET，计算其 hash，并由 manifest 的逻辑 key 推导一次
 不可变的 `bars.parquet` key；运行时不会 LIST bucket：

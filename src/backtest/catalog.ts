@@ -1,4 +1,4 @@
-import { readExactObject } from "./objectStore.ts";
+import { parseExactOssUri, readExactObject } from "./objectStore.ts";
 import { parseBarsAsync, mergeParsedBars, type ParsedBars } from "./bars.ts";
 import { compareCodeUnits } from "./fingerprints.ts";
 import type { BacktestManifest, SourceObject } from "./manifest.ts";
@@ -51,6 +51,21 @@ function assertExactUri(uri: string): void {
   }
 }
 
+function assertSupportedShardUri(uri: string): void {
+  const protocol = uri.slice(0, uri.indexOf(":")).toLowerCase();
+  if (protocol === "oss") {
+    try {
+      parseExactOssUri(uri);
+    } catch {
+      throw new Error("BACKTEST_CATALOG_SHARD_URI_INVALID");
+    }
+    return;
+  }
+  if (protocol !== "file" || uri.length <= "file:".length) {
+    throw new Error("BACKTEST_CATALOG_SHARD_URI_PROTOCOL_UNSUPPORTED");
+  }
+}
+
 function parseCatalog(bytes: Buffer, compression: "none" | "gzip"): MinuteBarsCatalog {
   let value: unknown;
   try {
@@ -63,6 +78,7 @@ function parseCatalog(bytes: Buffer, compression: "none" | "gzip"): MinuteBarsCa
   if (!result.success) throw new Error("BACKTEST_CATALOG_SCHEMA_INVALID");
   for (const shard of result.data.shards) {
     assertExactUri(shard.uri);
+    assertSupportedShardUri(shard.uri);
     if (shard.endDate < shard.startDate) throw new Error("BACKTEST_CATALOG_SHARD_DATE_RANGE_INVALID");
     if (shard.format === "parquet" && (
       !shard.schema.startsWith("market-data-bars-1m-")
@@ -73,6 +89,32 @@ function parseCatalog(bytes: Buffer, compression: "none" | "gzip"): MinuteBarsCa
     }
   }
   return result.data;
+}
+
+/**
+ * Inspect a catalog's declared objects without reading any bar shard. A
+ * local catalog is verified by exact bytes/hash and the same catalog/manifest
+ * checks used by the reader; an OSS catalog itself is already sufficient to
+ * establish that the dataset needs OSS, so it is not fetched during preflight.
+ */
+export async function inspectCatalogSourceObjects(
+  manifestPath: string,
+  manifest: BacktestManifest,
+): Promise<readonly string[]> {
+  const source = manifest.sourceObject;
+  if (source.kind !== "catalog" || !source.uri.toLowerCase().startsWith("file:")) {
+    return [source.uri];
+  }
+  let topLevel: Awaited<ReturnType<typeof readExactObject>>;
+  try {
+    topLevel = await readExactObject(manifestPath, source, { allowNetwork: false });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("BACKTEST_")) throw error;
+    throw new Error("BACKTEST_CATALOG_READ_FAILED");
+  }
+  const catalog = parseCatalog(topLevel.bytes, source.compression);
+  assertCatalogMatchesManifest(catalog, manifest);
+  return [source.uri, ...catalog.shards.map((shard) => shard.uri)];
 }
 
 function sourceForShard(shard: CatalogShard): SourceObject {
