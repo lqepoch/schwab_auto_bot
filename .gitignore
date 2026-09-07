@@ -9,6 +9,7 @@ coverage/
 !.env.example
 /state/
 /.state/
+.artifacts/
 *.log
 baseline-import/
 baseline-node-vertical.zip

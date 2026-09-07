@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/backtest/**/*.ts",
+    "src/utils/atomicJson.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
+}
