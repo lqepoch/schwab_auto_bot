@@ -271,6 +271,31 @@ test("reference simulation applies raw dividend once and adjusted bars never twi
   assert.equal(adjustedResult.finalCash, 100);
 });
 
+test("reference simulation preserves value through a 3:2 split with micro-shares", () => {
+  const manifest = parseManifest(baseManifest({
+    corporateActions: { mode: "local-file", uri: "file:./actions.json", sha256: "1".repeat(64), appliesToBars: false },
+  }));
+  const splitBars = [
+    "timestamp,symbol,open,high,low,close,volume",
+    "2016-01-04T14:30:00Z,AAPL,10,10,10,10,100",
+    "2016-01-05T14:30:00Z,AAPL,6.666667,6.666667,6.666667,6.666667,100",
+  ].join("\n") + "\n";
+  const actions = parseCorporateActions({
+    schemaVersion: 1,
+    provider: "fixture",
+    actions: [{ symbol: "AAPL", exDate: "2016-01-05", type: "split", old_rate: 2, new_rate: 3, source: "fixture" }],
+  }).actions;
+  const result = simulateLongOnlyCashEquity(
+    parseBars(Buffer.from(splitBars), manifest).bars,
+    manifest,
+    actions,
+    { symbol: "AAPL", initialCash: 100 },
+  );
+  assert.equal(result.sharesBought, 10);
+  assert.equal(result.trades[1]?.quantity, 15);
+  assert.ok(Math.abs(result.finalCash - 100) <= 0.00001);
+});
+
 test("workflow artifacts distinguish local, blocked, and reproducible runs", async () => {
   const root = await mkdtemp(join(tmpdir(), "backtest-workflow-"));
   try {

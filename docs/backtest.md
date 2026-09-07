@@ -86,7 +86,8 @@ npm run backtest:run -- \
 
 demo manifest 使用 raw bars 和本地 fixture 企业行动，因此 run 是可复现的
 price-plus-cash-dividend 参考模拟；它不是投资建议、完整市场回测或 provider
-验收。artifact 中保留 manifest/data/action fingerprints、source objects、
+验收。首次买入按整股成交，内部仓位使用六位小数 micro-shares，因此 3:2
+等拆股不会截断 fractional shares；artifact 中保留 manifest/data/action fingerprints、source objects、
 warnings、assumptions、trades 和 metrics。
 
 对真实 OSS 数据，先准备调用方自己的受保护环境文件，变量名为

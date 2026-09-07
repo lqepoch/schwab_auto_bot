@@ -3,6 +3,7 @@ import type { MinuteBar } from "./bars.ts";
 import type { BacktestManifest } from "./manifest.ts";
 
 const SCALE = 1_000_000n;
+const SHARE_SCALE = 1_000_000n;
 
 export interface ReferenceSimulationOptions {
   readonly initialCash: number;
@@ -35,29 +36,46 @@ function toUnits(value: number, label: string): bigint {
   return BigInt(Math.round(value * Number(SCALE)));
 }
 
-function fromUnits(value: bigint): number {
-  const result = Number(value) / Number(SCALE);
+function fromScaledUnits(value: bigint, scale: bigint): number {
+  const result = Number(value) / Number(scale);
   return Object.is(result, -0) ? 0 : Number(result.toFixed(6));
+}
+
+function fromMoneyUnits(value: bigint): number {
+  return fromScaledUnits(value, SCALE);
+}
+
+function fromShares(value: bigint): number {
+  return fromScaledUnits(value, SHARE_SCALE);
+}
+
+function roundDivide(numerator: bigint, denominator: bigint): bigint {
+  if (denominator <= 0n) throw new Error("BACKTEST_FIXED_POINT_DENOMINATOR_INVALID");
+  return (numerator + denominator / 2n) / denominator;
+}
+
+function cashValue(sharesMicro: bigint, priceUnits: bigint): bigint {
+  return roundDivide(sharesMicro * priceUnits, SHARE_SCALE);
 }
 
 function processActions(
   actions: readonly CorporateAction[],
   date: string,
   symbol: string,
-  shares: bigint,
+  sharesMicro: bigint,
   cash: bigint,
-): { shares: bigint; cash: bigint } {
-  let nextShares = shares;
+): { sharesMicro: bigint; cash: bigint } {
+  let nextSharesMicro = sharesMicro;
   let nextCash = cash;
   for (const action of actionsForDate(actions, symbol, date)) {
     if (action.type === "split") {
       const factor = toUnits(action.splitFactor as number, "SPLIT_FACTOR");
-      nextShares = (nextShares * factor) / SCALE;
-    } else if (nextShares > 0n) {
-      nextCash += nextShares * toUnits(action.dividendPerShare as number, "DIVIDEND_AMOUNT");
+      nextSharesMicro = roundDivide(nextSharesMicro * factor, SCALE);
+    } else if (nextSharesMicro > 0n) {
+      nextCash += cashValue(nextSharesMicro, toUnits(action.dividendPerShare as number, "DIVIDEND_AMOUNT"));
     }
   }
-  return { shares: nextShares, cash: nextCash };
+  return { sharesMicro: nextSharesMicro, cash: nextCash };
 }
 
 export function simulateLongOnlyCashEquity(
@@ -75,6 +93,7 @@ export function simulateLongOnlyCashEquity(
   const applyActions = manifest.adjustmentMode === "raw" && manifest.corporateActions.mode !== "none";
   const assumptions = [
     "buy floor(cash / first bar open) whole shares",
+    "position actions and mark-to-market use six-decimal micro-shares; entry remains whole shares",
     "hold through the selected minute range and liquidate at the final bar close",
     "no commission, slippage, borrow, financing, or broker writes",
     applyActions
@@ -82,54 +101,55 @@ export function simulateLongOnlyCashEquity(
       : "bars are consumed at their declared adjustment mode; corporate actions are never applied a second time",
   ];
   let cash = initialCashUnits;
-  let shares = 0n;
+  let sharesMicro = 0n;
   let peak = initialCashUnits;
   let maxDrawdown = 0;
-  let bought = 0n;
+  let boughtMicro = 0n;
   const appliedActionDates = new Set<string>();
   const trades: SimulationTrade[] = [];
   for (let index = 0; index < selected.length; index += 1) {
     const bar = selected[index];
     const actionDate = bar.timestamp.slice(0, 10);
     if (applyActions && !appliedActionDates.has(actionDate)) {
-      const adjusted = processActions(actions, bar.timestamp.slice(0, 10), symbol, shares, cash);
-      shares = adjusted.shares;
+      const adjusted = processActions(actions, bar.timestamp.slice(0, 10), symbol, sharesMicro, cash);
+      sharesMicro = adjusted.sharesMicro;
       cash = adjusted.cash;
       appliedActionDates.add(actionDate);
     }
     const open = toUnits(bar.open, "BAR_PRICE");
     const close = toUnits(bar.close, "BAR_PRICE");
     if (index === 0) {
-      shares = open > 0n ? cash / open : 0n;
-      if (shares > 0n) {
-        cash -= shares * open;
-        bought = shares;
+      const wholeShares = open > 0n ? cash / open : 0n;
+      sharesMicro = wholeShares * SHARE_SCALE;
+      if (wholeShares > 0n) {
+        cash -= wholeShares * open;
+        boughtMicro = sharesMicro;
         trades.push({
           side: "buy",
           timestamp: bar.timestamp,
-          quantity: Number(shares),
-          price: fromUnits(open),
-          notional: fromUnits(shares * open),
+          quantity: fromShares(sharesMicro),
+          price: fromMoneyUnits(open),
+          notional: fromMoneyUnits(wholeShares * open),
         });
       }
     }
-    const marked = cash + shares * close;
+    const marked = cash + cashValue(sharesMicro, close);
     if (marked > peak) peak = marked;
     if (peak > 0n) maxDrawdown = Math.max(maxDrawdown, Number((peak - marked) * 10_000n / peak) / 100);
-    if (index === selected.length - 1 && shares > 0n) {
-      cash += shares * close;
+    if (index === selected.length - 1 && sharesMicro > 0n) {
+      cash += cashValue(sharesMicro, close);
       trades.push({
         side: "sell",
         timestamp: bar.timestamp,
-        quantity: Number(shares),
-        price: fromUnits(close),
-        notional: fromUnits(shares * close),
+        quantity: fromShares(sharesMicro),
+        price: fromMoneyUnits(close),
+        notional: fromMoneyUnits(cashValue(sharesMicro, close)),
       });
-      shares = 0n;
+      sharesMicro = 0n;
     }
   }
-  const finalCash = fromUnits(cash);
-  const initialCash = fromUnits(initialCashUnits);
+  const finalCash = fromMoneyUnits(cash);
+  const initialCash = fromMoneyUnits(initialCashUnits);
   const totalReturnPct = Number((((cash - initialCashUnits) * 10_000n) / initialCashUnits)) / 100;
   return {
     strategy: "long-only-cash-equity-v1",
@@ -139,7 +159,7 @@ export function simulateLongOnlyCashEquity(
     totalReturnPct: Number(totalReturnPct.toFixed(6)),
     maxDrawdownPct: Number(maxDrawdown.toFixed(6)),
     barsProcessed: selected.length,
-    sharesBought: Number(bought),
+    sharesBought: fromShares(boughtMicro),
     trades,
     assumptions,
   };
