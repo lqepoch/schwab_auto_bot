@@ -1,10 +1,15 @@
 import { config as loadEnvConfig } from "dotenv";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { atomicWriteJson } from "../utils/atomicJson.ts";
+import { importArchiveBacktestManifest } from "./archive.ts";
+import { sha256Hex } from "./fingerprints.ts";
+import { manifestFingerprint } from "./manifest.ts";
 import {
   fetchActions,
   runAudit,
+  runArchiveProviderParity,
   runBacktest,
   runParity,
   runPreflight,
@@ -87,9 +92,33 @@ function outputDirFlag(flags: Flags): string {
   return resolve(stringFlag(flags, "output-dir") ?? ".artifacts/backtest");
 }
 
+function oneOf<T extends string>(flags: Flags, name: string, allowed: readonly T[], fallback: T): T {
+  const value = stringFlag(flags, name);
+  if (!value) return fallback;
+  if ((allowed as readonly string[]).includes(value)) return value as T;
+  throw new Error("BACKTEST_CLI_FLAG_VALUE_INVALID_" + name.toUpperCase().replaceAll("-", "_"));
+}
+
+async function archiveActionsInput(flags: Flags): Promise<{ uri: string; sha256: string } | undefined> {
+  const file = stringFlag(flags, "actions-file");
+  if (!file) return undefined;
+  const absolute = resolve(file);
+  const bytes = await readFile(absolute);
+  return { uri: pathToFileURL(absolute).href, sha256: sha256Hex(bytes) };
+}
+
 function loadEnvironment(flags: Flags): void {
-  const envPath = stringFlag(flags, "env-file");
-  loadEnvConfig({ path: envPath ?? ".env", quiet: true });
+  const configured = stringFlag(flags, "backtest-env-file");
+  if (!configured) {
+    loadEnvConfig({ path: ".env", quiet: true });
+    return;
+  }
+  const paths = configured.split(",").map((value) => value.trim()).filter(Boolean);
+  if (paths.length === 0) throw new Error("BACKTEST_CLI_ENV_FILE_INVALID");
+  for (const path of paths) {
+    const result = loadEnvConfig({ path, quiet: true });
+    if (result.error) throw new Error("BACKTEST_CLI_ENV_FILE_LOAD_FAILED");
+  }
 }
 
 function printHelp(): void {
@@ -97,12 +126,16 @@ function printHelp(): void {
     "Read-only historical 1-minute backtest CLI",
     "",
     "Commands:",
-    "  preflight --manifest FILE [--env-file FILE] [--output-dir DIR]",
-    "  audit --manifest FILE [--allow-network] [--env-file FILE] [--output-dir DIR]",
+    "  preflight --manifest FILE [--backtest-env-file FILE[,FILE...]] [--output-dir DIR]",
+    "  audit --manifest FILE [--allow-network] [--backtest-env-file FILE[,FILE...]] [--output-dir DIR]",
     "  parity --left FILE --right FILE [--allow-network] [--output-dir DIR]",
-    "  run --manifest FILE [--symbol AAPL] [--initial-cash 100000] [--allow-network] [--env-file FILE]",
+    "  run --manifest FILE [--symbol AAPL] [--initial-cash 100000] [--allow-network] [--backtest-env-file FILE[,FILE...]]",
+    "  import-archive --archive-manifest-uri oss://BUCKET/EXACT-MANIFEST --manifest-out FILE",
+    "                 --session regular --feed sip [--actions-file FILE] --allow-network [--backtest-env-file FILE[,FILE...]]",
+    "  provider-parity --manifest FILE --symbol AAPL --start 2016-01-04T14:30:00Z",
+    "                  --end 2016-01-04T14:35:00Z --allow-network [--max-pages 10] [--backtest-env-file FILE[,FILE...]]",
     "  fetch-actions --symbols AAPL,MSFT --since 2016-01-01 --until 2016-12-31",
-    "               --allow-network [--env-file FILE] [--output-dir DIR]",
+    "               --allow-network [--backtest-env-file FILE[,FILE...]] [--output-dir DIR]",
     "",
     "Network is disabled unless --allow-network is explicitly present.",
     "OSS access is exact-object HEAD/GET only; no LIST, PUT, DELETE, latest, or glob.",
@@ -142,6 +175,57 @@ async function runCommand(command: string, flags: Flags): Promise<unknown> {
       allowNetwork,
     });
     const artifactPath = await writeArtifact(outputDir, String(report.runId) + ".json", report);
+    return { ...report, artifactPath };
+  }
+  if (command === "import-archive") {
+    if (!allowNetwork) throw new Error("BACKTEST_IMPORT_ARCHIVE_REQUIRES_ALLOW_NETWORK");
+    const manifestOut = resolve(stringFlag(flags, "manifest-out", true) as string);
+    await mkdir(dirname(manifestOut), { recursive: true, mode: 0o750 });
+    const result = await importArchiveBacktestManifest(
+      stringFlag(flags, "archive-manifest-uri", true) as string,
+      {
+        allowNetwork: true,
+        session: oneOf(flags, "session", ["regular", "extended", "all"] as const, "regular"),
+        feed: oneOf(flags, "feed", ["sip", "boats"] as const, "sip"),
+        actions: await archiveActionsInput(flags),
+      },
+    );
+    await atomicWriteJson(manifestOut, result.manifest, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
+    const receipt = {
+      artifactVersion: 1,
+      kind: "backtest-archive-import",
+      status: "PASS",
+      evidenceClass: "OSS_READ_ONLY_PROVIDER_EVIDENCE",
+      readOnly: true,
+      brokerWriteAttempted: false,
+      manifestOut,
+      manifestFingerprint: manifestFingerprint(result.manifest),
+      archiveManifestSha256: result.archiveManifestSha256,
+      archiveManifestRequestIdPresent: Boolean(result.manifestRequestId),
+      sourceObject: result.manifest.sourceObject,
+      adjustmentMode: result.manifest.adjustmentMode,
+      universe: {
+        completeness: result.manifest.universe.completeness,
+        survivorshipBias: result.manifest.archiveProvenance?.survivorshipBias,
+        universeSemantics: result.manifest.archiveProvenance?.universeSemantics,
+      },
+      warnings: ["SINGLE_SYMBOL_PROXY_MANIFEST; BUILD_A_CURRENT_UNIVERSE_CATALOG_FOR_INDEX_BACKTESTS"],
+    };
+    const receiptPath = await writeArtifact(outputDir, "archive-import-receipt.json", receipt);
+    return { ...receipt, receiptPath };
+  }
+  if (command === "provider-parity") {
+    if (!allowNetwork) throw new Error("ALPACA_NETWORK_REQUIRES_ALLOW_NETWORK");
+    const report = await runArchiveProviderParity(manifestFlag(flags), {
+      symbol: stringFlag(flags, "symbol", true) as string,
+      start: stringFlag(flags, "start", true) as string,
+      end: stringFlag(flags, "end", true) as string,
+      feed: "sip",
+    }, {
+      allowNetwork: true,
+      maxPages: numberFlag(flags, "max-pages", 10),
+    });
+    const artifactPath = await writeArtifact(outputDir, "provider-parity.json", report);
     return { ...report, artifactPath };
   }
   if (command === "fetch-actions") {

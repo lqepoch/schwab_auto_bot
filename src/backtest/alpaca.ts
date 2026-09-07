@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { normalizeMinuteBarRows, type MinuteBar } from "./bars.ts";
 import { digestJson, sha256Hex } from "./fingerprints.ts";
 import { parseCorporateActions, type CorporateAction } from "./corporateActions.ts";
 
@@ -25,11 +26,41 @@ export interface AlpacaFetchReceipt {
   readonly status: number;
   readonly actionCount: number;
   readonly dataFingerprint: string;
+  readonly retrievedAt: string;
 }
 
 export interface AlpacaFetchResult {
   readonly actions: readonly CorporateAction[];
   readonly receipt: AlpacaFetchReceipt;
+}
+
+export interface AlpacaBarsQuery {
+  readonly symbol: string;
+  readonly start: string;
+  readonly end: string;
+  readonly feed?: "sip";
+}
+
+export interface AlpacaBarsFetchReceipt {
+  readonly provider: "alpaca";
+  readonly accessMethod: "alpaca_cli";
+  readonly evidenceClass: "REAL_PROVIDER_READ_ONLY";
+  readonly command: "alpaca data bars";
+  readonly commandFingerprint: string;
+  readonly symbol: string;
+  readonly start: string;
+  readonly end: string;
+  readonly feed: "sip";
+  readonly adjustment: "raw";
+  readonly pages: number;
+  readonly barCount: number;
+  readonly dataFingerprint: string;
+  readonly retrievedAt: string;
+}
+
+export interface AlpacaBarsFetchResult {
+  readonly bars: readonly MinuteBar[];
+  readonly receipt: AlpacaBarsFetchReceipt;
 }
 
 export interface AlpacaCliRunner {
@@ -77,6 +108,23 @@ function normalizeQuery(query: AlpacaActionQuery): AlpacaActionQuery {
   return { symbols, since: query.since, until: query.until };
 }
 
+function normalizeTimestamp(value: string, label: string): string {
+  if (!value.endsWith("Z")) throw new AlpacaProviderError("ALPACA_" + label.toUpperCase() + "_MUST_BE_UTC");
+  const epochMs = Date.parse(value);
+  if (!Number.isFinite(epochMs)) throw new AlpacaProviderError("ALPACA_" + label.toUpperCase() + "_INVALID");
+  return new Date(epochMs).toISOString();
+}
+
+function normalizeBarsQuery(query: AlpacaBarsQuery): Required<AlpacaBarsQuery> {
+  const symbol = query.symbol.trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9._-]{0,15}$/.test(symbol)) throw new AlpacaProviderError("ALPACA_SYMBOL_INVALID");
+  const start = normalizeTimestamp(query.start, "start");
+  const end = normalizeTimestamp(query.end, "end");
+  if (end < start) throw new AlpacaProviderError("ALPACA_DATE_RANGE_INVALID");
+  if (query.feed !== undefined && query.feed !== "sip") throw new AlpacaProviderError("ALPACA_FEED_UNSUPPORTED");
+  return { symbol, start, end, feed: "sip" };
+}
+
 function cliArgs(query: AlpacaActionQuery, pageToken?: string): string[] {
   const args = [
     "data", "corporate-actions",
@@ -92,6 +140,23 @@ function cliArgs(query: AlpacaActionQuery, pageToken?: string): string[] {
   return args;
 }
 
+function barsCliArgs(query: Required<AlpacaBarsQuery>, pageToken?: string): string[] {
+  const args = [
+    "data", "bars",
+    "--symbol", query.symbol,
+    "--start", query.start,
+    "--end", query.end,
+    "--timeframe", "1Min",
+    "--feed", query.feed,
+    "--adjustment", "raw",
+    "--limit", "1000",
+    "--sort", "asc",
+    "--quiet",
+  ];
+  if (pageToken) args.push("--page-token", pageToken);
+  return args;
+}
+
 function defaultRunner(args: readonly string[], env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync(ALPACA_CLI, [...args], {
     env,
@@ -99,6 +164,32 @@ function defaultRunner(args: readonly string[], env: NodeJS.ProcessEnv): Promise
     maxBuffer: 8 * 1024 * 1024,
     windowsHide: true,
   }).then((result) => ({ stdout: String(result.stdout), stderr: String(result.stderr) }));
+}
+
+function cliEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const key = envValue(
+    env,
+    "ALPACA_API_KEY",
+    "APCA_API_KEY_ID",
+    "ALPACA_PAPER_API_KEY_ID",
+    "ALPACA_MARKET_DATA_API_KEY",
+  );
+  const secret = envValue(
+    env,
+    "ALPACA_SECRET_KEY",
+    "APCA_API_SECRET_KEY",
+    "ALPACA_PAPER_API_SECRET_KEY",
+    "ALPACA_MARKET_DATA_SECRET_KEY",
+  );
+  if (!key || !secret) throw new AlpacaProviderError("ALPACA_CREDENTIALS_MISSING");
+  return {
+    ...env,
+    ALPACA_API_KEY: key,
+    ALPACA_SECRET_KEY: secret,
+    APCA_API_KEY_ID: key,
+    APCA_API_SECRET_KEY: secret,
+    ALPACA_QUIET: "1",
+  };
 }
 
 const RESPONSE_GROUP_TYPES: Readonly<Record<string, CliCorporateActionRow["responseType"]>> = {
@@ -147,6 +238,45 @@ function parseCliPage(stdout: string): { rows: readonly CliCorporateActionRow[];
   };
 }
 
+function parseBarsCliPage(stdout: string): { rows: readonly unknown[]; nextPageToken?: string } {
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    throw new AlpacaProviderError("ALPACA_CLI_JSON_INVALID");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new AlpacaProviderError("ALPACA_CLI_RESPONSE_SHAPE_INVALID");
+  }
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.bars)) throw new AlpacaProviderError("ALPACA_CLI_BARS_MISSING");
+  const next = record.next_page_token;
+  return {
+    rows: record.bars,
+    nextPageToken: typeof next === "string" && next ? next : undefined,
+  };
+}
+
+function normalizeAlpacaBars(rows: readonly unknown[], symbol: string): readonly MinuteBar[] {
+  const symbolBoundRows = rows.map((row) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw new AlpacaProviderError("ALPACA_CLI_BAR_ROW_INVALID");
+    }
+    const record = row as Record<string, unknown>;
+    // `alpaca data bars --symbol X` omits the redundant symbol field in its
+    // current single-symbol response. Bind only that omission to the exact
+    // requested symbol; an explicit provider field remains independently
+    // validated below.
+    if (record.symbol === undefined && record.S === undefined) return { ...record, symbol };
+    return record;
+  });
+  try {
+    return normalizeMinuteBarRows(symbolBoundRows);
+  } catch {
+    throw new AlpacaProviderError("ALPACA_CLI_BAR_INVALID");
+  }
+}
+
 function normalizeProviderRows(rows: readonly CliCorporateActionRow[]): readonly CorporateAction[] {
   const normalized = rows.map((row) => {
     if (!row.value || typeof row.value !== "object" || Array.isArray(row.value)) {
@@ -179,32 +309,10 @@ export async function fetchAlpacaCorporateActions(
   options: { env?: NodeJS.ProcessEnv; runner?: AlpacaCliRunner; maxPages?: number } = {},
 ): Promise<AlpacaFetchResult> {
   const env = options.env ?? process.env;
-  const key = envValue(
-    env,
-    "ALPACA_API_KEY",
-    "APCA_API_KEY_ID",
-    "ALPACA_PAPER_API_KEY_ID",
-    "ALPACA_MARKET_DATA_API_KEY",
-  );
-  const secret = envValue(
-    env,
-    "ALPACA_SECRET_KEY",
-    "APCA_API_SECRET_KEY",
-    "ALPACA_PAPER_API_SECRET_KEY",
-    "ALPACA_MARKET_DATA_SECRET_KEY",
-  );
-  if (!key || !secret) throw new AlpacaProviderError("ALPACA_CREDENTIALS_MISSING");
   const normalizedQuery = normalizeQuery(query);
   const maxPages = Math.min(10, Math.max(1, options.maxPages ?? 10));
   const runner = options.runner ?? defaultRunner;
-  const childEnv = {
-    ...env,
-    ALPACA_API_KEY: key,
-    ALPACA_SECRET_KEY: secret,
-    APCA_API_KEY_ID: key,
-    APCA_API_SECRET_KEY: secret,
-    ALPACA_QUIET: "1",
-  };
+  const childEnv = cliEnvironment(env);
   const rows: CliCorporateActionRow[] = [];
   let pageToken: string | undefined;
   let pages = 0;
@@ -238,6 +346,65 @@ export async function fetchAlpacaCorporateActions(
     status: 0,
     actionCount: actions.length,
     dataFingerprint: digestJson(actions),
+    retrievedAt: new Date().toISOString(),
   };
   return { actions, receipt };
+}
+
+export async function fetchAlpacaBars(
+  query: AlpacaBarsQuery,
+  options: { env?: NodeJS.ProcessEnv; runner?: AlpacaCliRunner; maxPages?: number } = {},
+): Promise<AlpacaBarsFetchResult> {
+  const normalizedQuery = normalizeBarsQuery(query);
+  const maxPages = Math.min(1_000, Math.max(1, options.maxPages ?? 10));
+  const runner = options.runner ?? defaultRunner;
+  const childEnv = cliEnvironment(options.env ?? process.env);
+  const rows: unknown[] = [];
+  let pageToken: string | undefined;
+  let pages = 0;
+  for (;;) {
+    if (pages >= maxPages) throw new AlpacaProviderError("ALPACA_PAGE_LIMIT_REACHED");
+    let result: { stdout: string; stderr: string };
+    try {
+      result = await runner(barsCliArgs(normalizedQuery, pageToken), childEnv);
+    } catch {
+      throw new AlpacaProviderError("ALPACA_CLI_EXEC_FAILED");
+    }
+    pages += 1;
+    const page = parseBarsCliPage(result.stdout);
+    rows.push(...page.rows);
+    pageToken = page.nextPageToken;
+    if (!pageToken) break;
+  }
+  const bars = normalizeAlpacaBars(rows, normalizedQuery.symbol).slice().sort((left, right) => left.epochMs - right.epochMs);
+  const seen = new Set<string>();
+  for (const bar of bars) {
+    if (bar.symbol !== normalizedQuery.symbol) throw new AlpacaProviderError("ALPACA_CLI_BAR_SYMBOL_MISMATCH");
+    if (bar.timestamp < normalizedQuery.start || bar.timestamp > normalizedQuery.end) {
+      throw new AlpacaProviderError("ALPACA_CLI_BAR_OUTSIDE_QUERY_RANGE");
+    }
+    const key = bar.symbol + "|" + bar.timestamp;
+    if (seen.has(key)) throw new AlpacaProviderError("ALPACA_CLI_BAR_DUPLICATE");
+    seen.add(key);
+  }
+  const fingerprintArgs = barsCliArgs(normalizedQuery).filter((value) => value !== "--quiet");
+  return {
+    bars,
+    receipt: {
+      provider: "alpaca",
+      accessMethod: "alpaca_cli",
+      evidenceClass: "REAL_PROVIDER_READ_ONLY",
+      command: "alpaca data bars",
+      commandFingerprint: sha256Hex(fingerprintArgs.join("\u0000")),
+      symbol: normalizedQuery.symbol,
+      start: normalizedQuery.start,
+      end: normalizedQuery.end,
+      feed: normalizedQuery.feed,
+      adjustment: "raw",
+      pages,
+      barCount: bars.length,
+      dataFingerprint: digestJson(bars),
+      retrievedAt: new Date().toISOString(),
+    },
+  };
 }

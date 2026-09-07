@@ -196,6 +196,13 @@ function toArrayBuffer(bytes: Buffer): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
+export function isRegularArchiveSession(value: unknown): boolean {
+  const session = String(value ?? "").trim().toLowerCase();
+  // v1 archive objects used `intraday`; v2 calls the same official-session
+  // bucket `regular`. Keep the compatibility mapping narrow and explicit.
+  return session === "regular" || session === "intraday";
+}
+
 function selectParquetRows(rows: readonly unknown[], manifest: BacktestManifest): readonly unknown[] {
   const requestedFeed = manifest.sourceObject.feed;
   if (!requestedFeed) throw new Error("BACKTEST_PARQUET_SOURCE_FEED_REQUIRED");
@@ -203,10 +210,10 @@ function selectParquetRows(rows: readonly unknown[], manifest: BacktestManifest)
     if (!row || typeof row !== "object" || Array.isArray(row)) return false;
     const record = row as Record<string, unknown>;
     const feed = String(record.feed ?? "").toLowerCase();
-    const session = String(record.session ?? "").toLowerCase();
     if (feed !== requestedFeed) return false;
-    if (manifest.session === "regular") return session === "regular";
-    if (manifest.session === "extended") return session !== "regular";
+    const regular = isRegularArchiveSession(record.session);
+    if (manifest.session === "regular") return regular;
+    if (manifest.session === "extended") return !regular;
     return true;
   });
 }

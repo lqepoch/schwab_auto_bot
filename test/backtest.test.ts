@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { digestJson, sha256Hex, stableJson } from "../src/backtest/fingerprints.ts";
-import { parseBars, parseBarsAsync } from "../src/backtest/bars.ts";
+import { isRegularArchiveSession, parseBars, parseBarsAsync } from "../src/backtest/bars.ts";
 import { buildArchiveBacktestManifest } from "../src/backtest/archive.ts";
 import { readDatasetBars } from "../src/backtest/catalog.ts";
 import {
@@ -12,7 +14,7 @@ import {
   parseCorporateActions,
   validateCorporateActionPolicy,
 } from "../src/backtest/corporateActions.ts";
-import { fetchAlpacaCorporateActions } from "../src/backtest/alpaca.ts";
+import { fetchAlpacaBars, fetchAlpacaCorporateActions } from "../src/backtest/alpaca.ts";
 import { simulateLongOnlyCashEquity } from "../src/backtest/engine.ts";
 import { parseManifest } from "../src/backtest/manifest.ts";
 import {
@@ -20,7 +22,9 @@ import {
   readExactObject,
   readOssConfiguration,
 } from "../src/backtest/objectStore.ts";
-import { runAudit, runBacktest, runPreflight } from "../src/backtest/workflow.ts";
+import { runArchiveProviderParity, runAudit, runBacktest, runPreflight } from "../src/backtest/workflow.ts";
+
+const execFileAsync = promisify(execFile);
 
 function baseManifest(overrides: Record<string, unknown> = {}) {
   return {
@@ -120,6 +124,13 @@ test("Parquet archive rows respect declared SIP and regular-session filters", as
   });
 });
 
+test("legacy intraday archive session is mapped only to regular", () => {
+  assert.equal(isRegularArchiveSession("regular"), true);
+  assert.equal(isRegularArchiveSession("intraday"), true);
+  assert.equal(isRegularArchiveSession("premarket"), false);
+  assert.equal(isRegularArchiveSession("postmarket"), false);
+});
+
 test("archive importer derives a legacy storage prefix without making it a runtime selector", () => {
   const archive = Buffer.from(JSON.stringify({
     schema_version: "market-data-bars-1m-manifest-v1",
@@ -198,6 +209,53 @@ test("OSS configuration accepts existing market-data environment aliases", () =>
   assert.equal(status.config?.endpoint, "https://oss.example.test");
   assert.equal(status.config?.endpointStyle, "bucket");
   assert.equal(status.config?.bucket, "market-data");
+});
+
+test("CLI composes protected backtest env files without colliding with Node's env-file flag", async () => {
+  const root = await mkdtemp(join(tmpdir(), "backtest-cli-env-"));
+  try {
+    const manifestPath = join(root, "manifest.json");
+    const endpointEnv = join(root, "endpoint.env");
+    const credentialsEnv = join(root, "credentials.env");
+    const outputDir = join(root, "artifact");
+    const manifest = parseManifest(baseManifest({
+      sourceObject: {
+        ...baseManifest().sourceObject,
+        uri: "oss://market-data/exact/bars.csv",
+      },
+    }));
+    await Promise.all([
+      writeFile(manifestPath, JSON.stringify(manifest)),
+      writeFile(endpointEnv, [
+        "OSS_ENDPOINT=https://market-data.oss.example.test",
+        "OSS_ENDPOINT_STYLE=bucket",
+        "OSS_REGION=ap-southeast-1",
+        "OSS_BUCKET=market-data",
+      ].join("\n") + "\n"),
+      writeFile(credentialsEnv, [
+        "ALIBABACLOUD_ACCESS_KEY_ID=test-key",
+        "ALIBABACLOUD_SECRET_ACCESS_KEY=test-secret",
+      ].join("\n") + "\n"),
+    ]);
+    const environment: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of [
+      "OSS_ENDPOINT", "OSS_ENDPOINT_STYLE", "OSS_REGION", "OSS_BUCKET",
+      "OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET", "ALIBABACLOUD_ACCESS_KEY_ID",
+      "ALIBABACLOUD_SECRET_ACCESS_KEY", "MARKET_DATA_S3_ENDPOINT",
+      "MARKET_DATA_S3_ENDPOINT_STYLE", "MARKET_DATA_S3_REGION", "MARKET_DATA_S3_BUCKET",
+    ]) delete environment[key];
+    const result = await execFileAsync(process.execPath, [
+      "--experimental-strip-types", "src/backtest/cli.ts", "preflight",
+      "--manifest", manifestPath,
+      "--backtest-env-file", endpointEnv + "," + credentialsEnv,
+      "--output-dir", outputDir,
+    ], { cwd: process.cwd(), env: environment, maxBuffer: 1024 * 1024 });
+    const report = JSON.parse(String(result.stdout).trim()) as Record<string, unknown>;
+    assert.equal(report.status, "PASS");
+    assert.deepEqual((report.oss as Record<string, unknown>).missing, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("OSS reader uses CNAME mode for an exact bucket endpoint", async () => {
@@ -336,6 +394,89 @@ test("Alpaca CLI adapter normalizes grouped current action responses and paginat
   assert.equal(result.actions[1].dividendPerShare, 1);
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].slice(-2), ["--page-token", "page-2"]);
+});
+
+test("Alpaca CLI adapter fetches raw SIP minute bars with exact UTC bounds", async () => {
+  const calls: string[][] = [];
+  const result = await fetchAlpacaBars(
+    {
+      symbol: "aapl",
+      start: "2016-01-04T14:30:00Z",
+      end: "2016-01-04T14:31:00Z",
+      feed: "sip",
+    },
+    {
+      env: { ALPACA_PAPER_API_KEY_ID: "key-fixture", ALPACA_PAPER_API_SECRET_KEY: "secret-fixture" },
+      runner: async (args, env) => {
+        calls.push([...args]);
+        assert.equal(env.APCA_API_KEY_ID, "key-fixture");
+        return {
+          stdout: JSON.stringify({
+            bars: [
+              { t: "2016-01-04T14:30:00Z", o: 10, h: 11, l: 9, c: 10.5, v: 100 },
+              { t: "2016-01-04T14:31:00Z", o: 10.5, h: 12, l: 10, c: 11, v: 200 },
+            ],
+            next_page_token: "",
+          }),
+          stderr: "",
+        };
+      },
+    },
+  );
+  assert.equal(result.bars.length, 2);
+  assert.equal(result.bars[0].timestamp, "2016-01-04T14:30:00.000Z");
+  assert.equal(result.receipt.adjustment, "raw");
+  assert.deepEqual(calls[0].slice(0, 12), [
+    "data", "bars", "--symbol", "AAPL", "--start", "2016-01-04T14:30:00.000Z",
+    "--end", "2016-01-04T14:31:00.000Z", "--timeframe", "1Min", "--feed", "sip",
+  ]);
+});
+
+test("provider parity compares a declared raw SIP archive with a CLI response", async () => {
+  const root = await mkdtemp(join(tmpdir(), "backtest-provider-parity-"));
+  try {
+    const bars = [
+      "timestamp,symbol,open,high,low,close,volume",
+      "2016-01-04T14:30:00Z,AAPL,10,11,9,10.5,100",
+      "2016-01-04T14:31:00Z,AAPL,10.5,12,10,11,200",
+    ].join("\n") + "\n";
+    await writeFile(join(root, "bars.csv"), bars);
+    const manifest = parseManifest(baseManifest({
+      session: "regular",
+      sourceObject: {
+        ...baseManifest().sourceObject,
+        uri: "file:./bars.csv",
+        sha256: sha256Hex(Buffer.from(bars)),
+        feed: "sip",
+      },
+      adjustmentMode: "raw",
+    }));
+    const manifestPath = join(root, "manifest.json");
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const report = await runArchiveProviderParity(manifestPath, {
+      symbol: "AAPL",
+      start: "2016-01-04T14:30:00Z",
+      end: "2016-01-04T14:31:00Z",
+    }, {
+      allowNetwork: true,
+      env: { ALPACA_PAPER_API_KEY_ID: "key-fixture", ALPACA_PAPER_API_SECRET_KEY: "secret-fixture" },
+      runner: async () => ({
+        stdout: JSON.stringify({
+          bars: [
+            { S: "AAPL", t: "2016-01-04T14:30:00Z", o: 10, h: 11, l: 9, c: 10.5, v: 100 },
+            { S: "AAPL", t: "2016-01-04T14:31:00Z", o: 10.5, h: 12, l: 10, c: 11, v: 200 },
+          ],
+          next_page_token: "",
+        }),
+        stderr: "",
+      }),
+    });
+    assert.equal(report.status, "PASS");
+    assert.equal(report.mismatchCount, 0);
+    assert.equal(report.evidenceClass, "REAL_PROVIDER_READ_ONLY_PARITY");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("corporate action policy prevents double adjustment", () => {
