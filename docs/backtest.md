@@ -195,8 +195,10 @@ npm run backtest:discover-universe -- \
 
 正常 `audit`/`run` 不会 LIST。只有人工审查 discovery JSON 为 `PASS` 后，才可离线
 materialize；它要求每个 action receipt 的文件 SHA-256 由命令行显式提供，并验证
-receipt 的 symbols、since/until、分页指纹和 action 文件 hash 覆盖 discovery 的每个
-symbol 与每个年份。可以把多个不重叠批次用逗号传入；缺 coverage、页数/查询指纹或重复/越界行动会
+receipt 的 symbols、since/until、`commandFingerprint`、`dataFingerprint` 和 action 文件
+hash，并验证这些 receipt 覆盖 discovery 的每个
+symbol 与每个年份。可以把多个不重叠批次用逗号传入；缺 coverage、command/data fingerprint
+或重复/越界行动会
 fail-closed，不会生成 catalog 或 manifest：
 
 ```bash
