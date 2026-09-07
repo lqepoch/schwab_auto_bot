@@ -380,6 +380,8 @@ test("Alpaca CLI adapter normalizes grouped current action responses and paginat
               corporate_actions: {
                 cash_dividends: [{
                   id: "dividend1", symbol: "AAPL", ex_date: "2016-09-01", rate: 1,
+                }, {
+                  id: "dividend2", symbol: "AAPL", ex_date: "2016-09-01", rate: 1,
                 }],
               },
             }),
@@ -392,6 +394,10 @@ test("Alpaca CLI adapter normalizes grouped current action responses and paginat
   assert.deepEqual(result.actions.map((action) => action.type), ["split", "dividend"]);
   assert.equal(result.actions[0].splitFactor, 2);
   assert.equal(result.actions[1].dividendPerShare, 1);
+  assert.equal(result.actions[1].duplicateCount, 1);
+  assert.deepEqual(result.actions[1].providerIds, ["dividend1", "dividend2"]);
+  assert.equal(result.receipt.duplicateCount, 1);
+  assert.deepEqual(result.receipt.providerDuplicateIds, ["dividend2"]);
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].slice(-2), ["--page-token", "page-2"]);
 });
@@ -496,6 +502,65 @@ test("corporate action policy prevents double adjustment", () => {
   assert.throws(() => validateCorporateActionPolicy(adjusted, actions.actions), /CANNOT_APPLY_ACTIONS_AGAIN/);
 });
 
+test("corporate actions fold provider duplicates but retain distinct same-day dividends", () => {
+  const first = parseCorporateActions({
+    schemaVersion: 1,
+    provider: "alpaca",
+    actions: [
+      { id: "apa-2", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.025 },
+      { id: "apa-1", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.025 },
+      { id: "apa-3", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.03 },
+    ],
+  });
+  const second = parseCorporateActions({
+    schemaVersion: 1,
+    provider: "alpaca",
+    actions: [
+      { id: "apa-3", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.03 },
+      { id: "apa-1", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.025 },
+      { id: "apa-2", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.025 },
+    ],
+  });
+  assert.deepEqual(first.actions, second.actions);
+  assert.equal(first.actions.length, 2);
+  assert.deepEqual(first.actions[0]?.providerIds, ["apa-1", "apa-2"]);
+  assert.equal(first.actions[0]?.duplicateCount, 1);
+  assert.equal(first.actions[1]?.dividendPerShare, 0.03);
+  assert.equal(first.actions[1]?.duplicateCount, undefined);
+});
+
+test("corporate action parser rejects repeated provider IDs and folds exact no-ID duplicates", () => {
+  assert.throws(() => parseCorporateActions({
+    schemaVersion: 1,
+    provider: "alpaca",
+    actions: [
+      { id: "same-id", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.025 },
+      { id: "same-id", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.03 },
+    ],
+  }), /BACKTEST_ACTION_PROVIDER_ID_CONFLICT/);
+  assert.throws(() => parseCorporateActions({
+    schemaVersion: 1,
+    provider: "alpaca",
+    actions: [{
+      symbol: "APA",
+      ex_date: "2021-01-21",
+      type: "dividend",
+      cash: 0.025,
+      providerIds: ["apa-1", "apa-2"],
+    }],
+  }), /BACKTEST_ACTION_DUPLICATE_COUNT_INCONSISTENT/);
+  const parsed = parseCorporateActions({
+    schemaVersion: 1,
+    provider: "fixture",
+    actions: [
+      { symbol: "APA", exDate: "2021-01-21", type: "dividend", cash: 0.025, source: "fixture" },
+      { symbol: "APA", exDate: "2021-01-21", type: "dividend", cash: 0.025, source: "fixture" },
+    ],
+  });
+  assert.equal(parsed.actions.length, 1);
+  assert.equal(parsed.actions[0]?.duplicateCount, 1);
+});
+
 test("corporate action OSS URI uses the exact-object network gate", async () => {
   const manifest = parseManifest(baseManifest({
     corporateActions: {
@@ -531,6 +596,25 @@ test("reference simulation applies raw dividend once and adjusted bars never twi
   }));
   const adjustedResult = simulateLongOnlyCashEquity(bars, adjustedManifest, actions, { symbol: "AAPL", initialCash: 100 });
   assert.equal(adjustedResult.finalCash, 100);
+});
+
+test("reference simulation applies distinct same-day dividends in deterministic order", () => {
+  const manifest = parseManifest(baseManifest({
+    corporateActions: { mode: "local-file", uri: "file:./actions.json", sha256: "1".repeat(64), appliesToBars: false },
+  }));
+  const actions = parseCorporateActions({
+    schemaVersion: 1,
+    provider: "fixture",
+    actions: [
+      { symbol: "AAPL", exDate: "2016-01-05", type: "dividend", cash: 2, source: "fixture" },
+      { symbol: "AAPL", exDate: "2016-01-05", type: "dividend", cash: 1, source: "fixture" },
+    ],
+  }).actions;
+  const result = simulateLongOnlyCashEquity(parseBars(Buffer.from(csv), manifest).bars, manifest, actions, {
+    symbol: "AAPL",
+    initialCash: 100,
+  });
+  assert.equal(result.finalCash, 130);
 });
 
 test("reference simulation preserves value through a 3:2 split with micro-shares", () => {

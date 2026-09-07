@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { atomicWriteJson } from "../utils/atomicJson.ts";
 import {
   parseCorporateActions,
+  summarizeCorporateActionDuplicates,
   type CorporateAction,
 } from "./corporateActions.ts";
 import { compareCodeUnits, digestJson, isSha256, sha256Hex } from "./fingerprints.ts";
@@ -21,6 +22,10 @@ interface ActionReceiptRecord {
   readonly symbols: readonly string[];
   readonly since: string;
   readonly until: string;
+  readonly rawProviderRowCount: number;
+  readonly actionCount: number;
+  readonly duplicateCount: number;
+  readonly providerDuplicateIds: readonly string[];
   readonly dataFingerprint: string;
   readonly actions: readonly CorporateAction[];
 }
@@ -76,6 +81,20 @@ function requiredHash(value: unknown, code: string): string {
   const text = requiredString(value, code);
   if (!isSha256(text)) throw new Error(code);
   return text;
+}
+
+function nonNegativeInteger(value: unknown, code: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(code);
+  return value;
+}
+
+function sortedProviderIds(value: unknown, code: string): readonly string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) throw new Error(code);
+  const ids = value.map((item) => item.trim());
+  if (new Set(ids).size !== ids.length || ids.some((item, index) => index > 0 && compareCodeUnits(ids[index - 1], item) > 0)) {
+    throw new Error(code);
+  }
+  return ids;
 }
 
 function date(value: unknown, code: string): string {
@@ -134,6 +153,13 @@ async function loadActionReceipt(input: UniverseActionsReceiptInput): Promise<Ac
   const until = date(receipt.until, "BACKTEST_UNIVERSE_ACTION_RECEIPT_UNTIL_INVALID");
   if (until < since) throw new Error("BACKTEST_UNIVERSE_ACTION_RECEIPT_RANGE_INVALID");
   requiredHash(receipt.commandFingerprint, "BACKTEST_UNIVERSE_ACTION_RECEIPT_COMMAND_FINGERPRINT_INVALID");
+  const rawProviderRowCount = nonNegativeInteger(receipt.rawProviderRowCount, "BACKTEST_UNIVERSE_ACTION_RECEIPT_RAW_ROW_COUNT_INVALID");
+  const actionCount = nonNegativeInteger(receipt.actionCount, "BACKTEST_UNIVERSE_ACTION_RECEIPT_ACTION_COUNT_INVALID");
+  const duplicateCount = nonNegativeInteger(receipt.duplicateCount, "BACKTEST_UNIVERSE_ACTION_RECEIPT_DUPLICATE_COUNT_INVALID");
+  const providerDuplicateIds = sortedProviderIds(
+    receipt.providerDuplicateIds,
+    "BACKTEST_UNIVERSE_ACTION_RECEIPT_PROVIDER_DUPLICATE_IDS_INVALID",
+  );
   const actionsPathValue = requiredString(value.actionsPath, "BACKTEST_UNIVERSE_ACTIONS_PATH_MISSING");
   const actionsPath = localPath(actionsPathValue, dirname(receiptPath), "BACKTEST_UNIVERSE_ACTIONS_PATH_INVALID");
   const actionsSha256 = requiredHash(value.actionsSha256, "BACKTEST_UNIVERSE_ACTIONS_SHA256_INVALID");
@@ -149,6 +175,12 @@ async function loadActionReceipt(input: UniverseActionsReceiptInput): Promise<Ac
   }
   const parsed = parseCorporateActions(actionValue);
   if (parsed.provider !== "alpaca") throw new Error("BACKTEST_UNIVERSE_ACTIONS_PROVIDER_INVALID");
+  const duplicateSummary = summarizeCorporateActionDuplicates(parsed.actions);
+  if (actionCount !== parsed.actions.length || duplicateCount !== duplicateSummary.duplicateCount
+    || rawProviderRowCount !== actionCount + duplicateCount
+    || providerDuplicateIds.join("\u0000") !== duplicateSummary.providerDuplicateIds.join("\u0000")) {
+    throw new Error("BACKTEST_UNIVERSE_ACTION_RECEIPT_COUNTS_MISMATCH");
+  }
   const dataFingerprint = requiredHash(receipt.dataFingerprint, "BACKTEST_UNIVERSE_ACTION_RECEIPT_FINGERPRINT_INVALID");
   if (digestJson(parsed.actions) !== dataFingerprint) throw new Error("BACKTEST_UNIVERSE_ACTION_RECEIPT_FINGERPRINT_MISMATCH");
   for (const action of parsed.actions) {
@@ -164,6 +196,10 @@ async function loadActionReceipt(input: UniverseActionsReceiptInput): Promise<Ac
     symbols: batchSymbols,
     since,
     until,
+    rawProviderRowCount,
+    actionCount,
+    duplicateCount,
+    providerDuplicateIds,
     dataFingerprint,
     actions: parsed.actions,
   };

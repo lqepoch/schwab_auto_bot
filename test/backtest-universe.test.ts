@@ -300,6 +300,9 @@ async function writeActionReceipt(root: string, until: string): Promise<{ path: 
       pages: 1,
       status: 0,
       actionCount: 0,
+      rawProviderRowCount: 0,
+      duplicateCount: 0,
+      providerDuplicateIds: [],
       dataFingerprint: digestJson([]),
       retrievedAt: "2026-09-01T00:00:00Z",
     },
@@ -367,6 +370,24 @@ test("materialize fails closed for incomplete coverage and tampered receipt hash
         manifestPath: join(root, "tampered-manifest.json"),
       }),
       /BACKTEST_UNIVERSE_ACTION_RECEIPT_SHA256_MISMATCH/,
+    );
+    const countsReceiptPath = join(root, "counts-receipt.json");
+    const countsReceipt = JSON.parse(await readFile(incomplete.path, "utf8")) as {
+      receipt: { rawProviderRowCount: number; duplicateCount: number };
+    };
+    countsReceipt.receipt.rawProviderRowCount = 1;
+    countsReceipt.receipt.duplicateCount = 1;
+    const countsReceiptBytes = Buffer.from(JSON.stringify(countsReceipt));
+    await writeFile(countsReceiptPath, countsReceiptBytes);
+    await assert.rejects(
+      materializeCurrentUniverseCatalog({
+        discovery,
+        actionReceipts: [{ path: countsReceiptPath, sha256: sha256Hex(countsReceiptBytes) }],
+        catalogPath: join(root, "counts-catalog.json"),
+        actionsPath: join(root, "counts-actions.json"),
+        manifestPath: join(root, "counts-manifest.json"),
+      }),
+      /BACKTEST_UNIVERSE_ACTION_RECEIPT_COUNTS_MISMATCH/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });

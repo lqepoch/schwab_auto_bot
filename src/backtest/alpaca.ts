@@ -2,7 +2,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { normalizeMinuteBarRows, type MinuteBar } from "./bars.ts";
 import { compareCodeUnits, digestJson, sha256Hex } from "./fingerprints.ts";
-import { parseCorporateActions, type CorporateAction } from "./corporateActions.ts";
+import {
+  parseCorporateActions,
+  summarizeCorporateActionDuplicates,
+  type CorporateAction,
+} from "./corporateActions.ts";
 
 const execFileAsync = promisify(execFile);
 const ALPACA_CLI = "alpaca";
@@ -24,7 +28,14 @@ export interface AlpacaFetchReceipt {
   readonly until: string;
   readonly pages: number;
   readonly status: number;
+  /** Number of provider rows returned across all pages before economic de-duplication. */
+  readonly rawProviderRowCount: number;
+  /** Number of canonical economic events after de-duplication. */
   readonly actionCount: number;
+  /** Number of raw rows folded into an already represented economic event. */
+  readonly duplicateCount: number;
+  /** Non-canonical provider IDs retained on folded economic events. */
+  readonly providerDuplicateIds: readonly string[];
   readonly dataFingerprint: string;
   readonly retrievedAt: string;
 }
@@ -332,6 +343,7 @@ export async function fetchAlpacaCorporateActions(
     if (!pageToken) break;
   }
   const actions = normalizeProviderRows(rows);
+  const duplicateSummary = summarizeCorporateActionDuplicates(actions);
   const fingerprintArgs = cliArgs(normalizedQuery).filter((value) => value !== "--quiet");
   const receipt: AlpacaFetchReceipt = {
     provider: "alpaca",
@@ -344,7 +356,10 @@ export async function fetchAlpacaCorporateActions(
     until: normalizedQuery.until,
     pages,
     status: 0,
+    rawProviderRowCount: rows.length,
     actionCount: actions.length,
+    duplicateCount: duplicateSummary.duplicateCount,
+    providerDuplicateIds: duplicateSummary.providerDuplicateIds,
     dataFingerprint: digestJson(actions),
     retrievedAt: new Date().toISOString(),
   };

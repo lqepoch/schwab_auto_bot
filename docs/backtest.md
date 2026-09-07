@@ -240,6 +240,13 @@ npm run backtest:fetch-actions -- \
 当前响应，不是 2016 当时的 point-in-time corporate-action 证据；必须把 receipt
 固定到 manifest 后再用于可复现 run。
 
+同一 symbol、ex-date、类型和经济值的多条 provider 行只计为一个经济事件；action
+中保留 `providerIds` 与 `duplicateCount`；receipt 还记录原始分页行数
+`rawProviderRowCount`、去重后的 `actionCount`、折叠行数 `duplicateCount` 和
+`providerDuplicateIds`，这些计数必须满足 `rawProviderRowCount = actionCount + duplicateCount`。
+同日同类型但金额或拆股因子不同的事件不会被这个规则合并，reference engine 会按
+确定性排序逐一应用。相同 provider ID 的重复或冲突会 fail-closed。
+
 archive 已声明 `raw`、`feed=sip` 时，还可用同一 Alpaca CLI 做原始分钟线抽样或全年
 比较。比较只要求 archive 已声明的 SIP 行逐行出现在 provider 响应中；provider 返回
 的盘前/盘后行会报告为 `providerOutOfScopeRows`，不会错误当成 archive 缺行，也不会
