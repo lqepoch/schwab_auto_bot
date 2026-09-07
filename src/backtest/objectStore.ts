@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { sha256Hex } from "./fingerprints.ts";
+import { compareCodeUnits, sha256Hex } from "./fingerprints.ts";
 import type { BacktestManifest, SourceObject } from "./manifest.ts";
 
 export interface OssConfiguration {
@@ -391,8 +391,8 @@ export function createBoundedPrefixDiscovery(
           continuationToken = next;
         }
         return {
-          prefixes: [...new Set(prefixes)].sort(),
-          objects,
+          prefixes: [...new Set(prefixes)].sort(compareCodeUnits),
+          objects: objects.slice().sort((left, right) => compareCodeUnits(left.name, right.name)),
           pages,
           ...(requestId ? { requestId } : {}),
         };

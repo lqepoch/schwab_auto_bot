@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { normalizeMinuteBarRows, type MinuteBar } from "./bars.ts";
-import { digestJson, sha256Hex } from "./fingerprints.ts";
+import { compareCodeUnits, digestJson, sha256Hex } from "./fingerprints.ts";
 import { parseCorporateActions, type CorporateAction } from "./corporateActions.ts";
 
 const execFileAsync = promisify(execFile);
@@ -101,7 +101,7 @@ function normalizeQuery(query: AlpacaActionQuery): AlpacaActionQuery {
   validateDate(query.since, "since");
   validateDate(query.until, "until");
   if (query.until < query.since) throw new AlpacaProviderError("ALPACA_DATE_RANGE_INVALID");
-  const symbols = query.symbols.map((symbol) => symbol.trim().toUpperCase()).filter(Boolean).sort();
+  const symbols = query.symbols.map((symbol) => symbol.trim().toUpperCase()).filter(Boolean).sort(compareCodeUnits);
   if (symbols.length === 0 || symbols.some((symbol) => !/^[A-Z][A-Z0-9._-]{0,15}$/.test(symbol))) {
     throw new AlpacaProviderError("ALPACA_SYMBOLS_INVALID");
   }

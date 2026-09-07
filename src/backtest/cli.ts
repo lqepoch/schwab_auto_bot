@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { atomicWriteJson } from "../utils/atomicJson.ts";
 import { importArchiveBacktestManifest } from "./archive.ts";
-import { sha256Hex } from "./fingerprints.ts";
+import { compareCodeUnits, sha256Hex } from "./fingerprints.ts";
 import { manifestFingerprint } from "./manifest.ts";
 import {
   fetchActions,
@@ -126,7 +126,7 @@ async function symbolsFileInput(flags: Flags): Promise<readonly string[] | undef
     throw new Error("BACKTEST_CLI_SYMBOLS_FILE_INVALID");
   }
   if (new Set(lines).size !== lines.length) throw new Error("BACKTEST_CLI_SYMBOLS_FILE_DUPLICATE");
-  return lines.sort();
+  return lines.sort(compareCodeUnits);
 }
 
 function csvFlags(flags: Flags, name: string): readonly string[] {
