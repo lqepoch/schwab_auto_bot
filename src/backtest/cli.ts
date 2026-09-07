@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { atomicWriteJson } from "../utils/atomicJson.ts";
 import { importArchiveBacktestManifest } from "./archive.ts";
-import { compareCodeUnits, sha256Hex } from "./fingerprints.ts";
+import { compareCodeUnits, isSha256, sha256Hex } from "./fingerprints.ts";
 import { manifestFingerprint } from "./manifest.ts";
 import {
   fetchActions,
@@ -24,6 +24,7 @@ import {
   materializeCurrentUniverseCatalog,
   type UniverseActionsReceiptInput,
 } from "./universeActions.ts";
+import { parseSymbolResolutionReceipt, type SymbolResolutionReceiptInput } from "./symbolResolution.ts";
 
 type FlagValue = string | boolean;
 type Flags = ReadonlyMap<string, FlagValue>;
@@ -129,6 +130,31 @@ async function symbolsFileInput(flags: Flags): Promise<readonly string[] | undef
   return lines.sort(compareCodeUnits);
 }
 
+async function symbolResolutionInput(flags: Flags): Promise<SymbolResolutionReceiptInput | undefined> {
+  const path = stringFlag(flags, "symbol-resolution-receipt");
+  const suppliedHash = stringFlag(flags, "symbol-resolution-receipt-sha256");
+  if (!path && !suppliedHash) return undefined;
+  if (!path) throw new Error("BACKTEST_CLI_FLAG_REQUIRED_SYMBOL_RESOLUTION_RECEIPT");
+  if (!suppliedHash) throw new Error("BACKTEST_CLI_FLAG_REQUIRED_SYMBOL_RESOLUTION_RECEIPT_SHA256");
+  if (!isSha256(suppliedHash)) throw new Error("BACKTEST_CLI_SYMBOL_RESOLUTION_RECEIPT_SHA256_INVALID");
+  const absolute = resolve(path);
+  const bytes = await readFile(absolute).catch(() => {
+    throw new Error("BACKTEST_CLI_SYMBOL_RESOLUTION_RECEIPT_READ_FAILED");
+  });
+  if (sha256Hex(bytes) !== suppliedHash) throw new Error("BACKTEST_CLI_SYMBOL_RESOLUTION_RECEIPT_SHA256_MISMATCH");
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new Error("BACKTEST_CLI_SYMBOL_RESOLUTION_RECEIPT_JSON_INVALID");
+  }
+  return {
+    uri: pathToFileURL(absolute).href,
+    sha256: suppliedHash,
+    receipt: parseSymbolResolutionReceipt(value),
+  };
+}
+
 function csvFlags(flags: Flags, name: string): readonly string[] {
   const value = stringFlag(flags, name, true) as string;
   const values = value.split(",").map((item) => item.trim()).filter(Boolean);
@@ -178,10 +204,11 @@ function printHelp(): void {
     "  discover-universe --universe-manifest-uri oss://BUCKET/EXACT-MANIFEST",
     "                  --archive-root-uri oss://BUCKET/EXACT-ARCHIVE-ROOT",
     "                  --start-year 2016 --end-year 2025 --allow-network --allow-list-discovery",
+    "                  [--symbol-resolution-receipt FILE --symbol-resolution-receipt-sha256 SHA]",
     "                  [--backtest-env-file FILE[,FILE...]] [--output-dir DIR]",
     "  materialize-universe-catalog --discovery FILE --actions-receipt FILE[,FILE...]",
     "                  --actions-receipt-sha256 SHA[,SHA...] [--catalog-out FILE]",
-    "                  [--actions-out FILE] --manifest-out FILE [--output-dir DIR]",
+    "                  [--actions-out FILE] [--manifest-out FILE] [--output-dir DIR]",
     "",
     "Network is disabled unless --allow-network is explicitly present.",
     "Normal backtest reads are exact-object HEAD/GET only; LIST requires both discovery confirmations.",
@@ -320,14 +347,15 @@ async function runCommand(command: string, flags: Flags): Promise<unknown> {
       feed: oneOf(flags, "feed", ["sip", "boats"] as const, "sip"),
       session: oneOf(flags, "session", ["regular", "extended", "all"] as const, "regular"),
       concurrency: numberFlag(flags, "concurrency", 8),
+      symbolResolution: await symbolResolutionInput(flags),
     }, {
       allowNetwork,
       allowListDiscovery: boolFlag(flags, "allow-list-discovery"),
     });
-    const discoveryPath = resolve(stringFlag(flags, "discovery-out") ?? (outputDir + "/current-universe-discovery.json"));
+    const discoveryPath = resolve(stringFlag(flags, "discovery-out") ?? (outputDir + "/frozen-universe-discovery.json"));
     await atomicWriteJson(discoveryPath, result, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
     const discoverySha256 = sha256Hex(await readFile(discoveryPath));
-    const artifactPath = await writeArtifact(outputDir, "current-universe-discovery-receipt.json", {
+    const artifactPath = await writeArtifact(outputDir, "frozen-universe-discovery-receipt.json", {
       ...result,
       discoveryPath,
       discoverySha256,
@@ -344,9 +372,9 @@ async function runCommand(command: string, flags: Flags): Promise<unknown> {
       throw new Error("BACKTEST_UNIVERSE_DISCOVERY_JSON_INVALID");
     }
     const discovery = parseCurrentUniverseDiscovery(value);
-    const catalogPath = resolve(stringFlag(flags, "catalog-out") ?? (outputDir + "/current-universe-catalog.json"));
-    const actionsPath = resolve(stringFlag(flags, "actions-out") ?? (outputDir + "/current-universe-actions.json"));
-    const manifestPath = resolve(stringFlag(flags, "manifest-out", true) as string);
+    const catalogPath = resolve(stringFlag(flags, "catalog-out") ?? (outputDir + "/frozen-universe-catalog.json"));
+    const actionsPath = resolve(stringFlag(flags, "actions-out") ?? (outputDir + "/frozen-universe-actions.json"));
+    const manifestPath = resolve(stringFlag(flags, "manifest-out") ?? (outputDir + "/frozen-universe-manifest.json"));
     const result = await materializeCurrentUniverseCatalog({
       discovery,
       discoverySha256: sha256Hex(discoveryBytes),
@@ -355,7 +383,7 @@ async function runCommand(command: string, flags: Flags): Promise<unknown> {
       actionsPath,
       manifestPath,
     });
-    const artifactPath = await writeArtifact(outputDir, "current-universe-materialization.json", result);
+    const artifactPath = await writeArtifact(outputDir, "frozen-universe-materialization.json", result);
     return { ...result, artifactPath };
   }
   throw new Error("BACKTEST_CLI_COMMAND_UNKNOWN_" + command);

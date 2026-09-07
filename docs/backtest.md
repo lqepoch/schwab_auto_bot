@@ -46,11 +46,15 @@ fixture/demo 代理，不能表示完整指数成分；本模块不会自行抓�
 调用方提供并哈希固定快照后才可使用。
 
 成分股代码与 provider 的交易代码是两个不同的身份层，不能因字符串看起来相似就
-自动替换或去掉 `.`、`-`。catalog 的 `universe.symbols` 必须是实际 bars 中的
-provider symbol；若上游快照使用了其他代码，调用方必须先生成一个独立、哈希固定的
-symbol-resolution receipt（原代码、provider 代码、理由、查询证据）。无法交易的
-escrow/CVR/现金/期货等持仓也必须有单独 exclusion receipt，不能悄悄从
-`current-constituents` 删除。
+自动替换或去掉 `.`、`-`。catalog shard 的 `symbols` 使用实际 bars 中的 provider
+symbol，但 `universe.symbols` 始终保留冻结快照的 source symbol；shard 额外保存
+`sourceSymbol`/`providerSymbol`。若上游快照使用了其他代码，调用方必须先生成一个
+独立、哈希固定的 symbol-resolution receipt。receipt 只需要列出显式 override 或
+exclusion，未列出的 source symbol 安全地按同名 provider symbol 处理；未知 source、
+重复 target、映射与 exclusion 冲突都会 fail-closed。无法交易的 escrow/CVR/现金/期货
+等持仓也必须有同一绑定 receipt 的 exclusion（source、reason、evidence URI/hash），
+不能悄悄从 `current-constituents` 删除。运行 `--symbol BFB` 时，输出同时报告
+requested/source=`BFB` 与 provider=`BF.B`，企业行动 coverage 也按 provider symbol 验证。
 
 S&P 500、Nasdaq-100 和 Russell 3000 若要分别回测，快照还必须保留每个 symbol 的
 index-membership 标签；只保存三个来源的去重并集不能在事后可靠地恢复各指数成员。若
@@ -189,9 +193,33 @@ npm run backtest:discover-universe -- \
   --start-year 2016 --end-year 2025 \
   --allow-network --allow-list-discovery \
   --backtest-env-file /path/to/oss.env \
-  --discovery-out /path/to/current-universe-discovery.json \
-  --output-dir .artifacts/backtest/current-universe-discovery
+  --discovery-out /path/to/frozen-universe-discovery.json \
+  --output-dir .artifacts/backtest/frozen-universe-discovery
 ```
+
+若 snapshot 的 source symbol 与 archive/provider symbol 不同，另提供 operator 生成的
+receipt 及其文件 SHA-256；不会自动尝试 `BFB`/`BRK.B`/`BRK-B` 等别名。receipt 可以
+只列显式差异，其他 source symbol 保持同名 identity：
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "backtest-symbol-resolution-receipt",
+  "status": "PASS",
+  "evidenceClass": "LOCAL_HASH_FIXED_SYMBOL_RESOLUTION",
+  "readOnly": true,
+  "brokerWriteAttempted": false,
+  "snapshot": { "id": "SNAPSHOT_ID_SHA256", "sha256": "SNAPSHOT_BYTES_SHA256" },
+  "mappings": [{ "sourceSymbol": "BFB", "providerSymbol": "BF.B" }],
+  "exclusions": [],
+  "warnings": []
+}
+```
+
+发现命令的可选参数是 `--symbol-resolution-receipt FILE
+--symbol-resolution-receipt-sha256 SHA256`。receipt 必须绑定本次 snapshot 的精确
+`id` 与 bytes hash；exclusion 还必须给出 evidence URI/hash。缺失映射不会提升归档
+证据：若同名 provider shard 不存在，该 source/year 仍为 `UNVERIFIED`。
 
 正常 `audit`/`run` 不会 LIST。只有人工审查 discovery JSON 为 `PASS` 后，才可离线
 materialize；它要求每个 action receipt 的文件 SHA-256 由命令行显式提供，并验证
@@ -203,14 +231,20 @@ fail-closed，不会生成 catalog 或 manifest：
 
 ```bash
 npm run backtest:materialize-universe-catalog -- \
-  --discovery /path/to/current-universe-discovery.json \
+  --discovery /path/to/frozen-universe-discovery.json \
   --actions-receipt /path/to/batch-001/alpaca-actions-receipt.json,/path/to/batch-002/alpaca-actions-receipt.json \
   --actions-receipt-sha256 RECEIPT_SHA256_1,RECEIPT_SHA256_2 \
-  --catalog-out /path/to/current-universe-catalog.json \
-  --actions-out /path/to/current-universe-actions.json \
-  --manifest-out /path/to/current-universe-manifest.json \
-  --output-dir .artifacts/backtest/current-universe-materialize
+  --catalog-out /path/to/frozen-universe-catalog.json \
+  --actions-out /path/to/frozen-universe-actions.json \
+  --manifest-out /path/to/frozen-universe-manifest.json \
+  --output-dir .artifacts/backtest/frozen-universe-materialize
 ```
+
+不指定三个 `*-out` 参数时，CLI 默认写入 output directory 下的
+`frozen-universe-catalog.json`、`frozen-universe-actions.json` 和
+`frozen-universe-manifest.json`；包含 `current` 或 `latest` 路径段的目标会在任何
+写入前拒绝。action receipt 的 query symbols 是 provider symbol，但生成的 bundle
+同时保留 source `symbols`、`providerSymbols` 和显式 `excludedSymbols`。
 
 2599 个 symbol 不应塞进一个未经审查的超长 provider 命令。用 `--symbols-file` 每行
 一个、不改写代码的文件，按人工分批分别运行 `fetch-actions`，保留每批 receipt；再把

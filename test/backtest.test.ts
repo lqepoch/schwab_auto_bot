@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { promisify } from "node:util";
 import { digestJson, sha256Hex, stableJson } from "../src/backtest/fingerprints.ts";
@@ -25,6 +26,8 @@ import {
 import { runArchiveProviderParity, runAudit, runBacktest, runPreflight } from "../src/backtest/workflow.ts";
 
 const execFileAsync = promisify(execFile);
+const HASH_A = "a".repeat(64);
+const HASH_B = "b".repeat(64);
 
 function baseManifest(overrides: Record<string, unknown> = {}) {
   return {
@@ -640,6 +643,99 @@ test("reference simulation preserves value through a 3:2 split with micro-shares
   assert.equal(result.sharesBought, 10);
   assert.equal(result.trades[1]?.quantity, 15);
   assert.ok(Math.abs(result.finalCash - 100) <= 0.00001);
+});
+
+test("run routes a source symbol through an explicit provider alias and keeps both identities", async () => {
+  const root = await mkdtemp(join(tmpdir(), "backtest-provider-symbol-routing-"));
+  try {
+    const bars = Buffer.from([
+      "timestamp,symbol,open,high,low,close,volume",
+      "2016-01-04T14:30:00Z,BF.B,10,10,10,10,100",
+      "2016-01-05T14:30:00Z,BF.B,10,10,10,10,100",
+    ].join("\n") + "\n");
+    const actions = Buffer.from(JSON.stringify({
+      schemaVersion: 1,
+      provider: "fixture",
+      actions: [{ symbol: "BF.B", exDate: "2016-01-05", type: "dividend", cash: 1, source: "fixture" }],
+    }));
+    const barsPath = join(root, "bf-b.csv");
+    const actionsPath = join(root, "actions.json");
+    const catalogPath = join(root, "frozen-catalog.json");
+    const manifestPath = join(root, "frozen-manifest.json");
+    await writeFile(barsPath, bars);
+    await writeFile(actionsPath, actions);
+    const catalog = {
+      schemaVersion: 1,
+      datasetId: "fixture-provider-alias",
+      feed: "alpaca",
+      timeframe: "1m",
+      shards: [{
+        uri: pathToFileURL(barsPath).href,
+        sha256: sha256Hex(bars),
+        schema: "canonical-minute-bars-v1",
+        format: "csv",
+        compression: "none",
+        startDate: "2016-01-01",
+        endDate: "2016-12-31",
+        symbols: ["BF.B"],
+        sourceSymbol: "BFB",
+        providerSymbol: "BF.B",
+      }],
+    };
+    const catalogBytes = Buffer.from(JSON.stringify(catalog));
+    await writeFile(catalogPath, catalogBytes);
+    const manifest = parseManifest({
+      schemaVersion: 1,
+      datasetId: "fixture-provider-alias",
+      feed: "alpaca",
+      timeframe: "1m",
+      session: "regular",
+      adjustmentMode: "raw",
+      startDate: "2016-01-01",
+      endDate: "2016-12-31",
+      sourceObject: {
+        kind: "catalog",
+        uri: pathToFileURL(catalogPath).href,
+        sha256: sha256Hex(catalogBytes),
+        schema: "minute-bars-catalog-v1",
+        format: "json",
+        compression: "none",
+      },
+      universe: {
+        id: "frozen-provider-alias",
+        source: "fixture source snapshot",
+        fingerprint: digestJson(["BFB"]),
+        completeness: "current-constituents",
+        symbols: ["BFB"],
+        symbolResolution: {
+          receiptUri: pathToFileURL(join(root, "frozen-symbol-resolution.json")).href,
+          receiptSha256: HASH_B,
+          snapshotId: HASH_A,
+          snapshotSha256: HASH_B,
+          mappings: [{ sourceSymbol: "BFB", providerSymbol: "BF.B" }],
+          exclusions: [],
+        },
+      },
+      corporateActions: {
+        mode: "local-file",
+        uri: pathToFileURL(actionsPath).href,
+        sha256: sha256Hex(actions),
+        appliesToBars: false,
+        provider: "fixture",
+      },
+    });
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const result = await runBacktest(manifestPath, { symbol: "BFB", initialCash: 100 });
+    assert.equal(result.status, "PASS");
+    assert.equal(result.requestedSymbol, "BFB");
+    assert.equal(result.sourceSymbol, "BFB");
+    assert.equal(result.providerSymbol, "BF.B");
+    assert.equal((result.simulation as { sourceSymbol: string }).sourceSymbol, "BFB");
+    assert.equal((result.simulation as { providerSymbol: string }).providerSymbol, "BF.B");
+    assert.equal((result.simulation as { finalCash: number }).finalCash, 110);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("workflow artifacts distinguish local, blocked, and reproducible runs", async () => {

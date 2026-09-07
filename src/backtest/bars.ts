@@ -3,6 +3,7 @@ import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from "hyparqu
 import { compressors } from "hyparquet-compressors";
 import type { BacktestManifest } from "./manifest.ts";
 import { compareCodeUnits, digestJson } from "./fingerprints.ts";
+import { providerSymbolForSource } from "./symbolResolution.ts";
 
 export interface MinuteBar {
   readonly timestamp: string;
@@ -145,6 +146,9 @@ function compareBars(left: MinuteBar, right: MinuteBar): number {
 
 export function validateAndSortBars(bars: MinuteBar[], manifest: BacktestManifest): readonly MinuteBar[] {
   const symbols = new Set(manifest.universe.symbols);
+  for (const sourceSymbol of manifest.universe.symbols) {
+    symbols.add(providerSymbolForSource(manifest.universe.symbolResolution, sourceSymbol));
+  }
   const seen = new Set<string>();
   for (const bar of bars) {
     if (!symbols.has(bar.symbol)) throw new Error("BACKTEST_BAR_SYMBOL_NOT_IN_UNIVERSE_" + bar.symbol);

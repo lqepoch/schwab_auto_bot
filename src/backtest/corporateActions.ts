@@ -1,6 +1,7 @@
 import { readExactUri } from "./objectStore.ts";
 import { compareCodeUnits, sha256Hex, stableJson, digestJson } from "./fingerprints.ts";
 import type { BacktestManifest } from "./manifest.ts";
+import { providerSymbolForSource } from "./symbolResolution.ts";
 
 export type CorporateActionType = "split" | "dividend";
 
@@ -221,7 +222,10 @@ export function validateCorporateActionPolicy(
   if (manifest.adjustmentMode !== "raw" && actionMode !== "none") {
     warnings.push("CORPORATE_ACTIONS_ARE_EVIDENCE_ONLY_NO_SECOND_ADJUSTMENT");
   }
-  if (actions.some((action) => !manifest.universe.symbols.includes(action.symbol))) {
+  const providerSymbols = new Set(manifest.universe.symbols.map((sourceSymbol) => (
+    providerSymbolForSource(manifest.universe.symbolResolution, sourceSymbol)
+  )));
+  if (actions.some((action) => !providerSymbols.has(action.symbol) && !manifest.universe.symbols.includes(action.symbol))) {
     warnings.push("CORPORATE_ACTION_SYMBOL_OUTSIDE_UNIVERSE");
   }
   return warnings;

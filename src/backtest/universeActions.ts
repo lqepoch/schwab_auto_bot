@@ -13,6 +13,7 @@ import {
   parseCurrentUniverseDiscovery,
   type CurrentUniverseDiscoveryResult,
 } from "./universe.ts";
+import { excludedSourceSymbols, providerSymbolForSource } from "./symbolResolution.ts";
 
 interface ActionReceiptRecord {
   readonly path: string;
@@ -61,6 +62,8 @@ export interface MaterializeCurrentUniverseResult {
   readonly actionReceiptSha256: readonly string[];
   readonly actionCoverage: {
     readonly symbols: readonly string[];
+    readonly providerSymbols: readonly string[];
+    readonly excludedSymbols: readonly string[];
     readonly since: string;
     readonly until: string;
     readonly batchCount: number;
@@ -124,6 +127,14 @@ function localPath(value: string, baseDirectory: string, code: string): string {
   } catch {
     throw new Error(code);
   }
+}
+
+function assertExactOutputPath(value: string, label: string): string {
+  const path = resolve(value);
+  if (/[?*]/.test(value) || /(^|[/\\])(?:latest|current)(?:[/_.-]|$)/i.test(path)) {
+    throw new Error(`BACKTEST_UNIVERSE_MATERIALIZE_${label.toUpperCase()}_URI_NOT_EXACT`);
+  }
+  return path;
 }
 
 async function loadActionReceipt(input: UniverseActionsReceiptInput): Promise<ActionReceiptRecord> {
@@ -208,8 +219,18 @@ async function loadActionReceipt(input: UniverseActionsReceiptInput): Promise<Ac
 function assertCoverage(
   discovery: CurrentUniverseDiscoveryResult,
   batches: readonly ActionReceiptRecord[],
-): { readonly symbols: readonly string[]; readonly since: string; readonly until: string } {
-  const requiredSymbols = discovery.universe.symbols;
+): {
+  readonly symbols: readonly string[];
+  readonly providerSymbols: readonly string[];
+  readonly excludedSymbols: readonly string[];
+  readonly since: string;
+  readonly until: string;
+} {
+  const excludedSymbols = excludedSourceSymbols(discovery.symbolResolution);
+  const excluded = new Set(excludedSymbols);
+  const requiredSymbols = discovery.universe.symbols.filter((symbol) => !excluded.has(symbol));
+  const providerSymbols = requiredSymbols.map((sourceSymbol) => providerSymbolForSource(discovery.symbolResolution, sourceSymbol));
+  const providerSet = new Set(providerSymbols);
   const requiredYears = Array.from(
     { length: discovery.archive.endYear - discovery.archive.startYear + 1 },
     (_, offset) => discovery.archive.startYear + offset,
@@ -217,23 +238,24 @@ function assertCoverage(
   const covered = new Set<string>();
   for (const batch of batches) {
     for (const item of batch.symbols) {
-      if (!requiredSymbols.includes(item)) throw new Error("BACKTEST_UNIVERSE_ACTION_COVERAGE_SYMBOL_OUTSIDE_UNIVERSE");
+      if (!providerSet.has(item)) throw new Error("BACKTEST_UNIVERSE_ACTION_COVERAGE_SYMBOL_OUTSIDE_UNIVERSE");
       covered.add(item);
     }
   }
-  if (covered.size !== requiredSymbols.length) throw new Error("BACKTEST_UNIVERSE_ACTION_COVERAGE_SYMBOL_INCOMPLETE");
-  for (const symbol of requiredSymbols) {
+  if (covered.size !== providerSymbols.length) throw new Error("BACKTEST_UNIVERSE_ACTION_COVERAGE_SYMBOL_INCOMPLETE");
+  for (const sourceSymbol of requiredSymbols) {
+    const providerSymbol = providerSymbolForSource(discovery.symbolResolution, sourceSymbol);
     for (const year of requiredYears) {
       const start = `${year}-01-01`;
       const end = `${year}-12-31`;
-      if (!batches.some((batch) => batch.symbols.includes(symbol) && batch.since <= start && batch.until >= end)) {
-        throw new Error(`BACKTEST_UNIVERSE_ACTION_COVERAGE_INCOMPLETE_${symbol}_${year}`);
+      if (!batches.some((batch) => batch.symbols.includes(providerSymbol) && batch.since <= start && batch.until >= end)) {
+        throw new Error(`BACKTEST_UNIVERSE_ACTION_COVERAGE_INCOMPLETE_${sourceSymbol}_${year}`);
       }
     }
   }
   const since = requiredYears.length > 0 ? `${requiredYears[0]}-01-01` : discovery.archive.startYear.toString();
   const until = requiredYears.length > 0 ? `${requiredYears[requiredYears.length - 1]}-12-31` : discovery.archive.endYear.toString();
-  return { symbols: requiredSymbols, since, until };
+  return { symbols: requiredSymbols, providerSymbols, excludedSymbols, since, until };
 }
 
 export async function materializeCurrentUniverseCatalog(
@@ -243,6 +265,9 @@ export async function materializeCurrentUniverseCatalog(
   if (discovery.status !== "PASS" || !discovery.catalog) {
     throw new Error("BACKTEST_UNIVERSE_DISCOVERY_NOT_PASS");
   }
+  const catalogPath = assertExactOutputPath(input.catalogPath, "catalog");
+  const actionsPath = assertExactOutputPath(input.actionsPath, "actions");
+  const manifestPath = assertExactOutputPath(input.manifestPath, "manifest");
   const discoverySha256 = input.discoverySha256 ?? digestJson(discovery);
   if (!isSha256(discoverySha256)) throw new Error("BACKTEST_UNIVERSE_DISCOVERY_SHA256_INVALID");
   if (input.actionReceipts.length === 0) throw new Error("BACKTEST_UNIVERSE_ACTION_RECEIPT_REQUIRED");
@@ -255,6 +280,8 @@ export async function materializeCurrentUniverseCatalog(
     provider: "alpaca" as const,
     coverage: {
       symbols: coverage.symbols,
+      providerSymbols: coverage.providerSymbols,
+      excludedSymbols: coverage.excludedSymbols,
       since: coverage.since,
       until: coverage.until,
       receipts: batches.map((batch) => ({
@@ -268,22 +295,22 @@ export async function materializeCurrentUniverseCatalog(
     },
     actions: actionFile.actions,
   };
-  await atomicWriteJson(input.actionsPath, actionBundle, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
-  await atomicWriteJson(input.catalogPath, discovery.catalog, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
-  const actionsBytes = await readFile(input.actionsPath);
-  const catalogBytes = await readFile(input.catalogPath);
+  await atomicWriteJson(actionsPath, actionBundle, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
+  await atomicWriteJson(catalogPath, discovery.catalog, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
+  const actionsBytes = await readFile(actionsPath);
+  const catalogBytes = await readFile(catalogPath);
   const manifest = buildCurrentUniverseBacktestManifest(discovery, {
-    catalogUri: pathToFileURL(resolve(input.catalogPath)).href,
+    catalogUri: pathToFileURL(catalogPath).href,
     catalogSha256: sha256Hex(catalogBytes),
     corporateActions: {
-      uri: pathToFileURL(resolve(input.actionsPath)).href,
+      uri: pathToFileURL(actionsPath).href,
       sha256: sha256Hex(actionsBytes),
       provider: "alpaca",
     },
     discoverySha256,
   });
-  await atomicWriteJson(input.manifestPath, manifest, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
-  const manifestBytes = await readFile(input.manifestPath);
+  await atomicWriteJson(manifestPath, manifest, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
+  const manifestBytes = await readFile(manifestPath);
   return {
     status: "PASS",
     kind: "backtest-current-universe-materialization",
@@ -292,11 +319,11 @@ export async function materializeCurrentUniverseCatalog(
     brokerWriteAttempted: false,
     discoveryStatus: "PASS",
     discoverySha256,
-    catalogPath: resolve(input.catalogPath),
+    catalogPath,
     catalogSha256: sha256Hex(catalogBytes),
-    manifestPath: resolve(input.manifestPath),
+    manifestPath,
     manifestSha256: sha256Hex(manifestBytes),
-    actionsPath: resolve(input.actionsPath),
+    actionsPath,
     actionsSha256: sha256Hex(actionsBytes),
     actionReceiptSha256: batches.map((batch) => batch.sha256),
     actionCoverage: { ...coverage, batchCount: batches.length },

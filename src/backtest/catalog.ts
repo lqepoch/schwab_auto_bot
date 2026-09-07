@@ -2,6 +2,7 @@ import { readExactObject } from "./objectStore.ts";
 import { parseBarsAsync, mergeParsedBars, type ParsedBars } from "./bars.ts";
 import { compareCodeUnits } from "./fingerprints.ts";
 import type { BacktestManifest, SourceObject } from "./manifest.ts";
+import { excludedSourceSymbols, providerSymbolForSource } from "./symbolResolution.ts";
 import { z } from "zod";
 import { gunzipSync } from "node:zlib";
 
@@ -23,6 +24,8 @@ const catalogShardSchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   symbols: z.array(symbol).min(1),
+  sourceSymbol: symbol.optional(),
+  providerSymbol: symbol.optional(),
 });
 
 const catalogSchema = z.object({
@@ -99,11 +102,32 @@ function assertCatalogMatchesManifest(catalog: MinuteBarsCatalog, manifest: Back
     throw new Error("BACKTEST_CATALOG_MANIFEST_MISMATCH");
   }
   const universe = new Set(manifest.universe.symbols);
+  const resolution = manifest.universe.symbolResolution;
+  const excluded = new Set(excludedSourceSymbols(resolution));
   for (const shard of catalog.shards) {
     if (shard.startDate < manifest.startDate || shard.endDate > manifest.endDate) {
       throw new Error("BACKTEST_CATALOG_SHARD_OUTSIDE_MANIFEST_RANGE");
     }
-    if (shard.symbols.some((symbol) => !universe.has(symbol))) {
+    const hasSourceRelation = shard.sourceSymbol !== undefined || shard.providerSymbol !== undefined;
+    if (hasSourceRelation) {
+      if (!shard.sourceSymbol || !shard.providerSymbol || shard.symbols.length !== 1 || shard.symbols[0] !== shard.providerSymbol) {
+        throw new Error("BACKTEST_CATALOG_SHARD_SYMBOL_RESOLUTION_INVALID");
+      }
+      if (!universe.has(shard.sourceSymbol) || excluded.has(shard.sourceSymbol)) {
+        throw new Error("BACKTEST_CATALOG_SHARD_SOURCE_SYMBOL_INVALID");
+      }
+      let expectedProvider: string;
+      try {
+        expectedProvider = providerSymbolForSource(resolution, shard.sourceSymbol);
+      } catch {
+        throw new Error("BACKTEST_CATALOG_SHARD_SOURCE_SYMBOL_INVALID");
+      }
+      if (expectedProvider !== shard.providerSymbol) {
+        throw new Error("BACKTEST_CATALOG_SHARD_PROVIDER_SYMBOL_MISMATCH");
+      }
+    } else if (resolution) {
+      throw new Error("BACKTEST_CATALOG_SHARD_SYMBOL_RESOLUTION_MISSING");
+    } else if (shard.symbols.some((symbol) => !universe.has(symbol))) {
       throw new Error("BACKTEST_CATALOG_SHARD_SYMBOL_OUTSIDE_UNIVERSE");
     }
   }
@@ -135,10 +159,17 @@ export async function readDatasetBars(
   const startDate = options.startDate ?? manifest.startDate;
   const endDate = options.endDate ?? manifest.endDate;
   if (startDate > endDate) throw new Error("BACKTEST_CATALOG_DATE_RANGE_INVALID");
+  const requiredProviderSymbols = requiredSymbols?.map((sourceSymbol) => {
+    try {
+      return providerSymbolForSource(manifest.universe.symbolResolution, sourceSymbol);
+    } catch (error) {
+      throw error;
+    }
+  });
   const orderedShards = catalog.shards.slice().sort((left, right) => compareCodeUnits(left.uri, right.uri));
   const selectedShards = orderedShards.filter((shard) => {
     const dateOverlaps = shard.endDate >= startDate && shard.startDate <= endDate;
-    const symbolOverlaps = !requiredSymbols || requiredSymbols.some((symbol) => shard.symbols.includes(symbol));
+    const symbolOverlaps = !requiredProviderSymbols || requiredProviderSymbols.some((symbol) => shard.symbols.includes(symbol));
     return dateOverlaps && symbolOverlaps;
   });
   if (selectedShards.length === 0) throw new Error("BACKTEST_CATALOG_NO_MATCHING_SHARDS");

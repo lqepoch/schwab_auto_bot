@@ -14,6 +14,13 @@ import {
   type ObjectHead,
   type ReadOnlyObjectStore,
 } from "./objectStore.ts";
+import {
+  bindSymbolResolution,
+  identitySymbolResolution,
+  providerSymbolForSource,
+  type SymbolResolutionPlan,
+  type SymbolResolutionReceiptInput,
+} from "./symbolResolution.ts";
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -62,10 +69,13 @@ export interface CurrentUniverseDiscoveryInput {
   readonly feed?: "sip" | "boats";
   readonly session?: "regular" | "extended" | "all";
   readonly concurrency?: number;
+  readonly symbolResolution?: SymbolResolutionReceiptInput;
 }
 
 export interface CurrentUniverseArchiveQuery {
   readonly snapshotSymbol: string;
+  readonly sourceSymbol: string;
+  readonly providerSymbol: string;
   readonly year: number;
   readonly prefixUri: string;
   readonly delimiter: "/";
@@ -77,6 +87,8 @@ export interface CurrentUniverseArchiveQuery {
 
 export interface CurrentUniverseResolvedShard {
   readonly snapshotSymbol: string;
+  readonly sourceSymbol: string;
+  readonly providerSymbol: string;
   readonly year: number;
   readonly revision: number;
   readonly archiveManifest: {
@@ -90,10 +102,19 @@ export interface CurrentUniverseResolvedShard {
 
 export interface CurrentUniverseUnresolvedShard {
   readonly snapshotSymbol: string;
+  readonly sourceSymbol: string;
+  readonly providerSymbol: string;
   readonly year: number;
   readonly code: string;
   readonly revisions: readonly number[];
   readonly query: CurrentUniverseArchiveQuery;
+}
+
+export interface CurrentUniverseExcludedSymbol {
+  readonly sourceSymbol: string;
+  readonly reason: string;
+  readonly evidence: { readonly uri: string; readonly sha256: string };
+  readonly years: { readonly start: number; readonly end: number };
 }
 
 export interface CurrentUniverseDiscoveryResult {
@@ -115,6 +136,7 @@ export interface CurrentUniverseDiscoveryResult {
     readonly manifest: { readonly uri: string; readonly sha256: string; readonly requestIdPresent: boolean };
     readonly snapshot: { readonly uri: string; readonly sha256: string; readonly requestIdPresent: boolean };
   };
+  readonly symbolResolution?: SymbolResolutionPlan;
   readonly archive: {
     readonly rootUri: string;
     readonly startYear: number;
@@ -122,8 +144,10 @@ export interface CurrentUniverseDiscoveryResult {
     readonly feed: "sip" | "boats";
     readonly session: "regular" | "extended" | "all";
     readonly expectedShardCount: number;
+    readonly excludedShardCount: number;
     readonly resolvedShardCount: number;
     readonly unresolved: readonly CurrentUniverseUnresolvedShard[];
+    readonly excluded: readonly CurrentUniverseExcludedSymbol[];
     readonly resolved: readonly CurrentUniverseResolvedShard[];
     readonly queries: readonly CurrentUniverseArchiveQuery[];
   };
@@ -318,7 +342,7 @@ async function bootstrapUniverse(
   };
 }
 
-type ArchiveProbe = { readonly snapshotSymbol: string; readonly year: number };
+type ArchiveProbe = { readonly sourceSymbol: string; readonly providerSymbol: string; readonly year: number };
 type ArchiveProbeResult = CurrentUniverseResolvedShard | CurrentUniverseUnresolvedShard;
 
 function isResolved(result: ArchiveProbeResult): result is CurrentUniverseResolvedShard {
@@ -330,10 +354,12 @@ async function resolveArchiveProbe(
   input: { bucket: string; archiveRootKey: string; feed: "sip" | "boats"; session: "regular" | "extended" | "all" },
   transport: CurrentUniverseDiscoveryTransport,
 ): Promise<ArchiveProbeResult> {
-  const prefixKey = `${input.archiveRootKey}/symbol=${probe.snapshotSymbol}/year=${probe.year}/`;
+  const prefixKey = `${input.archiveRootKey}/symbol=${probe.providerSymbol}/year=${probe.year}/`;
   const prefixUri = objectUri(input.bucket, prefixKey);
   const emptyQuery = (overrides: Partial<CurrentUniverseArchiveQuery> = {}): CurrentUniverseArchiveQuery => ({
-    snapshotSymbol: probe.snapshotSymbol,
+    snapshotSymbol: probe.sourceSymbol,
+    sourceSymbol: probe.sourceSymbol,
+    providerSymbol: probe.providerSymbol,
     year: probe.year,
     prefixUri,
     delimiter: "/",
@@ -353,7 +379,9 @@ async function resolveArchiveProbe(
     listed = await transport.listChildren(prefixUri);
   } catch (error) {
     return {
-      snapshotSymbol: probe.snapshotSymbol,
+      snapshotSymbol: probe.sourceSymbol,
+      sourceSymbol: probe.sourceSymbol,
+      providerSymbol: probe.providerSymbol,
       year: probe.year,
       code: codeOf(error, "BACKTEST_UNIVERSE_ARCHIVE_DISCOVERY_FAILED"),
       revisions: [],
@@ -361,7 +389,9 @@ async function resolveArchiveProbe(
     };
   }
   const query: CurrentUniverseArchiveQuery = {
-    snapshotSymbol: probe.snapshotSymbol,
+    snapshotSymbol: probe.sourceSymbol,
+    sourceSymbol: probe.sourceSymbol,
+    providerSymbol: probe.providerSymbol,
     year: probe.year,
     prefixUri,
     delimiter: "/",
@@ -373,7 +403,9 @@ async function resolveArchiveProbe(
   const unexpectedPrefixes = listed.prefixes.filter((value) => exactRevision(prefixKey, value) === undefined);
   if (unexpectedPrefixes.length > 0 || listed.objects.length > 0) {
     return {
-      snapshotSymbol: probe.snapshotSymbol,
+      snapshotSymbol: probe.sourceSymbol,
+      sourceSymbol: probe.sourceSymbol,
+      providerSymbol: probe.providerSymbol,
       year: probe.year,
       code: "BACKTEST_UNIVERSE_ARCHIVE_ALIAS_OR_UNEXPECTED_OBJECT",
       revisions: [],
@@ -386,7 +418,9 @@ async function resolveArchiveProbe(
     .sort((left, right) => left - right);
   if (revisions.length !== 1) {
     return {
-      snapshotSymbol: probe.snapshotSymbol,
+      snapshotSymbol: probe.sourceSymbol,
+      sourceSymbol: probe.sourceSymbol,
+      providerSymbol: probe.providerSymbol,
       year: probe.year,
       code: revisions.length === 0
         ? "BACKTEST_UNIVERSE_ARCHIVE_REVISION_NOT_FOUND"
@@ -408,7 +442,7 @@ async function resolveArchiveProbe(
       feed: input.feed,
       session: input.session,
     });
-    if (imported.archive.symbol !== probe.snapshotSymbol || imported.archive.year !== probe.year) {
+    if (imported.archive.symbol !== probe.providerSymbol || imported.archive.year !== probe.year) {
       throw new Error("BACKTEST_UNIVERSE_ARCHIVE_IDENTITY_MISMATCH");
     }
     const source = imported.manifest.sourceObject;
@@ -424,10 +458,14 @@ async function resolveArchiveProbe(
       feed: source.feed,
       startDate: `${probe.year}-01-01`,
       endDate: `${probe.year}-12-31`,
-      symbols: [probe.snapshotSymbol],
+      symbols: [probe.providerSymbol],
+      sourceSymbol: probe.sourceSymbol,
+      providerSymbol: probe.providerSymbol,
     };
     return {
-      snapshotSymbol: probe.snapshotSymbol,
+      snapshotSymbol: probe.sourceSymbol,
+      sourceSymbol: probe.sourceSymbol,
+      providerSymbol: probe.providerSymbol,
       year: probe.year,
       revision,
       archiveManifest: {
@@ -440,7 +478,9 @@ async function resolveArchiveProbe(
     };
   } catch (error) {
     return {
-      snapshotSymbol: probe.snapshotSymbol,
+      snapshotSymbol: probe.sourceSymbol,
+      sourceSymbol: probe.sourceSymbol,
+      providerSymbol: probe.providerSymbol,
       year: probe.year,
       code: codeOf(error, "BACKTEST_UNIVERSE_ARCHIVE_MANIFEST_READ_FAILED"),
       revisions,
@@ -478,9 +518,23 @@ export async function discoverCurrentUniverse(
   const session = input.session ?? "regular";
   const symbols = [...new Set(bootstrap.snapshot.symbols)].sort(compareCodeUnits);
   if (symbols.length !== bootstrap.snapshot.symbols.length) throw new Error("BACKTEST_UNIVERSE_SNAPSHOT_SYMBOL_DUPLICATE");
-  const probes = symbols.flatMap((snapshotSymbol) =>
+  const identity = identitySymbolResolution(
+    { id: bootstrap.snapshot.id, sha256: bootstrap.snapshotSha256 },
+    symbols,
+  );
+  const resolution = input.symbolResolution
+    ? bindSymbolResolution(
+      input.symbolResolution,
+      { id: bootstrap.snapshot.id, sha256: bootstrap.snapshotSha256 },
+      symbols,
+    )
+    : identity;
+  const excludedSymbols = new Set(resolution.exclusions.map((item) => item.sourceSymbol));
+  const activeSymbols = symbols.filter((sourceSymbol) => !excludedSymbols.has(sourceSymbol));
+  const probes = activeSymbols.flatMap((sourceSymbol) =>
     Array.from({ length: input.endYear - input.startYear + 1 }, (_, offset) => ({
-      snapshotSymbol,
+      sourceSymbol,
+      providerSymbol: providerSymbolForSource(resolution, sourceSymbol),
       year: input.startYear + offset,
     })),
   );
@@ -495,11 +549,11 @@ export async function discoverCurrentUniverse(
     }, transport),
   );
   const resolved = probesResult.filter(isResolved).sort((left, right) =>
-    compareCodeUnits(left.snapshotSymbol, right.snapshotSymbol) || left.year - right.year);
+    compareCodeUnits(left.sourceSymbol, right.sourceSymbol) || left.year - right.year);
   const unresolved = probesResult.filter((result): result is CurrentUniverseUnresolvedShard => !isResolved(result)).sort((left, right) =>
-    compareCodeUnits(left.snapshotSymbol, right.snapshotSymbol) || left.year - right.year);
+    compareCodeUnits(left.sourceSymbol, right.sourceSymbol) || left.year - right.year);
   const queries = probesResult.map((result) => result.query).sort((left, right) =>
-    compareCodeUnits(left.snapshotSymbol, right.snapshotSymbol) || left.year - right.year);
+    compareCodeUnits(left.sourceSymbol, right.sourceSymbol) || left.year - right.year);
   const fingerprint = digestJson({
     universeManifestSha256: bootstrap.manifestSha256,
     snapshotSha256: bootstrap.snapshotSha256,
@@ -510,12 +564,22 @@ export async function discoverCurrentUniverse(
     "EXPLICIT_BOUNDED_PREFIX_DISCOVERY_FROZEN_BEFORE_RUNTIME_READS",
     "RUNTIME_CATALOG_READS_EXACT_OBJECTS_ONLY",
   ];
+  if (input.symbolResolution) warnings.push("SYMBOL_RESOLUTION_RECEIPT_HASH_BOUND_TO_UNIVERSE_SNAPSHOT");
+  if (resolution.exclusions.length > 0) warnings.push("EXPLICIT_SYMBOL_EXCLUSIONS_REMAIN_IN_UNIVERSE_AUDIT_IDENTITY");
   if (bootstrap.snapshot.survivorship_bias) warnings.push("CURRENT_UNIVERSE_HAS_DECLARED_SURVIVORSHIP_BIAS");
   if (unresolved.length > 0) warnings.push("CURRENT_UNIVERSE_CATALOG_NOT_ADMISSIBLE_UNTIL_ALL_SHARDS_RESOLVE");
   if (unresolved.some((item) => item.code === "BACKTEST_UNIVERSE_ARCHIVE_ALIAS_OR_UNEXPECTED_OBJECT")) {
     warnings.push("CURRENT_UNIVERSE_ARCHIVE_ALIAS_OR_UNEXPECTED_OBJECT_UNVERIFIED");
   }
-  const catalog = unresolved.length === 0 ? {
+  const excluded = resolution.exclusions.map((item) => ({
+    sourceSymbol: item.sourceSymbol,
+    reason: item.reason,
+    evidence: item.evidence,
+    years: { start: input.startYear, end: input.endYear },
+  }));
+  const admissible = unresolved.length === 0 && resolved.length > 0;
+  if (resolved.length === 0) warnings.push("CURRENT_UNIVERSE_NO_ACTIVE_ARCHIVE_SHARDS");
+  const catalog = admissible ? {
     schemaVersion: 1 as const,
     datasetId: datasetId(bootstrap.snapshot.universe, input.startYear, input.endYear, bootstrap.snapshot.id),
     feed: "alpaca" as const,
@@ -525,7 +589,7 @@ export async function discoverCurrentUniverse(
   return {
     schemaVersion: 1,
     kind: "backtest-current-universe-discovery",
-    status: unresolved.length === 0 ? "PASS" : "UNVERIFIED",
+    status: admissible ? "PASS" : "UNVERIFIED",
     evidenceClass: "OSS_READ_ONLY_UNIVERSE_ADMISSION",
     readOnly: true,
     brokerWriteAttempted: false,
@@ -549,15 +613,18 @@ export async function discoverCurrentUniverse(
         requestIdPresent: bootstrap.snapshotRequestIdPresent,
       },
     },
+    ...(input.symbolResolution ? { symbolResolution: resolution } : {}),
     archive: {
       rootUri: input.archiveRootUri,
       startYear: input.startYear,
       endYear: input.endYear,
       feed,
       session,
-      expectedShardCount: probes.length,
+      expectedShardCount: symbols.length * (input.endYear - input.startYear + 1),
+      excludedShardCount: excluded.length * (input.endYear - input.startYear + 1),
       resolvedShardCount: resolved.length,
       unresolved,
+      excluded,
       resolved,
       queries,
     },
@@ -608,6 +675,16 @@ export function buildCurrentUniverseBacktestManifest(
       fingerprint: discovery.universe.fingerprint,
       completeness: "current-constituents",
       symbols: discovery.universe.symbols,
+      ...(discovery.symbolResolution ? {
+        symbolResolution: {
+          receiptUri: discovery.symbolResolution.receiptUri,
+          receiptSha256: discovery.symbolResolution.receiptSha256,
+          snapshotId: discovery.symbolResolution.snapshotId,
+          snapshotSha256: discovery.symbolResolution.snapshotSha256,
+          mappings: discovery.symbolResolution.mappings,
+          exclusions: discovery.symbolResolution.exclusions,
+        },
+      } : {}),
     },
     corporateActions: {
       mode: "provider-receipt",

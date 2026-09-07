@@ -16,6 +16,7 @@ import {
   type CorporateAction,
 } from "./corporateActions.ts";
 import { simulateLongOnlyCashEquity } from "./engine.ts";
+import { providerSymbolForSource } from "./symbolResolution.ts";
 import {
   fetchAlpacaCorporateActions,
   fetchAlpacaBars,
@@ -330,13 +331,15 @@ export async function runArchiveProviderParity(
   try {
     if (manifest.adjustmentMode !== "raw") throw new Error("BACKTEST_PROVIDER_PARITY_REQUIRES_RAW_ARCHIVE");
     if (manifest.sourceObject.feed !== "sip") throw new Error("BACKTEST_PROVIDER_PARITY_REQUIRES_SIP_ARCHIVE");
+    const sourceSymbol = query.symbol.trim().toUpperCase();
+    const providerSymbol = providerSymbolForSource(manifest.universe.symbolResolution, sourceSymbol);
     const [archive, provider] = await Promise.all([
       readDatasetBars(manifestPath, manifest, {
         allowNetwork: true,
         env: options.env,
-        requiredSymbols: [query.symbol],
+        requiredSymbols: [sourceSymbol],
       }),
-      fetchAlpacaBars(query, {
+      fetchAlpacaBars({ ...query, symbol: providerSymbol }, {
         env: options.env,
         runner: options.runner,
         maxPages: options.maxPages,
@@ -401,7 +404,9 @@ export async function runArchiveProviderParity(
       manifestFingerprint: manifestFingerprint(manifest),
       sourceObjects: archive.sourceObjects,
       archiveRange: {
-        symbol: provider.receipt.symbol,
+        requestedSymbol: sourceSymbol,
+        sourceSymbol,
+        providerSymbol: provider.receipt.symbol,
         start,
         end,
         rowCount: archiveRows.length,
@@ -442,6 +447,7 @@ export async function runBacktest(
   assertRunnableManifest(manifest);
   const symbol = (options.symbol ?? manifest.universe.symbols[0]).trim().toUpperCase();
   if (!manifest.universe.symbols.includes(symbol)) throw new Error("BACKTEST_SYMBOL_NOT_IN_UNIVERSE_" + symbol);
+  const providerSymbol = providerSymbolForSource(manifest.universe.symbolResolution, symbol);
   const initialPolicyWarnings = validateCorporateActionPolicy(manifest, [], { requireEvidence: true });
   const data = await readDatasetBars(manifestPath, manifest, {
     allowNetwork: options.allowNetwork,
@@ -455,7 +461,11 @@ export async function runBacktest(
     ...validateCorporateActionPolicy(manifest, actionData.actions, { requireEvidence: true }),
   ];
   const initialCash = options.initialCash ?? 100_000;
-  const simulation = simulateLongOnlyCashEquity(data.bars, manifest, actionData.actions, { symbol, initialCash });
+  const simulation = simulateLongOnlyCashEquity(data.bars, manifest, actionData.actions, {
+    symbol,
+    providerSymbol,
+    initialCash,
+  });
   const runFingerprint = digestJson({
     manifestFingerprint: manifestFingerprint(manifest),
     dataFingerprint: data.dataFingerprint,
@@ -468,6 +478,9 @@ export async function runBacktest(
     ...baseArtifact("backtest-run", "PASS", sourceEvidence(manifest), warnings),
     runId: runFingerprint.slice(0, 24),
     manifestPath,
+    requestedSymbol: symbol,
+    sourceSymbol: symbol,
+    providerSymbol,
     manifestFingerprint: manifestFingerprint(manifest),
     datasetId: manifest.datasetId,
     sourceObjects: data.sourceObjects,
@@ -475,7 +488,7 @@ export async function runBacktest(
     dataFingerprint: data.dataFingerprint,
     actionFingerprint: actionData.dataFingerprint,
     actionSourceUri: actionData.sourceUri,
-    bars: barSummary(filterBars(data.bars, { symbol })),
+    bars: barSummary(filterBars(data.bars, { symbol: providerSymbol })),
     simulation,
     session: {
       declared: manifest.session,
