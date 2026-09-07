@@ -48,6 +48,9 @@ export const BacktestManifestSchema = z.object({
     context.addIssue({ code: "custom", path: ["endDate"], message: "END_DATE_BEFORE_START_DATE" });
   }
   const uri = manifest.sourceObject.uri;
+  if (!/^(?:file|oss):/i.test(uri)) {
+    context.addIssue({ code: "custom", path: ["sourceObject", "uri"], message: "SOURCE_URI_PROTOCOL_UNSUPPORTED" });
+  }
   if (/[?*]/.test(uri) || /(^|[/])(?:latest|current)(?:[/_.-]|$)/i.test(uri)) {
     context.addIssue({
       code: "custom",
@@ -62,6 +65,9 @@ export const BacktestManifestSchema = z.object({
   if (manifest.sourceObject.kind === "object" && manifest.sourceObject.schema === "minute-bars-catalog-v1") {
     context.addIssue({ code: "custom", path: ["sourceObject"], message: "OBJECT_SOURCE_CANNOT_BE_CATALOG" });
   }
+  if (manifest.sourceObject.kind === "object" && manifest.sourceObject.format === "json") {
+    context.addIssue({ code: "custom", path: ["sourceObject", "format"], message: "BAR_OBJECT_FORMAT_MUST_BE_CSV_OR_JSONL" });
+  }
   if (manifest.corporateActions.uri &&
       (/[?*]/.test(manifest.corporateActions.uri)
         || /(^|[/])(?:latest|current)(?:[/_.-]|$)/i.test(manifest.corporateActions.uri))) {
@@ -69,6 +75,13 @@ export const BacktestManifestSchema = z.object({
       code: "custom",
       path: ["corporateActions", "uri"],
       message: "CORPORATE_ACTION_URI_MUST_BE_EXACT_AND_IMMUTABLE",
+    });
+  }
+  if (manifest.corporateActions.uri && !/^(?:file|oss):/i.test(manifest.corporateActions.uri)) {
+    context.addIssue({
+      code: "custom",
+      path: ["corporateActions", "uri"],
+      message: "CORPORATE_ACTION_URI_PROTOCOL_UNSUPPORTED",
     });
   }
   if (manifest.corporateActions.mode === "none" && manifest.corporateActions.appliesToBars) {

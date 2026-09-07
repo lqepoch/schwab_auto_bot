@@ -100,7 +100,7 @@ function printHelp(): void {
     "  preflight --manifest FILE [--env-file FILE] [--output-dir DIR]",
     "  audit --manifest FILE [--allow-network] [--env-file FILE] [--output-dir DIR]",
     "  parity --left FILE --right FILE [--allow-network] [--output-dir DIR]",
-    "  run --manifest FILE [--symbol AAPL] [--initial-cash 100000] [--allow-network]",
+    "  run --manifest FILE [--symbol AAPL] [--initial-cash 100000] [--allow-network] [--env-file FILE]",
     "  fetch-actions --symbols AAPL,MSFT --since 2016-01-01 --until 2016-12-31",
     "               --allow-network [--env-file FILE] [--output-dir DIR]",
     "",

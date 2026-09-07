@@ -133,7 +133,12 @@ function parseOssUri(uri: string): { bucket: string; key: string } {
   if (parsed.protocol !== "oss:" || !parsed.hostname || !parsed.pathname || parsed.search || parsed.hash) {
     throw new Error("BACKTEST_SOURCE_URI_MUST_BE_EXACT_OSS_URI");
   }
-  const key = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+  let key: string;
+  try {
+    key = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+  } catch {
+    throw new Error("BACKTEST_SOURCE_OBJECT_KEY_INVALID");
+  }
   if (!key || key.includes("..") || /[*?]/.test(key) || /(^|[/])(?:latest|current)(?:[/_.-]|$)/i.test(key)) {
     throw new Error("BACKTEST_SOURCE_OBJECT_KEY_NOT_EXACT");
   }
@@ -164,8 +169,9 @@ function resolveFileUri(uri: string, manifestPath: string): string {
 }
 
 function objectUriProtocol(uri: string): "file" | "oss" {
-  if (uri.startsWith("file:")) return "file";
-  if (uri.startsWith("oss:")) return "oss";
+  const protocol = uri.slice(0, uri.indexOf(":")).toLowerCase();
+  if (protocol === "file") return "file";
+  if (protocol === "oss") return "oss";
   throw new Error("BACKTEST_SOURCE_URI_PROTOCOL_UNSUPPORTED");
 }
 

@@ -60,8 +60,20 @@ export async function writeArtifact(outputDir: string, fileName: string, artifac
   return path;
 }
 
+function isOssUri(uri: string | undefined): boolean {
+  return typeof uri === "string" && uri.toLowerCase().startsWith("oss:");
+}
+
+function manifestUsesOss(manifest: BacktestManifest): boolean {
+  return sourceProtocol(manifest.sourceObject) === "oss" || isOssUri(manifest.corporateActions.uri);
+}
+
+function networkAccessAttempted(manifest: BacktestManifest, allowNetwork: boolean | undefined): boolean {
+  return allowNetwork === true && manifestUsesOss(manifest);
+}
+
 function sourceEvidence(manifest: BacktestManifest): string {
-  return sourceProtocol(manifest.sourceObject) === "oss"
+  return manifestUsesOss(manifest)
     ? "OSS_READ_ONLY_PROVIDER_EVIDENCE"
     : "LOCAL_FILE_OR_FIXTURE";
 }
@@ -78,7 +90,9 @@ export async function runPreflight(
   if (manifest.universe.completeness === "unknown") warnings.push("UNIVERSE_COMPLETENESS_UNKNOWN_WILL_FAIL_BACKTEST");
   warnings.push("SESSION_DECLARATION_NOT_CALENDAR_VERIFIED");
   warnings.push("ADJUSTMENT_MODE_IS_DECLARATIVE_UNTIL_PROVIDER_EVIDENCE_IS_CAPTURED");
-  const blocked = protocol === "oss" && !oss.configured;
+  const actionUsesOss = isOssUri(manifest.corporateActions.uri);
+  const ossRequired = protocol === "oss" || actionUsesOss;
+  const blocked = ossRequired && !oss.configured;
   if (blocked) warnings.push("OSS_CONFIG_MISSING_NO_NETWORK_PROBE_PERFORMED");
   return {
     ...baseArtifact(
@@ -110,7 +124,7 @@ export async function runPreflight(
       sessionVerification: "DECLARED_UNVERIFIED",
     },
     oss: {
-      required: protocol === "oss",
+      required: ossRequired,
       configured: oss.configured,
       missing: oss.missing,
       endpoint: oss.endpoint,
@@ -118,6 +132,10 @@ export async function runPreflight(
       bucket: oss.bucket,
       networkAccessAttempted: false,
       methods: ["HEAD", "GET"],
+    },
+    corporateActionsSource: {
+      protocol: actionUsesOss ? "oss" : "file",
+      uri: manifest.corporateActions.uri ?? null,
     },
   };
 }
@@ -175,7 +193,7 @@ export async function runAudit(
         declared: manifest.session,
         verification: "DECLARED_UNVERIFIED",
       },
-      networkAccessAttempted: sourceProtocol(manifest.sourceObject) === "oss" && options.allowNetwork === true,
+      networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork),
     };
   } catch (error) {
     const status = classifyReadError(error);
@@ -185,7 +203,7 @@ export async function runAudit(
       manifestFingerprint: manifestFingerprint(manifest),
       datasetId: manifest.datasetId,
       errorCode: error instanceof Error ? error.message : "BACKTEST_AUDIT_FAILED",
-      networkAccessAttempted: sourceProtocol(manifest.sourceObject) === "oss" && options.allowNetwork === true,
+      networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork),
     };
   }
 }
@@ -273,7 +291,8 @@ export async function runParity(
       },
       mismatchCount,
       mismatches,
-      networkAccessAttempted: options.allowNetwork === true,
+      networkAccessAttempted: options.allowNetwork === true
+        && (manifestUsesOss(leftManifest) || manifestUsesOss(rightManifest)),
     };
   } catch (error) {
     const status = classifyReadError(error);
@@ -282,7 +301,8 @@ export async function runParity(
       leftManifestPath,
       rightManifestPath,
       errorCode: error instanceof Error ? error.message : "BACKTEST_PARITY_FAILED",
-      networkAccessAttempted: options.allowNetwork === true,
+      networkAccessAttempted: options.allowNetwork === true
+        && (manifestUsesOss(leftManifest) || manifestUsesOss(rightManifest)),
     };
   }
 }
@@ -339,7 +359,7 @@ export async function runBacktest(
       declared: manifest.session,
       verification: "DECLARED_UNVERIFIED",
     },
-    networkAccessAttempted: sourceProtocol(manifest.sourceObject) === "oss" && options.allowNetwork === true,
+    networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork),
   };
 }
 

@@ -329,6 +329,24 @@ test("workflow artifacts distinguish local, blocked, and reproducible runs", asy
     const blocked = await runAudit(blockedPath, {});
     assert.equal(blocked.status, "BLOCKED");
     assert.equal(blocked.networkAccessAttempted, false);
+    const actionBlockedManifest = parseManifest(baseManifest({
+      sourceObject: {
+        ...baseManifest().sourceObject,
+        sha256: sha256Hex(Buffer.from(csv)),
+      },
+      corporateActions: {
+        mode: "provider-receipt",
+        uri: "oss://missing-bucket/actions-2016.json",
+        sha256: "3".repeat(64),
+        appliesToBars: false,
+        provider: "alpaca",
+      },
+    }));
+    const actionBlockedPath = join(root, "action-blocked.json");
+    await writeFile(actionBlockedPath, JSON.stringify(actionBlockedManifest));
+    const actionPreflight = await runPreflight(actionBlockedPath, {});
+    assert.equal(actionPreflight.status, "BLOCKED");
+    assert.equal((actionPreflight.oss as { required: boolean }).required, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
