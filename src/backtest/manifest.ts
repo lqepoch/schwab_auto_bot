@@ -7,10 +7,11 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/, "SHA256_MUST_BE_LOWERCASE_HEX");
 const symbol = z.string().regex(/^[A-Z][A-Z0-9._-]{0,15}$/, "SYMBOL_MUST_BE_NORMALIZED");
 
 const sourceObjectSchema = z.object({
+  kind: z.enum(["object", "catalog"]).default("object"),
   uri: z.string().min(1),
   sha256: hash,
-  schema: z.enum(["canonical-minute-bars-v1", "alpaca-minute-bars-v1"]),
-  format: z.enum(["csv", "jsonl"]),
+  schema: z.enum(["canonical-minute-bars-v1", "alpaca-minute-bars-v1", "minute-bars-catalog-v1"]),
+  format: z.enum(["csv", "jsonl", "json"]),
   compression: z.enum(["none", "gzip"]).default("none"),
 });
 
@@ -27,7 +28,7 @@ const corporateActionsSchema = z.object({
   uri: z.string().min(1).optional(),
   sha256: hash.optional(),
   appliesToBars: z.boolean(),
-  provider: z.enum(["alpaca", "yfinance", "unknown"]).optional(),
+  provider: z.enum(["alpaca", "yfinance", "fixture", "unknown"]).optional(),
 });
 
 export const BacktestManifestSchema = z.object({
@@ -52,6 +53,22 @@ export const BacktestManifestSchema = z.object({
       code: "custom",
       path: ["sourceObject", "uri"],
       message: "SOURCE_URI_MUST_BE_EXACT_AND_IMMUTABLE",
+    });
+  }
+  if (manifest.sourceObject.kind === "catalog" &&
+      (manifest.sourceObject.schema !== "minute-bars-catalog-v1" || manifest.sourceObject.format !== "json")) {
+    context.addIssue({ code: "custom", path: ["sourceObject"], message: "CATALOG_SOURCE_SCHEMA_INVALID" });
+  }
+  if (manifest.sourceObject.kind === "object" && manifest.sourceObject.schema === "minute-bars-catalog-v1") {
+    context.addIssue({ code: "custom", path: ["sourceObject"], message: "OBJECT_SOURCE_CANNOT_BE_CATALOG" });
+  }
+  if (manifest.corporateActions.uri &&
+      (/[?*]/.test(manifest.corporateActions.uri)
+        || /(^|[/])(?:latest|current)(?:[/_.-]|$)/i.test(manifest.corporateActions.uri))) {
+    context.addIssue({
+      code: "custom",
+      path: ["corporateActions", "uri"],
+      message: "CORPORATE_ACTION_URI_MUST_BE_EXACT_AND_IMMUTABLE",
     });
   }
   if (manifest.corporateActions.mode === "none" && manifest.corporateActions.appliesToBars) {

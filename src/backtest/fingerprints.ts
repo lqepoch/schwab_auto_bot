@@ -17,10 +17,14 @@ export function stableJson(value: unknown): string {
   if (typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right));
+      .sort(([left], [right]) => compareCodeUnits(left, right));
     return "{" + entries.map(([key, item]) => JSON.stringify(key) + ":" + stableJson(item)).join(",") + "}";
   }
   throw new TypeError("UNSUPPORTED_JSON_VALUE:" + typeof value);
+}
+
+export function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 export function sha256Hex(value: string | Uint8Array): string {
