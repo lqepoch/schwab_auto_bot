@@ -883,6 +883,55 @@ test("run routes a source symbol through an explicit provider alias and keeps bo
   }
 });
 
+test("run skips explicit exclusions for other symbols but rejects the excluded request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "backtest-explicit-exclusion-run-"));
+  try {
+    const bars = Buffer.from(csv);
+    const barsPath = join(root, "bars.csv");
+    const manifestPath = join(root, "frozen-manifest.json");
+    await writeFile(barsPath, bars);
+    const manifest = parseManifest(baseManifest({
+      adjustmentMode: "split-adjusted",
+      sourceObject: {
+        ...baseManifest().sourceObject,
+        sha256: sha256Hex(bars),
+      },
+      universe: {
+        id: "russell-current",
+        source: "fixture explicit exclusion",
+        fingerprint: digestJson(["AAPL", "P5N994"]),
+        completeness: "current-constituents",
+        symbols: ["AAPL", "P5N994"],
+        symbolResolution: {
+          receiptUri: pathToFileURL(join(root, "frozen-symbol-resolution.json")).href,
+          receiptSha256: HASH_A,
+          snapshotId: HASH_A,
+          snapshotSha256: HASH_B,
+          mappings: [],
+          exclusions: [{
+            sourceSymbol: "P5N994",
+            reason: "provider archive has no verified symbol",
+            evidence: { uri: "file:./p5n994-evidence.json", sha256: HASH_A },
+          }],
+        },
+      },
+    }));
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    const result = await runBacktest(manifestPath, { symbol: "AAPL", initialCash: 100 });
+    assert.equal(result.status, "PASS");
+    assert.equal(result.requestedSymbol, "AAPL");
+    assert.equal(result.sourceSymbol, "AAPL");
+    assert.equal(result.providerSymbol, "AAPL");
+    await assert.rejects(
+      runBacktest(manifestPath, { symbol: "P5N994", initialCash: 100 }),
+      /BACKTEST_SYMBOL_RESOLUTION_SOURCE_SYMBOL_EXCLUDED_P5N994/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workflow artifacts distinguish local, blocked, and reproducible runs", async () => {
   const root = await mkdtemp(join(tmpdir(), "backtest-workflow-"));
   try {

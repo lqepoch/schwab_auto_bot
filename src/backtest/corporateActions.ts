@@ -1,7 +1,7 @@
 import { readExactUri } from "./objectStore.ts";
 import { compareCodeUnits, sha256Hex, stableJson, digestJson } from "./fingerprints.ts";
 import type { BacktestManifest } from "./manifest.ts";
-import { providerSymbolForSource } from "./symbolResolution.ts";
+import { excludedSourceSymbols, providerSymbolForSource } from "./symbolResolution.ts";
 
 export type CorporateActionType = "split" | "dividend";
 
@@ -222,10 +222,12 @@ export function validateCorporateActionPolicy(
   if (manifest.adjustmentMode !== "raw" && actionMode !== "none") {
     warnings.push("CORPORATE_ACTIONS_ARE_EVIDENCE_ONLY_NO_SECOND_ADJUSTMENT");
   }
-  const providerSymbols = new Set(manifest.universe.symbols.map((sourceSymbol) => (
+  const excluded = new Set(excludedSourceSymbols(manifest.universe.symbolResolution));
+  const activeSourceSymbols = manifest.universe.symbols.filter((sourceSymbol) => !excluded.has(sourceSymbol));
+  const providerSymbols = new Set(activeSourceSymbols.map((sourceSymbol) => (
     providerSymbolForSource(manifest.universe.symbolResolution, sourceSymbol)
   )));
-  if (actions.some((action) => !providerSymbols.has(action.symbol) && !manifest.universe.symbols.includes(action.symbol))) {
+  if (actions.some((action) => !providerSymbols.has(action.symbol) && !activeSourceSymbols.includes(action.symbol))) {
     warnings.push("CORPORATE_ACTION_SYMBOL_OUTSIDE_UNIVERSE");
   }
   return warnings;
