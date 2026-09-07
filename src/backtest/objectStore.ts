@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { compareCodeUnits, sha256Hex } from "./fingerprints.ts";
+import { sha256Hex } from "./fingerprints.ts";
 import type { BacktestManifest, SourceObject } from "./manifest.ts";
 
 export interface OssConfiguration {
@@ -33,27 +33,6 @@ export interface ReadOnlyObjectStore {
   get(uri: string): Promise<Buffer>;
 }
 
-/**
- * Deliberately separate from the runtime object reader. It is only for an
- * operator-invoked admission step that freezes an exact archive plan before
- * a backtest is allowed to read any bars.
- */
-export interface BoundedPrefixDiscovery {
-  listChildren(prefixUri: string): Promise<{
-    readonly prefixes: readonly string[];
-    readonly objects: readonly BoundedPrefixObject[];
-    readonly pages: number;
-    readonly requestId?: string;
-  }>;
-}
-
-export interface BoundedPrefixObject {
-  readonly name: string;
-  readonly size?: number;
-  readonly etag?: string;
-  readonly lastModified?: string;
-}
-
 interface AliOssResponse {
   readonly status?: number;
   readonly headers?: Record<string, string | undefined>;
@@ -69,26 +48,9 @@ interface AliOssGetResult {
   readonly content?: Buffer;
 }
 
-interface AliOssListResult {
-  readonly res?: AliOssResponse;
-  readonly objects?: readonly BoundedPrefixObject[];
-  readonly prefixes?: readonly string[];
-  readonly nextContinuationToken?: string | null;
-  readonly isTruncated?: boolean;
-}
-
 export interface AliOssClient {
   head(name: string, options?: Record<string, unknown>): Promise<AliOssHeadResult>;
   get(name: string, options?: Record<string, unknown>): Promise<AliOssGetResult>;
-}
-
-export interface AliOssPrefixClient extends AliOssClient {
-  listV2(query: {
-    readonly prefix: string;
-    readonly delimiter: "/";
-    readonly "max-keys": number;
-    readonly "continuation-token"?: string;
-  }): Promise<AliOssListResult>;
 }
 
 export interface AliOssClientOptions {
@@ -107,7 +69,6 @@ export interface AliOssClientOptions {
 type AliOssConstructor = new (options: AliOssClientOptions) => AliOssClient;
 
 export type AliOssClientFactory = (options: AliOssClientOptions) => Promise<AliOssClient>;
-export type AliOssPrefixClientFactory = (options: AliOssClientOptions) => Promise<AliOssPrefixClient>;
 
 export interface ExactObject {
   readonly bytes: Buffer;
@@ -221,9 +182,6 @@ const defaultAliOssClientFactory: AliOssClientFactory = async (options) => {
   return new constructor(options);
 };
 
-const defaultAliOssPrefixClientFactory: AliOssPrefixClientFactory = async (options) =>
-  (await defaultAliOssClientFactory(options)) as AliOssPrefixClient;
-
 export function parseExactOssUri(uri: string): { bucket: string; key: string } {
   let parsed: URL;
   try {
@@ -314,91 +272,6 @@ export function createReadOnlyOssStore(
         return response.content;
       } catch {
         throw new Error("BACKTEST_OSS_GET_FAILED");
-      }
-    },
-  };
-}
-
-/**
- * Lists one explicit, bounded child-prefix set. This is not used by normal
- * manifest/catalog reads: callers must opt into discovery, freeze the result,
- * and subsequently use the exact-object reader above.
- */
-export function createBoundedPrefixDiscovery(
-  config: OssConfiguration,
-  createClient: AliOssPrefixClientFactory = defaultAliOssPrefixClientFactory,
-  options: { readonly allowNetwork?: boolean; readonly allowListDiscovery?: boolean } = {},
-): BoundedPrefixDiscovery {
-  if (!options.allowNetwork) throw new Error("BACKTEST_NETWORK_DISABLED");
-  if (!options.allowListDiscovery) throw new Error("BACKTEST_LIST_DISCOVERY_REQUIRES_ALLOW_LIST_DISCOVERY");
-  let clientPromise: Promise<AliOssPrefixClient> | undefined;
-  const getClient = async (): Promise<AliOssPrefixClient> => {
-    clientPromise ??= createClient(ossClientOptions(config));
-    return clientPromise;
-  };
-  return {
-    async listChildren(prefixUri: string): Promise<{
-      readonly prefixes: readonly string[];
-      readonly objects: readonly BoundedPrefixObject[];
-      readonly pages: number;
-      readonly requestId?: string;
-    }> {
-      const { bucket, key } = parseExactOssUri(prefixUri);
-      if (bucket !== config.bucket) throw new Error("BACKTEST_OSS_BUCKET_MISMATCH");
-      const prefix = key.endsWith("/") ? key : key + "/";
-      const prefixes: string[] = [];
-      const objects: BoundedPrefixObject[] = [];
-      let continuationToken: string | undefined;
-      let pages = 0;
-      let requestId: string | undefined;
-      try {
-        for (;;) {
-          if (pages >= 256) throw new Error("BACKTEST_OSS_PREFIX_DISCOVERY_TRUNCATED");
-          const query: {
-            prefix: string;
-            delimiter: "/";
-            "max-keys": number;
-            "continuation-token"?: string;
-          } = { prefix, delimiter: "/", "max-keys": 1_000 };
-          if (continuationToken) query["continuation-token"] = continuationToken;
-          const response = await (await getClient()).listV2(query);
-          pages += 1;
-          requestId ??= response.res?.headers?.["x-oss-request-id"];
-          for (const value of response.prefixes ?? []) {
-            if (typeof value !== "string" || !value.startsWith(prefix)) {
-              throw new Error("BACKTEST_OSS_PREFIX_DISCOVERY_RESPONSE_INVALID");
-            }
-            prefixes.push(value);
-          }
-          for (const value of response.objects ?? []) {
-            if (!value || typeof value.name !== "string" || !value.name.startsWith(prefix)) {
-              throw new Error("BACKTEST_OSS_PREFIX_DISCOVERY_RESPONSE_INVALID");
-            }
-            objects.push({
-              name: value.name,
-              ...(typeof value.size === "number" ? { size: value.size } : {}),
-              ...(typeof value.etag === "string" ? { etag: value.etag } : {}),
-              ...(typeof value.lastModified === "string" ? { lastModified: value.lastModified } : {}),
-            });
-          }
-          const next = typeof response.nextContinuationToken === "string"
-            ? response.nextContinuationToken.trim()
-            : "";
-          if (!response.isTruncated && !next) break;
-          if (!next || next === continuationToken) {
-            throw new Error("BACKTEST_OSS_PREFIX_DISCOVERY_TRUNCATED");
-          }
-          continuationToken = next;
-        }
-        return {
-          prefixes: [...new Set(prefixes)].sort(compareCodeUnits),
-          objects: objects.slice().sort((left, right) => compareCodeUnits(left.name, right.name)),
-          pages,
-          ...(requestId ? { requestId } : {}),
-        };
-      } catch (error) {
-        if (error instanceof Error && error.message.startsWith("BACKTEST_OSS_PREFIX_DISCOVERY_")) throw error;
-        throw new Error("BACKTEST_OSS_PREFIX_DISCOVERY_FAILED");
       }
     },
   };

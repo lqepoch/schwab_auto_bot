@@ -1,7 +1,6 @@
 import { readExactUri } from "./objectStore.ts";
-import { compareCodeUnits, sha256Hex, stableJson, digestJson } from "./fingerprints.ts";
+import { compareCodeUnits, sha256Hex, digestJson } from "./fingerprints.ts";
 import type { BacktestManifest } from "./manifest.ts";
-import { excludedSourceSymbols, providerSymbolForSource } from "./symbolResolution.ts";
 
 export type CorporateActionType = "split" | "dividend";
 
@@ -13,10 +12,6 @@ export interface CorporateAction {
   readonly dividendPerShare?: number;
   readonly source: "alpaca" | "yfinance" | "fixture" | "unknown";
   readonly providerId?: string;
-  /** All provider IDs observed for one economic event after safe de-duplication. */
-  readonly providerIds?: readonly string[];
-  /** Number of additional provider rows folded into this economic event. */
-  readonly duplicateCount?: number;
 }
 
 export interface CorporateActionsFile {
@@ -51,34 +46,6 @@ function normalizeNumber(value: unknown, code: string): number {
   return number;
 }
 
-function normalizeProviderIds(row: Record<string, unknown>): readonly string[] {
-  const values: unknown[] = [];
-  if (row.providerIds !== undefined) {
-    if (!Array.isArray(row.providerIds)) throw new Error("BACKTEST_ACTION_PROVIDER_IDS_INVALID");
-    const listedIds = row.providerIds.map((value) => String(value ?? "").trim());
-    if (listedIds.some((id) => !id) || new Set(listedIds).size !== listedIds.length) {
-      throw new Error("BACKTEST_ACTION_PROVIDER_ID_DUPLICATE");
-    }
-    values.push(...listedIds);
-  }
-  if (row.providerId !== undefined) values.push(row.providerId);
-  if (row.id !== undefined) values.push(row.id);
-  const ids = values.map((value) => {
-    const id = String(value ?? "").trim();
-    if (!id) throw new Error("BACKTEST_ACTION_PROVIDER_ID_INVALID");
-    return id;
-  });
-  return [...new Set(ids)].sort(compareCodeUnits);
-}
-
-function normalizeDuplicateCount(value: unknown): number | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error("BACKTEST_ACTION_DUPLICATE_COUNT_INVALID");
-  }
-  return value > 0 ? value : undefined;
-}
-
 function normalizeAction(value: unknown, provider: CorporateActionsFile["provider"]): CorporateAction {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("BACKTEST_ACTION_ROW_INVALID");
@@ -92,15 +59,6 @@ function normalizeAction(value: unknown, provider: CorporateActionsFile["provide
   if (!["alpaca", "yfinance", "fixture", "unknown"].includes(source)) {
     throw new Error("BACKTEST_ACTION_SOURCE_INVALID");
   }
-  const normalizedProviderIds = normalizeProviderIds(row);
-  const duplicateCount = normalizeDuplicateCount(row.duplicateCount);
-  if (normalizedProviderIds.length > 1 && (duplicateCount ?? 0) < normalizedProviderIds.length - 1) {
-    throw new Error("BACKTEST_ACTION_DUPLICATE_COUNT_INCONSISTENT");
-  }
-  const providerFields = normalizedProviderIds.length > 0
-    ? { providerId: normalizedProviderIds[0], providerIds: normalizedProviderIds }
-    : {};
-  const duplicateFields = duplicateCount === undefined ? {} : { duplicateCount };
   if (rawType === "split") {
     const oldRate = row.oldRate ?? row.old_rate;
     const newRate = row.newRate ?? row.new_rate;
@@ -115,8 +73,7 @@ function normalizeAction(value: unknown, provider: CorporateActionsFile["provide
       type: "split",
       splitFactor: normalizeNumber(splitFactor, "BACKTEST_SPLIT_FACTOR_INVALID"),
       source,
-      ...providerFields,
-      ...duplicateFields,
+      providerId: row.id === undefined ? undefined : String(row.id),
     };
   }
   if (rawType === "dividend") {
@@ -126,46 +83,10 @@ function normalizeAction(value: unknown, provider: CorporateActionsFile["provide
       type: "dividend",
       dividendPerShare: normalizeNumber(row.dividendPerShare ?? row.cash, "BACKTEST_DIVIDEND_AMOUNT_INVALID"),
       source,
-      ...providerFields,
-      ...duplicateFields,
+      providerId: row.id === undefined ? undefined : String(row.id),
     };
   }
   throw new Error("BACKTEST_ACTION_TYPE_UNSUPPORTED");
-}
-
-function providerIds(action: CorporateAction): readonly string[] {
-  const values = action.providerIds ?? (action.providerId ? [action.providerId] : []);
-  return [...new Set(values)].sort(compareCodeUnits);
-}
-
-function economicIdentity(action: CorporateAction): string {
-  return stableJson({
-    symbol: action.symbol,
-    exDate: action.exDate,
-    type: action.type,
-    ...(action.type === "split"
-      ? { splitFactor: action.splitFactor }
-      : { dividendPerShare: action.dividendPerShare }),
-  });
-}
-
-function compareActions(left: CorporateAction, right: CorporateAction): number {
-  return compareCodeUnits(left.symbol, right.symbol)
-    || compareCodeUnits(left.exDate, right.exDate)
-    || compareCodeUnits(left.type, right.type)
-    || compareCodeUnits(economicIdentity(left), economicIdentity(right))
-    || compareCodeUnits(left.source, right.source)
-    || compareCodeUnits(left.providerId ?? "", right.providerId ?? "");
-}
-
-function mergeEconomicDuplicate(left: CorporateAction, right: CorporateAction): CorporateAction {
-  const ids = [...new Set([...providerIds(left), ...providerIds(right)])].sort(compareCodeUnits);
-  const duplicateCount = (left.duplicateCount ?? 0) + (right.duplicateCount ?? 0) + 1;
-  return {
-    ...left,
-    ...(ids.length > 0 ? { providerId: ids[0], providerIds: ids } : {}),
-    duplicateCount,
-  };
 }
 
 export function parseCorporateActions(value: unknown): CorporateActionsFile {
@@ -180,25 +101,17 @@ export function parseCorporateActions(value: unknown): CorporateActionsFile {
     throw new Error("BACKTEST_ACTIONS_PROVIDER_INVALID");
   }
   if (!Array.isArray(input.actions)) throw new Error("BACKTEST_ACTIONS_ARRAY_MISSING");
-  const normalized = input.actions.map((action) => normalizeAction(action, provider)).sort(compareActions);
-  const byEconomicIdentity = new Map<string, CorporateAction>();
-  const providerIdentity = new Map<string, string>();
-  for (const action of normalized) {
-    const identity = economicIdentity(action);
-    for (const id of providerIds(action)) {
-      const providerKey = `${action.source}|${id}`;
-      const previous = providerIdentity.get(providerKey);
-      if (previous !== undefined) {
-        throw new Error(previous === identity
-          ? "BACKTEST_ACTION_PROVIDER_ID_DUPLICATE"
-          : "BACKTEST_ACTION_PROVIDER_ID_CONFLICT");
-      }
-      providerIdentity.set(providerKey, identity);
-    }
-    const existing = byEconomicIdentity.get(identity);
-    byEconomicIdentity.set(identity, existing ? mergeEconomicDuplicate(existing, action) : action);
+  const actions = input.actions.map((action) => normalizeAction(action, provider));
+  actions.sort((left, right) =>
+    compareCodeUnits(left.symbol, right.symbol)
+    || compareCodeUnits(left.exDate, right.exDate)
+    || compareCodeUnits(left.type, right.type));
+  const seen = new Set<string>();
+  for (const action of actions) {
+    const key = action.symbol + "|" + action.exDate + "|" + action.type;
+    if (seen.has(key)) throw new Error("BACKTEST_ACTION_DUPLICATE_" + key);
+    seen.add(key);
   }
-  const actions = [...byEconomicIdentity.values()].sort(compareActions);
   return { schemaVersion: 1, provider, actions };
 }
 
@@ -222,12 +135,7 @@ export function validateCorporateActionPolicy(
   if (manifest.adjustmentMode !== "raw" && actionMode !== "none") {
     warnings.push("CORPORATE_ACTIONS_ARE_EVIDENCE_ONLY_NO_SECOND_ADJUSTMENT");
   }
-  const excluded = new Set(excludedSourceSymbols(manifest.universe.symbolResolution));
-  const activeSourceSymbols = manifest.universe.symbols.filter((sourceSymbol) => !excluded.has(sourceSymbol));
-  const providerSymbols = new Set(activeSourceSymbols.map((sourceSymbol) => (
-    providerSymbolForSource(manifest.universe.symbolResolution, sourceSymbol)
-  )));
-  if (actions.some((action) => !providerSymbols.has(action.symbol) && !activeSourceSymbols.includes(action.symbol))) {
+  if (actions.some((action) => !manifest.universe.symbols.includes(action.symbol))) {
     warnings.push("CORPORATE_ACTION_SYMBOL_OUTSIDE_UNIVERSE");
   }
   return warnings;
@@ -264,29 +172,5 @@ export function actionsForDate(
   symbol: string,
   date: string,
 ): readonly CorporateAction[] {
-  return actions
-    .filter((action) => action.symbol === symbol && action.exDate === date)
-    .slice()
-    .sort(compareActions);
-}
-
-export interface CorporateActionDuplicateSummary {
-  readonly duplicateCount: number;
-  readonly providerDuplicateIds: readonly string[];
-}
-
-export function summarizeCorporateActionDuplicates(
-  actions: readonly CorporateAction[],
-): CorporateActionDuplicateSummary {
-  const providerDuplicateIds = new Set<string>();
-  let duplicateCount = 0;
-  for (const action of actions) {
-    duplicateCount += action.duplicateCount ?? 0;
-    const ids = providerIds(action);
-    for (const id of ids.slice(1)) providerDuplicateIds.add(id);
-  }
-  return {
-    duplicateCount,
-    providerDuplicateIds: [...providerDuplicateIds].sort(compareCodeUnits),
-  };
+  return actions.filter((action) => action.symbol === symbol && action.exDate === date);
 }

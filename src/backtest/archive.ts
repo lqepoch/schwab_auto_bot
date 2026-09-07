@@ -15,7 +15,7 @@ const archiveManifestSchema = z.object({
   schema_version: z.literal("market-data-bars-1m-manifest-v1"),
   provider: z.literal("alpaca"),
   timeframe: z.literal("1m"),
-  adjustment: z.enum(["raw", "split-adjusted", "total-return-adjusted", "unknown"]),
+  adjustment: z.literal("raw"),
   quality_status: z.literal("PASS"),
   data_schema_version: z.enum(["market-data-bars-1m-v1", "market-data-bars-1m-v2"]),
   symbol,
@@ -37,7 +37,6 @@ export type ArchiveBarsManifest = z.infer<typeof archiveManifestSchema>;
 export interface ArchiveActionsInput {
   readonly uri: string;
   readonly sha256: string;
-  readonly provider?: "alpaca" | "yfinance";
 }
 
 export interface ArchiveImportInput {
@@ -103,14 +102,13 @@ function actionDeclaration(actions: ArchiveActionsInput | undefined): BacktestMa
     uri: actions.uri,
     sha256: actions.sha256,
     appliesToBars: false,
-    provider: actions.provider ?? "alpaca",
+    provider: "alpaca",
   };
 }
 
 export function buildArchiveBacktestManifest(input: ArchiveImportInput): ArchiveImportResult {
   if (!isSha256(input.archiveManifestSha256)) throw new Error("BACKTEST_ARCHIVE_MANIFEST_SHA256_INVALID");
   const archive = archiveManifestFromBytes(input.archiveManifestBytes);
-  if (archive.adjustment === "unknown") throw new Error("BACKTEST_ARCHIVE_ADJUSTMENT_UNKNOWN");
   const { bucket, key: actualManifestKey } = parseExactOssUri(input.archiveManifestUri);
   const storagePrefix = deriveStoragePrefix(actualManifestKey, archive.manifest_key);
   const actualBarsKey = storagePrefix + archive.bars.key;
@@ -122,7 +120,7 @@ export function buildArchiveBacktestManifest(input: ArchiveImportInput): Archive
     feed: "alpaca",
     timeframe: "1m",
     session: input.session ?? "regular",
-    adjustmentMode: archive.adjustment,
+    adjustmentMode: "raw",
     startDate: `${archive.year}-01-01`,
     endDate: `${archive.year}-12-31`,
     sourceObject: {
@@ -141,9 +139,7 @@ export function buildArchiveBacktestManifest(input: ArchiveImportInput): Archive
       completeness: "proxy",
       symbols: [archive.symbol],
     },
-    corporateActions: input.actions
-      ? { ...actionDeclaration(input.actions), appliesToBars: archive.adjustment !== "raw" }
-      : { mode: "none", appliesToBars: false },
+    corporateActions: actionDeclaration(input.actions),
     archiveProvenance: {
       archiveManifestUri: input.archiveManifestUri,
       archiveManifestSha256: input.archiveManifestSha256,
