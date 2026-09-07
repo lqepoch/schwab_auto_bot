@@ -33,6 +33,7 @@ const catalogSchema = z.object({
   datasetId: z.string().min(1),
   feed: z.literal("alpaca"),
   timeframe: z.literal("1m"),
+  adjustmentMode: z.enum(["raw", "split-adjusted", "total-return-adjusted", "unknown"]).optional(),
   shards: z.array(catalogShardSchema).min(1),
 });
 

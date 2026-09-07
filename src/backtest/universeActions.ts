@@ -20,6 +20,7 @@ interface ActionReceiptRecord {
   readonly sha256: string;
   readonly actionsPath: string;
   readonly actionsSha256: string;
+  readonly provider: "alpaca" | "yfinance";
   readonly symbols: readonly string[];
   readonly since: string;
   readonly until: string;
@@ -151,12 +152,14 @@ async function loadActionReceipt(input: UniverseActionsReceiptInput): Promise<Ac
   } catch {
     throw new Error("BACKTEST_UNIVERSE_ACTION_RECEIPT_JSON_INVALID");
   }
-  if (!isRecord(value) || value.kind !== "alpaca-corporate-actions-receipt" || value.status !== "PASS"
+  if (!isRecord(value) || !["alpaca-corporate-actions-receipt", "yfinance-corporate-actions-receipt"].includes(String(value.kind)) || value.status !== "PASS"
     || value.evidenceClass !== "REAL_PROVIDER_READ_ONLY" || value.readOnly !== true || value.brokerWriteAttempted !== false) {
     throw new Error("BACKTEST_UNIVERSE_ACTION_RECEIPT_SCHEMA_INVALID");
   }
   const receipt = value.receipt;
-  if (!isRecord(receipt) || receipt.provider !== "alpaca" || receipt.accessMethod !== "alpaca_cli" || receipt.status !== 0) {
+  const provider = value.kind === "yfinance-corporate-actions-receipt" ? "yfinance" : "alpaca";
+  const expectedAccessMethod = provider === "yfinance" ? "python" : "alpaca_cli";
+  if (!isRecord(receipt) || receipt.provider !== provider || receipt.accessMethod !== expectedAccessMethod || receipt.status !== 0) {
     throw new Error("BACKTEST_UNIVERSE_ACTION_RECEIPT_QUERY_INVALID");
   }
   const batchSymbols = symbols(receipt.symbols, "BACKTEST_UNIVERSE_ACTION_RECEIPT_SYMBOLS_INVALID");
@@ -185,7 +188,7 @@ async function loadActionReceipt(input: UniverseActionsReceiptInput): Promise<Ac
     throw new Error("BACKTEST_UNIVERSE_ACTIONS_JSON_INVALID");
   }
   const parsed = parseCorporateActions(actionValue);
-  if (parsed.provider !== "alpaca") throw new Error("BACKTEST_UNIVERSE_ACTIONS_PROVIDER_INVALID");
+  if (parsed.provider !== provider) throw new Error("BACKTEST_UNIVERSE_ACTIONS_PROVIDER_INVALID");
   const duplicateSummary = summarizeCorporateActionDuplicates(parsed.actions);
   if (actionCount !== parsed.actions.length || duplicateCount !== duplicateSummary.duplicateCount
     || rawProviderRowCount !== actionCount + duplicateCount
@@ -204,6 +207,7 @@ async function loadActionReceipt(input: UniverseActionsReceiptInput): Promise<Ac
     sha256: input.sha256,
     actionsPath,
     actionsSha256,
+    provider,
     symbols: batchSymbols,
     since,
     until,
@@ -216,10 +220,7 @@ async function loadActionReceipt(input: UniverseActionsReceiptInput): Promise<Ac
   };
 }
 
-function assertCoverage(
-  discovery: CurrentUniverseDiscoveryResult,
-  batches: readonly ActionReceiptRecord[],
-): {
+function coverageIdentity(discovery: CurrentUniverseDiscoveryResult): {
   readonly symbols: readonly string[];
   readonly providerSymbols: readonly string[];
   readonly excludedSymbols: readonly string[];
@@ -230,6 +231,22 @@ function assertCoverage(
   const excluded = new Set(excludedSymbols);
   const requiredSymbols = discovery.universe.symbols.filter((symbol) => !excluded.has(symbol));
   const providerSymbols = requiredSymbols.map((sourceSymbol) => providerSymbolForSource(discovery.symbolResolution, sourceSymbol));
+  const requiredYears = Array.from(
+    { length: discovery.archive.endYear - discovery.archive.startYear + 1 },
+    (_, offset) => discovery.archive.startYear + offset,
+  );
+  const since = requiredYears.length > 0 ? `${requiredYears[0]}-01-01` : discovery.archive.startYear.toString();
+  const until = requiredYears.length > 0 ? `${requiredYears[requiredYears.length - 1]}-12-31` : discovery.archive.endYear.toString();
+  return { symbols: requiredSymbols, providerSymbols, excludedSymbols, since, until };
+}
+
+function assertCoverage(
+  discovery: CurrentUniverseDiscoveryResult,
+  batches: readonly ActionReceiptRecord[],
+): ReturnType<typeof coverageIdentity> {
+  const coverage = coverageIdentity(discovery);
+  const requiredSymbols = coverage.symbols;
+  const providerSymbols = coverage.providerSymbols;
   const providerSet = new Set(providerSymbols);
   const requiredYears = Array.from(
     { length: discovery.archive.endYear - discovery.archive.startYear + 1 },
@@ -253,9 +270,7 @@ function assertCoverage(
       }
     }
   }
-  const since = requiredYears.length > 0 ? `${requiredYears[0]}-01-01` : discovery.archive.startYear.toString();
-  const until = requiredYears.length > 0 ? `${requiredYears[requiredYears.length - 1]}-12-31` : discovery.archive.endYear.toString();
-  return { symbols: requiredSymbols, providerSymbols, excludedSymbols, since, until };
+  return coverage;
 }
 
 export async function materializeCurrentUniverseCatalog(
@@ -270,14 +285,20 @@ export async function materializeCurrentUniverseCatalog(
   const manifestPath = assertExactOutputPath(input.manifestPath, "manifest");
   const discoverySha256 = input.discoverySha256 ?? digestJson(discovery);
   if (!isSha256(discoverySha256)) throw new Error("BACKTEST_UNIVERSE_DISCOVERY_SHA256_INVALID");
-  if (input.actionReceipts.length === 0) throw new Error("BACKTEST_UNIVERSE_ACTION_RECEIPT_REQUIRED");
+  if (discovery.archive.adjustmentMode === "raw" && input.actionReceipts.length === 0) {
+    throw new Error("BACKTEST_UNIVERSE_ACTION_RECEIPT_REQUIRED_FOR_RAW_BARS");
+  }
   const batches = await Promise.all(input.actionReceipts.map(loadActionReceipt));
-  const coverage = assertCoverage(discovery, batches);
+  if (batches.some((batch) => batch.provider !== batches[0]?.provider)) {
+    throw new Error("BACKTEST_UNIVERSE_ACTION_RECEIPT_PROVIDER_MISMATCH");
+  }
+  const coverage = batches.length > 0 ? assertCoverage(discovery, batches) : coverageIdentity(discovery);
   const allActions = batches.flatMap((batch) => batch.actions);
-  const actionFile = parseCorporateActions({ schemaVersion: 1, provider: "alpaca", actions: allActions });
+  const actionProvider = batches[0]?.provider ?? "unknown";
+  const actionFile = parseCorporateActions({ schemaVersion: 1, provider: actionProvider, actions: allActions });
   const actionBundle = {
     schemaVersion: 1 as const,
-    provider: "alpaca" as const,
+    provider: actionProvider,
     coverage: {
       symbols: coverage.symbols,
       providerSymbols: coverage.providerSymbols,
@@ -302,11 +323,11 @@ export async function materializeCurrentUniverseCatalog(
   const manifest = buildCurrentUniverseBacktestManifest(discovery, {
     catalogUri: pathToFileURL(catalogPath).href,
     catalogSha256: sha256Hex(catalogBytes),
-    corporateActions: {
+    corporateActions: batches.length > 0 ? {
       uri: pathToFileURL(actionsPath).href,
       sha256: sha256Hex(actionsBytes),
-      provider: "alpaca",
-    },
+      provider: batches[0]?.provider ?? "alpaca",
+    } : undefined,
     discoverySha256,
   });
   await atomicWriteJson(manifestPath, manifest, { directoryMode: 0o750, fileMode: 0o640, pretty: true });

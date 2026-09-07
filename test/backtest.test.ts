@@ -24,6 +24,7 @@ import {
   readOssConfiguration,
 } from "../src/backtest/objectStore.ts";
 import { runArchiveProviderParity, runAudit, runBacktest, runPreflight } from "../src/backtest/workflow.ts";
+import { fetchYfinanceCorporateActions, writeFetchedYfinanceActions } from "../src/backtest/yfinance.ts";
 
 const execFileAsync = promisify(execFile);
 const HASH_A = "a".repeat(64);
@@ -168,6 +169,143 @@ test("archive importer derives a legacy storage prefix without making it a runti
   assert.equal(result.manifest.adjustmentMode, "raw");
   assert.equal(result.manifest.universe.completeness, "proxy");
   assert.equal(result.manifest.archiveProvenance?.survivorshipBias, true);
+});
+
+test("archive adjustment declaration propagates and unknown adjustment fails closed", () => {
+  const makeArchive = (adjustment: string) => Buffer.from(JSON.stringify({
+    schema_version: "market-data-bars-1m-manifest-v1",
+    provider: "alpaca",
+    timeframe: "1m",
+    adjustment,
+    quality_status: "PASS",
+    data_schema_version: "market-data-bars-1m-v2",
+    symbol: "AAPL",
+    year: 2016,
+    asof: "2026-08-12",
+    manifest_key: "archive/symbol=AAPL/year=2016/revision=1/manifest.json",
+    universe_snapshot_id: "a".repeat(64),
+    universe_semantics: "current_snapshot",
+    survivorship_bias: true,
+    bars: { key: "archive/symbol=AAPL/year=2016/revision=1/bars.parquet", sha256: "b".repeat(64), byte_count: 123 },
+  }));
+  for (const adjustment of ["split-adjusted", "total-return-adjusted"] as const) {
+    const bytes = makeArchive(adjustment);
+    const result = buildArchiveBacktestManifest({
+      archiveManifestUri: "oss://market-data/archive/symbol=AAPL/year=2016/revision=1/manifest.json",
+      archiveManifestBytes: bytes,
+      archiveManifestSha256: sha256Hex(bytes),
+    });
+    assert.equal(result.manifest.adjustmentMode, adjustment);
+  }
+  const unknown = makeArchive("unknown");
+  assert.throws(() => buildArchiveBacktestManifest({
+    archiveManifestUri: "oss://market-data/archive/symbol=AAPL/year=2016/revision=1/manifest.json",
+    archiveManifestBytes: unknown,
+    archiveManifestSha256: sha256Hex(unknown),
+  }), /BACKTEST_ARCHIVE_ADJUSTMENT_UNKNOWN/);
+});
+
+test("yfinance action fetch is explicit, batched, and preserves archive/provider symbol dialects", async () => {
+  const calls: Array<{ interpreter: string; requests: readonly { archiveSymbol: string; querySymbol: string }[] }> = [];
+  const result = await fetchYfinanceCorporateActions({
+    symbols: ["BF.B", "AAPL"],
+    querySymbols: { "BF.B": "BF-B" },
+    since: "2016-01-01",
+    until: "2016-12-31",
+  }, {
+    interpreter: "/opt/python-yfinance",
+    batchSize: 1,
+    concurrency: 1,
+    runner: async (interpreter, args) => {
+      const payload = JSON.parse(String(args[2])) as {
+        requests: readonly { archiveSymbol: string; querySymbol: string }[];
+      };
+      calls.push({ interpreter, requests: payload.requests });
+      const request = payload.requests[0];
+      const actions = request.archiveSymbol === "BF.B"
+        ? [{ symbol: "BF.B", exDate: "2016-06-01", type: "dividend", dividendPerShare: 1, source: "yfinance" }]
+        : [];
+      return {
+        stdout: JSON.stringify({
+          actions,
+          results: [{
+            archiveSymbol: request.archiveSymbol,
+            querySymbol: request.querySymbol,
+            status: "success",
+            rowCount: actions.length,
+          }],
+        }),
+        stderr: "",
+      };
+    },
+  });
+  assert.deepEqual(calls, [
+    { interpreter: "/opt/python-yfinance", requests: [{ archiveSymbol: "AAPL", querySymbol: "AAPL" }] },
+    { interpreter: "/opt/python-yfinance", requests: [{ archiveSymbol: "BF.B", querySymbol: "BF-B" }] },
+  ]);
+  assert.deepEqual(result.receipt.symbols, ["AAPL", "BF.B"]);
+  assert.equal(result.receipt.querySymbols["BF.B"], "BF-B");
+  assert.equal(result.actions[0]?.symbol, "BF.B");
+  assert.equal(result.receipt.rawProviderRowCount, 1);
+  assert.equal(result.receipt.symbolResults.length, 2);
+  const root = await mkdtemp(join(tmpdir(), "backtest-yfinance-actions-"));
+  try {
+    const stored = await writeFetchedYfinanceActions(join(root, "actions.json"), result);
+    assert.match(stored.sha256, /^[a-f0-9]{64}$/);
+    const actionFileText = await readFile(stored.path, "utf8");
+    assert.match(actionFileText, /"provider": "yfinance"/);
+    assert.match(actionFileText, /"BF.B": "BF-B"/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("yfinance action fetch fails closed on missing dependency or per-symbol failure", async () => {
+  await assert.rejects(
+    fetchYfinanceCorporateActions({
+      symbols: ["AAPL", "MSFT"],
+      querySymbols: { AAPL: "AAPL", MSFT: "AAPL" },
+      since: "2016-01-01",
+      until: "2016-12-31",
+    }),
+    /YFINANCE_QUERY_SYMBOL_MAP_DUPLICATE_QUERY_SYMBOL/,
+  );
+  await assert.rejects(
+    fetchYfinanceCorporateActions({ symbols: ["AAPL"], since: "2016-01-01", until: "2016-12-31" }, {
+      runner: async () => ({ stdout: "", stderr: "YFINANCE_DEPENDENCY_MISSING" }),
+    }),
+    /YFINANCE_DEPENDENCY_MISSING/,
+  );
+  await assert.rejects(
+    fetchYfinanceCorporateActions({ symbols: ["AAPL"], since: "2016-01-01", until: "2016-12-31" }, {
+      runner: async (_interpreter, args) => {
+        const payload = JSON.parse(String(args[2])) as { requests: readonly [{ archiveSymbol: string; querySymbol: string }] };
+        return {
+          stdout: JSON.stringify({
+            actions: [],
+            results: [{ archiveSymbol: payload.requests[0].archiveSymbol, querySymbol: payload.requests[0].querySymbol, status: "failed", errorCode: "TICKER_ACTIONS_FAILED", rowCount: 0 }],
+          }),
+          stderr: "",
+        };
+      },
+    }),
+    /YFINANCE_SYMBOL_FETCH_FAILED/,
+  );
+  await assert.rejects(
+    fetchYfinanceCorporateActions({ symbols: ["AAPL"], since: "2016-01-01", until: "2016-12-31" }, {
+      runner: async (_interpreter, args) => {
+        const payload = JSON.parse(String(args[2])) as { requests: readonly [{ archiveSymbol: string; querySymbol: string }] };
+        return {
+          stdout: JSON.stringify({
+            actions: [],
+            results: [{ archiveSymbol: payload.requests[0].archiveSymbol, querySymbol: payload.requests[0].querySymbol, status: "success", rowCount: 1 }],
+          }),
+          stderr: "",
+        };
+      },
+    }),
+    /YFINANCE_RAW_ROW_COUNT_MISMATCH/,
+  );
 });
 
 test("exact local object hashing fails closed and network is opt-in", async () => {

@@ -89,6 +89,7 @@ export interface CurrentUniverseResolvedShard {
   readonly snapshotSymbol: string;
   readonly sourceSymbol: string;
   readonly providerSymbol: string;
+  readonly adjustmentMode: "raw" | "split-adjusted" | "total-return-adjusted";
   readonly year: number;
   readonly revision: number;
   readonly archiveManifest: {
@@ -142,7 +143,8 @@ export interface CurrentUniverseDiscoveryResult {
     readonly startYear: number;
     readonly endYear: number;
     readonly feed: "sip" | "boats";
-    readonly session: "regular" | "extended" | "all";
+  readonly session: "regular" | "extended" | "all";
+    readonly adjustmentMode: "raw" | "split-adjusted" | "total-return-adjusted" | "unknown";
     readonly expectedShardCount: number;
     readonly excludedShardCount: number;
     readonly resolvedShardCount: number;
@@ -466,6 +468,7 @@ async function resolveArchiveProbe(
       snapshotSymbol: probe.sourceSymbol,
       sourceSymbol: probe.sourceSymbol,
       providerSymbol: probe.providerSymbol,
+      adjustmentMode: imported.manifest.adjustmentMode as CurrentUniverseResolvedShard["adjustmentMode"],
       year: probe.year,
       revision,
       archiveManifest: {
@@ -560,6 +563,10 @@ export async function discoverCurrentUniverse(
     snapshotId: bootstrap.snapshot.id,
     symbols,
   });
+  const adjustmentModes = [...new Set(resolved.map((item) => item.adjustmentMode))];
+  const adjustmentMode: CurrentUniverseDiscoveryResult["archive"]["adjustmentMode"] = adjustmentModes.length === 1
+    ? adjustmentModes[0]
+    : "unknown";
   const warnings = [
     "EXPLICIT_BOUNDED_PREFIX_DISCOVERY_FROZEN_BEFORE_RUNTIME_READS",
     "RUNTIME_CATALOG_READS_EXACT_OBJECTS_ONLY",
@@ -568,6 +575,7 @@ export async function discoverCurrentUniverse(
   if (resolution.exclusions.length > 0) warnings.push("EXPLICIT_SYMBOL_EXCLUSIONS_REMAIN_IN_UNIVERSE_AUDIT_IDENTITY");
   if (bootstrap.snapshot.survivorship_bias) warnings.push("CURRENT_UNIVERSE_HAS_DECLARED_SURVIVORSHIP_BIAS");
   if (unresolved.length > 0) warnings.push("CURRENT_UNIVERSE_CATALOG_NOT_ADMISSIBLE_UNTIL_ALL_SHARDS_RESOLVE");
+  if (adjustmentModes.length > 1) warnings.push("CURRENT_UNIVERSE_MIXED_ADJUSTMENT_DECLARATIONS_UNVERIFIED");
   if (unresolved.some((item) => item.code === "BACKTEST_UNIVERSE_ARCHIVE_ALIAS_OR_UNEXPECTED_OBJECT")) {
     warnings.push("CURRENT_UNIVERSE_ARCHIVE_ALIAS_OR_UNEXPECTED_OBJECT_UNVERIFIED");
   }
@@ -577,13 +585,14 @@ export async function discoverCurrentUniverse(
     evidence: item.evidence,
     years: { start: input.startYear, end: input.endYear },
   }));
-  const admissible = unresolved.length === 0 && resolved.length > 0;
+  const admissible = unresolved.length === 0 && resolved.length > 0 && adjustmentMode !== "unknown";
   if (resolved.length === 0) warnings.push("CURRENT_UNIVERSE_NO_ACTIVE_ARCHIVE_SHARDS");
   const catalog = admissible ? {
     schemaVersion: 1 as const,
     datasetId: datasetId(bootstrap.snapshot.universe, input.startYear, input.endYear, bootstrap.snapshot.id),
     feed: "alpaca" as const,
     timeframe: "1m" as const,
+    adjustmentMode,
     shards: resolved.map((result) => result.shard),
   } satisfies MinuteBarsCatalog : undefined;
   return {
@@ -620,6 +629,7 @@ export async function discoverCurrentUniverse(
       endYear: input.endYear,
       feed,
       session,
+      adjustmentMode,
       expectedShardCount: symbols.length * (input.endYear - input.startYear + 1),
       excludedShardCount: excluded.length * (input.endYear - input.startYear + 1),
       resolvedShardCount: resolved.length,
@@ -637,7 +647,7 @@ export function buildCurrentUniverseBacktestManifest(
   input: {
     readonly catalogUri: string;
     readonly catalogSha256: string;
-    readonly corporateActions: CurrentUniverseActionsInput;
+    readonly corporateActions?: CurrentUniverseActionsInput;
     readonly discoverySha256?: string;
   },
 ): BacktestManifest {
@@ -645,19 +655,19 @@ export function buildCurrentUniverseBacktestManifest(
     throw new Error("BACKTEST_UNIVERSE_CATALOG_DISCOVERY_NOT_ADMISSIBLE");
   }
   if (!isSha256(input.catalogSha256)) throw new Error("BACKTEST_UNIVERSE_CATALOG_SHA256_INVALID");
-  if (!isSha256(input.corporateActions.sha256)) throw new Error("BACKTEST_UNIVERSE_ACTIONS_SHA256_INVALID");
+  if (input.corporateActions && !isSha256(input.corporateActions.sha256)) throw new Error("BACKTEST_UNIVERSE_ACTIONS_SHA256_INVALID");
   if (input.discoverySha256 !== undefined && !isSha256(input.discoverySha256)) {
     throw new Error("BACKTEST_UNIVERSE_DISCOVERY_SHA256_INVALID");
   }
   if (!/^(?:file|oss):/i.test(input.catalogUri)) throw new Error("BACKTEST_UNIVERSE_CATALOG_URI_INVALID");
-  if (!/^(?:file|oss):/i.test(input.corporateActions.uri)) throw new Error("BACKTEST_UNIVERSE_ACTIONS_URI_INVALID");
+  if (input.corporateActions && !/^(?:file|oss):/i.test(input.corporateActions.uri)) throw new Error("BACKTEST_UNIVERSE_ACTIONS_URI_INVALID");
   return parseManifest({
     schemaVersion: 1,
     datasetId: discovery.catalog.datasetId,
     feed: "alpaca",
     timeframe: "1m",
     session: discovery.archive.session,
-    adjustmentMode: "raw",
+    adjustmentMode: discovery.archive.adjustmentMode,
     startDate: `${discovery.archive.startYear}-01-01`,
     endDate: `${discovery.archive.endYear}-12-31`,
     sourceObject: {
@@ -686,13 +696,15 @@ export function buildCurrentUniverseBacktestManifest(
         },
       } : {}),
     },
-    corporateActions: {
-      mode: "provider-receipt",
-      uri: input.corporateActions.uri,
-      sha256: input.corporateActions.sha256,
-      appliesToBars: false,
-      provider: input.corporateActions.provider,
-    },
+    corporateActions: input.corporateActions
+      ? {
+        mode: "provider-receipt",
+        uri: input.corporateActions.uri,
+        sha256: input.corporateActions.sha256,
+        appliesToBars: discovery.archive.adjustmentMode !== "raw",
+        provider: input.corporateActions.provider,
+      }
+      : { mode: "none", appliesToBars: false },
   });
 }
 

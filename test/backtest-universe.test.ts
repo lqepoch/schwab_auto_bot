@@ -26,13 +26,13 @@ const execFileAsync = promisify(execFile);
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 
-function archiveBytes(symbol: string, year: number, revision: number): Buffer {
+function archiveBytes(symbol: string, year: number, revision: number, adjustment = "raw"): Buffer {
   const prefix = `archive/symbol=${symbol}/year=${year}/revision=${revision}`;
   return Buffer.from(JSON.stringify({
     schema_version: "market-data-bars-1m-manifest-v1",
     provider: "alpaca",
     timeframe: "1m",
-    adjustment: "raw",
+    adjustment,
     quality_status: "PASS",
     data_schema_version: "market-data-bars-1m-v2",
     symbol,
@@ -56,6 +56,7 @@ function fixtureTransport(options: {
   readonly alias?: boolean;
   readonly directObject?: boolean;
   readonly providerSymbols?: Readonly<Record<string, string>>;
+  readonly adjustment?: "raw" | "split-adjusted" | "total-return-adjusted" | "unknown";
 } = {}): {
   readonly input: CurrentUniverseDiscoveryInput;
   readonly transport: CurrentUniverseDiscoveryTransport;
@@ -104,7 +105,7 @@ function fixtureTransport(options: {
     const year = 2016;
     for (const revision of revisions[`${symbol}|${year}`] ?? []) {
       const uri = `oss://market-data/archive/symbol=${symbol}/year=${year}/revision=${revision}/manifest.json`;
-      objects.set(uri, archiveBytes(symbol, year, revision));
+      objects.set(uri, archiveBytes(symbol, year, revision, options.adjustment));
     }
   }
   const listCalls: string[] = [];
@@ -398,17 +399,44 @@ test("discover-universe CLI refuses network when only LIST confirmation is prese
   assert.match(String((result as { stderr?: string }).stderr), /BACKTEST_NETWORK_DISABLED/);
 });
 
+test("fetch-yfinance-actions CLI is explicit and reports an unavailable interpreter without provider output", async () => {
+  const result = await execFileAsync(process.execPath, [
+    "--experimental-strip-types",
+    "src/backtest/cli.ts",
+    "fetch-yfinance-actions",
+    "--symbols", "AAPL",
+    "--since", "2016-01-01",
+    "--until", "2016-12-31",
+    "--python", "/bin/false",
+    "--allow-network",
+  ], { cwd: process.cwd(), env: { ...process.env }, maxBuffer: 1024 * 1024 }).catch((error: unknown) => error as { stderr?: string; code?: number });
+  assert.match(String((result as { stderr?: string }).stderr), /YFINANCE_PYTHON_EXEC_FAILED/);
+});
+
+test("fetch-yfinance-actions CLI refuses implicit network access", async () => {
+  const result = await execFileAsync(process.execPath, [
+    "--experimental-strip-types",
+    "src/backtest/cli.ts",
+    "fetch-yfinance-actions",
+    "--symbols", "AAPL",
+    "--since", "2016-01-01",
+    "--until", "2016-12-31",
+  ], { cwd: process.cwd(), env: { ...process.env }, maxBuffer: 1024 * 1024 }).catch((error: unknown) => error as { stderr?: string; code?: number });
+  assert.match(String((result as { stderr?: string }).stderr), /YFINANCE_NETWORK_REQUIRES_ALLOW_NETWORK/);
+});
+
 async function writeActionReceipt(
   root: string,
   until: string,
   actionSymbols: readonly string[] = ["AAPL"],
   actionRows: readonly Record<string, unknown>[] = [],
+  provider: "alpaca" | "yfinance" = "alpaca",
 ): Promise<{ path: string; sha256: string }> {
   const sortedSymbols = [...actionSymbols].sort();
   const actionsPath = join(root, "actions.json");
   const actions = Buffer.from(JSON.stringify({
     schemaVersion: 1,
-    provider: "alpaca",
+    provider,
     coverage: { symbols: sortedSymbols, since: "2016-01-01", until },
     actions: actionRows,
   }));
@@ -416,7 +444,7 @@ async function writeActionReceipt(
   const receiptPath = join(root, "receipt.json");
   const receipt = {
     artifactVersion: 1,
-    kind: "alpaca-corporate-actions-receipt",
+    kind: `${provider}-corporate-actions-receipt`,
     status: "PASS",
     evidenceClass: "REAL_PROVIDER_READ_ONLY",
     readOnly: true,
@@ -424,8 +452,8 @@ async function writeActionReceipt(
     actionsPath,
     actionsSha256: sha256Hex(actions),
     receipt: {
-      provider: "alpaca",
-      accessMethod: "alpaca_cli",
+      provider,
+      accessMethod: provider === "yfinance" ? "python" : "alpaca_cli",
       evidenceClass: "REAL_PROVIDER_READ_ONLY",
       command: "alpaca data corporate-actions",
       commandFingerprint: HASH_A,
@@ -470,6 +498,97 @@ test("materialize requires a PASS discovery and explicit, complete action receip
     });
     assert.equal(result.status, "PASS");
     assert.equal(parseManifest(JSON.parse(await readFile(join(root, "manifest.json"), "utf8"))).universe.completeness, "current-constituents");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("raw materialization requires action evidence while adjusted archives can materialize without actions", async () => {
+  const rawFixture = fixtureTransport();
+  const rawDiscovery = parseCurrentUniverseDiscovery(await discoverCurrentUniverse(rawFixture.input, {
+    allowNetwork: true,
+    allowListDiscovery: true,
+    transport: rawFixture.transport,
+  }));
+  const root = await mkdtemp(join(tmpdir(), "backtest-universe-adjustment-"));
+  try {
+    await assert.rejects(
+      materializeCurrentUniverseCatalog({
+        discovery: rawDiscovery,
+        actionReceipts: [],
+        catalogPath: join(root, "raw-catalog.json"),
+        actionsPath: join(root, "raw-actions.json"),
+        manifestPath: join(root, "raw-manifest.json"),
+      }),
+      /BACKTEST_UNIVERSE_ACTION_RECEIPT_REQUIRED_FOR_RAW_BARS/,
+    );
+    const adjustedFixture = fixtureTransport({ adjustment: "split-adjusted" });
+    const adjustedDiscovery = parseCurrentUniverseDiscovery(await discoverCurrentUniverse(adjustedFixture.input, {
+      allowNetwork: true,
+      allowListDiscovery: true,
+      transport: adjustedFixture.transport,
+    }));
+    const result = await materializeCurrentUniverseCatalog({
+      discovery: adjustedDiscovery,
+      actionReceipts: [],
+      catalogPath: join(root, "adjusted-catalog.json"),
+      actionsPath: join(root, "adjusted-actions.json"),
+      manifestPath: join(root, "adjusted-manifest.json"),
+    });
+    assert.equal(result.status, "PASS");
+    const manifest = parseManifest(JSON.parse(await readFile(join(root, "adjusted-manifest.json"), "utf8")));
+    assert.equal(manifest.adjustmentMode, "split-adjusted");
+    assert.equal(manifest.corporateActions.mode, "none");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("adjusted materialization keeps optional action receipt as evidence without enabling a second adjustment", async () => {
+  const fixture = fixtureTransport({ adjustment: "total-return-adjusted" });
+  const discovery = parseCurrentUniverseDiscovery(await discoverCurrentUniverse(fixture.input, {
+    allowNetwork: true,
+    allowListDiscovery: true,
+    transport: fixture.transport,
+  }));
+  const root = await mkdtemp(join(tmpdir(), "backtest-universe-adjusted-actions-"));
+  try {
+    const receipt = await writeActionReceipt(root, "2016-12-31");
+    await materializeCurrentUniverseCatalog({
+      discovery,
+      actionReceipts: [receipt],
+      catalogPath: join(root, "catalog.json"),
+      actionsPath: join(root, "actions.json"),
+      manifestPath: join(root, "manifest.json"),
+    });
+    const manifest = parseManifest(JSON.parse(await readFile(join(root, "manifest.json"), "utf8")));
+    assert.equal(manifest.adjustmentMode, "total-return-adjusted");
+    assert.equal(manifest.corporateActions.appliesToBars, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("materialize accepts a frozen yfinance action receipt as the explicit raw-bar supplement", async () => {
+  const fixture = fixtureTransport();
+  const discovery = parseCurrentUniverseDiscovery(await discoverCurrentUniverse(fixture.input, {
+    allowNetwork: true,
+    allowListDiscovery: true,
+    transport: fixture.transport,
+  }));
+  const root = await mkdtemp(join(tmpdir(), "backtest-universe-yfinance-materialize-"));
+  try {
+    const receipt = await writeActionReceipt(root, "2016-12-31", ["AAPL"], [], "yfinance");
+    await materializeCurrentUniverseCatalog({
+      discovery,
+      actionReceipts: [receipt],
+      catalogPath: join(root, "catalog.json"),
+      actionsPath: join(root, "actions.json"),
+      manifestPath: join(root, "manifest.json"),
+    });
+    const manifest = parseManifest(JSON.parse(await readFile(join(root, "manifest.json"), "utf8")));
+    assert.equal(manifest.corporateActions.provider, "yfinance");
+    assert.equal(manifest.corporateActions.appliesToBars, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

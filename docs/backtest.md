@@ -75,6 +75,13 @@ index-membership 标签；只保存三个来源的去重并集不能在事后可
 - `adjustmentMode: "unknown"`、未知行动类型、重复行动和不匹配哈希都会
   fail-closed。
 
+archive manifest 的 `adjustment` 声明会原样传播到 discovery、catalog 和最终
+backtest manifest：`split-adjusted`/`total-return-adjusted` 的分钟 bars 在本模块中被
+信任为已调整，企业行动 receipt（如果提供）只保留为 evidence，`appliesToBars=true`
+且不会再次调整；`raw` bars 则必须在 materialize 前提供至少一个覆盖完整
+symbol/year 范围的行动 receipt。不同 shard 的声明混合或声明为 `unknown` 都不能
+生成可运行 manifest。
+
 Alpaca 的 `forward_split`/`reverse_split`/`cash_dividend` 会明确归一化为
  内部 `split`/`dividend`；其他类型拒绝，不会猜测。当前实现不把 yfinance
 作为运行时隐式 fallback；如需补齐，应先生成可复核、带 hash 的本地 receipt
@@ -280,6 +287,36 @@ npm run backtest:fetch-actions -- \
 `providerDuplicateIds`，这些计数必须满足 `rawProviderRowCount = actionCount + duplicateCount`。
 同日同类型但金额或拆股因子不同的事件不会被这个规则合并，reference engine 会按
 确定性排序逐一应用。相同 provider ID 的重复或冲突会 fail-closed。
+
+### yfinance 行动补齐（仅行动，不是价格回退）
+
+当可信 OSS archive 声明为 `raw` 且没有可用的 OSS/Alpaca 行动 evidence 时，才可显式
+运行 `fetch-yfinance-actions`。它只读取 yfinance 的 `Ticker(...).actions`，输出
+split/dividend action 文件和带 hash 的只读 receipt；OSS 仍是唯一的 1 分钟 bars 来源，
+不会调用 yfinance 的价格下载接口，也不会在 `run`/`audit` 时隐式联网。yfinance 官方
+对 intraday 历史有约 60 天限制，因此它不能作为 2016 分钟价格 fallback。
+
+```bash
+npm run backtest:fetch-yfinance-actions -- \
+  --symbols-file /path/to/provider-symbols.txt \
+  --since 2016-01-01 --until 2025-12-31 \
+  --python /path/to/venv/bin/python \
+  --batch-size 50 --concurrency 2 --allow-network \
+  --actions-out /path/to/frozen-yfinance-actions.json \
+  --output-dir .artifacts/backtest/frozen-yfinance-actions
+```
+
+命令要求 Python 解释器中已安装 `yfinance`；缺依赖、子进程失败、任一 symbol
+请求失败或响应缺失都会 fail-closed。空 action 表只有在该 symbol 明确返回成功时才
+表示“已查询且无行动”。每批 receipt 记录成功 symbol、原始行数、query fingerprint
+和 archive/provider symbol 关系；默认不猜测 ticker dialect。若 archive 使用 `BF.B`
+而 yfinance 需要 `BF-B`，必须显式提供 JSON，例如
+`{"BF.B":"BF-B"}`：action 的 `symbol` 仍保存为 `BF.B`，receipt 同时保存
+`querySymbols` 映射，不得静默把 Yahoo 查询代码当成 archive symbol。
+
+把 yfinance receipt 的路径和 SHA 传给 materialize，即可作为 raw archive 的显式补充；
+adjusted archive 不需要 receipt，若传入则只作 evidence。materialize 仍会校验 receipt
+覆盖 discovery 的 provider symbols 和每个年份，且不会产生运行时网络 fallback。
 
 archive 已声明 `raw`、`feed=sip` 时，还可用同一 Alpaca CLI 做原始分钟线抽样或全年
 比较。比较只要求 archive 已声明的 SIP 行逐行出现在 provider 响应中；provider 返回

@@ -25,6 +25,7 @@ import {
   type UniverseActionsReceiptInput,
 } from "./universeActions.ts";
 import { parseSymbolResolutionReceipt, type SymbolResolutionReceiptInput } from "./symbolResolution.ts";
+import { fetchYfinanceCorporateActions, writeFetchedYfinanceActions } from "./yfinance.ts";
 
 type FlagValue = string | boolean;
 type Flags = ReadonlyMap<string, FlagValue>;
@@ -108,12 +109,16 @@ function oneOf<T extends string>(flags: Flags, name: string, allowed: readonly T
   throw new Error("BACKTEST_CLI_FLAG_VALUE_INVALID_" + name.toUpperCase().replaceAll("-", "_"));
 }
 
-async function archiveActionsInput(flags: Flags): Promise<{ uri: string; sha256: string } | undefined> {
+async function archiveActionsInput(flags: Flags): Promise<{ uri: string; sha256: string; provider: "alpaca" | "yfinance" } | undefined> {
   const file = stringFlag(flags, "actions-file");
   if (!file) return undefined;
   const absolute = resolve(file);
   const bytes = await readFile(absolute);
-  return { uri: pathToFileURL(absolute).href, sha256: sha256Hex(bytes) };
+  return {
+    uri: pathToFileURL(absolute).href,
+    sha256: sha256Hex(bytes),
+    provider: oneOf(flags, "actions-provider", ["alpaca", "yfinance"] as const, "alpaca"),
+  };
 }
 
 async function symbolsFileInput(flags: Flags): Promise<readonly string[] | undefined> {
@@ -195,11 +200,15 @@ function printHelp(): void {
     "  parity --left FILE --right FILE [--allow-network] [--output-dir DIR]",
     "  run --manifest FILE [--symbol AAPL] [--initial-cash 100000] [--allow-network] [--backtest-env-file FILE[,FILE...]]",
     "  import-archive --archive-manifest-uri oss://BUCKET/EXACT-MANIFEST --manifest-out FILE",
-    "                 --session regular --feed sip [--actions-file FILE] --allow-network [--backtest-env-file FILE[,FILE...]]",
+    "                 --session regular --feed sip [--actions-file FILE --actions-provider alpaca|yfinance] --allow-network [--backtest-env-file FILE[,FILE...]]",
     "  provider-parity --manifest FILE --symbol AAPL --start 2016-01-04T14:30:00Z",
     "                  --end 2016-01-04T14:35:00Z --allow-network [--max-pages 10] [--backtest-env-file FILE[,FILE...]]",
     "  fetch-actions --symbols AAPL,MSFT --since 2016-01-01 --until 2016-12-31",
     "               [--symbols-file FILE] --allow-network [--max-pages 10000]",
+    "               [--backtest-env-file FILE[,FILE...]] [--output-dir DIR]",
+    "  fetch-yfinance-actions --symbols AAPL,MSFT --since 2016-01-01 --until 2016-12-31",
+    "               [--symbols-file FILE] [--query-symbol-map FILE] [--python FILE]",
+    "               [--batch-size 50] [--concurrency 2] --allow-network",
     "               [--backtest-env-file FILE[,FILE...]] [--output-dir DIR]",
     "  discover-universe --universe-manifest-uri oss://BUCKET/EXACT-MANIFEST",
     "                  --archive-root-uri oss://BUCKET/EXACT-ARCHIVE-ROOT",
@@ -336,6 +345,72 @@ async function runCommand(command: string, flags: Flags): Promise<unknown> {
       warnings: ["PROVIDER_ACTIONS_MUST_BE_REVIEWED_BEFORE_MANIFEST_USE"],
     };
     const receiptPath = await writeArtifact(outputDir, "alpaca-actions-receipt.json", receipt);
+    return { ...receipt, receiptPath };
+  }
+  if (command === "fetch-yfinance-actions") {
+    if (!allowNetwork) throw new Error("YFINANCE_NETWORK_REQUIRES_ALLOW_NETWORK");
+    const fileSymbols = await symbolsFileInput(flags);
+    const inlineSymbols = stringFlag(flags, "symbols")?.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean);
+    if (fileSymbols && inlineSymbols) throw new Error("BACKTEST_CLI_SYMBOLS_AND_SYMBOLS_FILE_MUTUALLY_EXCLUSIVE");
+    const symbols = fileSymbols ?? inlineSymbols ?? [];
+    if (symbols.length === 0) throw new Error("BACKTEST_CLI_FLAG_REQUIRED_SYMBOLS_OR_SYMBOLS_FILE");
+    const since = stringFlag(flags, "since", true) as string;
+    const until = stringFlag(flags, "until", true) as string;
+    let querySymbols: Readonly<Record<string, string>> | undefined;
+    let querySymbolMap: { readonly uri: string; readonly sha256: string } | undefined;
+    const mapPath = stringFlag(flags, "query-symbol-map");
+    if (mapPath) {
+      let mapValue: unknown;
+      const mapAbsolute = resolve(mapPath);
+      let mapBytes: Buffer;
+      try {
+        mapBytes = await readFile(mapAbsolute);
+        mapValue = JSON.parse(mapBytes.toString("utf8"));
+      } catch {
+        throw new Error("BACKTEST_CLI_YFINANCE_QUERY_SYMBOL_MAP_INVALID");
+      }
+      if (!mapValue || typeof mapValue !== "object" || Array.isArray(mapValue)
+        || Object.values(mapValue as Record<string, unknown>).some((item) => typeof item !== "string")) {
+        throw new Error("BACKTEST_CLI_YFINANCE_QUERY_SYMBOL_MAP_INVALID");
+      }
+      querySymbols = mapValue as Record<string, string>;
+      querySymbolMap = { uri: pathToFileURL(mapAbsolute).href, sha256: sha256Hex(mapBytes) };
+    }
+    const result = await fetchYfinanceCorporateActions({ symbols, since, until, querySymbols }, {
+      env: process.env,
+      interpreter: stringFlag(flags, "python"),
+      batchSize: numberFlag(flags, "batch-size", 50),
+      concurrency: numberFlag(flags, "concurrency", 2),
+    });
+    const actionsPath = resolve(stringFlag(flags, "actions-out") ?? (outputDir + "/yfinance-actions.json"));
+    await mkdir(dirname(actionsPath), { recursive: true, mode: 0o750 });
+    const stored = await writeFetchedYfinanceActions(actionsPath, result);
+    const receipt = {
+      artifactVersion: 1,
+      kind: "yfinance-corporate-actions-receipt",
+      status: "PASS",
+      evidenceClass: result.receipt.evidenceClass,
+      readOnly: true,
+      brokerWriteAttempted: false,
+      actionsPath: stored.path,
+      actionsSha256: stored.sha256,
+      receipt: result.receipt,
+      ...(querySymbolMap ? { querySymbolMap } : {}),
+      coverage: {
+        symbols: result.receipt.symbols,
+        querySymbols: result.receipt.querySymbols,
+        symbolResults: result.receipt.symbolResults,
+        since: result.receipt.since,
+        until: result.receipt.until,
+        batches: result.receipt.batches,
+      },
+      warnings: [
+        "YFINANCE_ACTIONS_ONLY_NO_INTRADAY_PRICE_FALLBACK",
+        "OSS_REMAINS_THE_MINUTE_BAR_SOURCE",
+        "YFINANCE_ACTION_DATES_ARE_PROVIDER_EVIDENCE_NOT_POINT_IN_TIME_CORPORATE_ACTION_PROOF",
+      ],
+    };
+    const receiptPath = await writeArtifact(outputDir, "yfinance-actions-receipt.json", receipt);
     return { ...receipt, receiptPath };
   }
   if (command === "discover-universe") {

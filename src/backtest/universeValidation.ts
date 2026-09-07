@@ -198,6 +198,10 @@ export function parseCurrentUniverseDiscovery(value: unknown): CurrentUniverseDi
   const startYear = requireInteger(archive.startYear, "BACKTEST_UNIVERSE_DISCOVERY_START_YEAR_INVALID");
   const endYear = requireInteger(archive.endYear, "BACKTEST_UNIVERSE_DISCOVERY_END_YEAR_INVALID");
   const expectedShardCount = requireInteger(archive.expectedShardCount, "BACKTEST_UNIVERSE_DISCOVERY_EXPECTED_COUNT_INVALID");
+  const adjustmentMode = archive.adjustmentMode;
+  if (!["raw", "split-adjusted", "total-return-adjusted", "unknown"].includes(String(adjustmentMode))) {
+    throw new Error("BACKTEST_UNIVERSE_DISCOVERY_ADJUSTMENT_INVALID");
+  }
   const excludedShardCount = archive.excludedShardCount === undefined
     ? 0
     : requireInteger(archive.excludedShardCount, "BACKTEST_UNIVERSE_DISCOVERY_EXCLUDED_COUNT_INVALID");
@@ -291,7 +295,8 @@ export function parseCurrentUniverseDiscovery(value: unknown): CurrentUniverseDi
     const shard = validateCatalogShard(raw.shard);
     if (shard.startDate !== `${raw.year}-01-01` || shard.endDate !== `${raw.year}-12-31`
       || shard.symbols.length !== 1 || shard.symbols[0] !== relation.providerSymbol
-      || shard.sourceSymbol !== relation.sourceSymbol || shard.providerSymbol !== relation.providerSymbol) {
+      || shard.sourceSymbol !== relation.sourceSymbol || shard.providerSymbol !== relation.providerSymbol
+      || raw.adjustmentMode !== adjustmentMode) {
       throw new Error("BACKTEST_UNIVERSE_DISCOVERY_SHARD_IDENTITY_INVALID");
     }
     resolvedKeys.add(key);
@@ -331,7 +336,7 @@ export function parseCurrentUniverseDiscovery(value: unknown): CurrentUniverseDi
   if (resolvedKeys.size + unresolvedKeys.size !== activeExpected || queryByKey.size !== activeExpected) {
     throw new Error("BACKTEST_UNIVERSE_DISCOVERY_IDENTITY_COVERAGE_INVALID");
   }
-  if (value.status === "PASS" && (!value.catalog || activeExpected === 0 || unresolvedValues.length !== 0)) {
+  if (value.status === "PASS" && (!value.catalog || activeExpected === 0 || unresolvedValues.length !== 0 || adjustmentMode === "unknown")) {
     throw new Error("BACKTEST_UNIVERSE_DISCOVERY_PASS_INVALID");
   }
   if (value.status === "UNVERIFIED" && value.catalog !== undefined) {
@@ -343,6 +348,7 @@ export function parseCurrentUniverseDiscovery(value: unknown): CurrentUniverseDi
   }
   if (value.status === "PASS") {
     if (!catalog || catalog.shards.length !== activeExpected) throw new Error("BACKTEST_UNIVERSE_DISCOVERY_PASS_CATALOG_COVERAGE_INVALID");
+    if (catalog.adjustmentMode !== adjustmentMode) throw new Error("BACKTEST_UNIVERSE_DISCOVERY_CATALOG_ADJUSTMENT_MISMATCH");
     const catalogByUri = new Map(catalog.shards.map((shard) => [shard.uri, shard]));
     for (const resolved of resolvedValues) {
       const catalogShard = catalogByUri.get(resolved.shard.uri);
@@ -360,6 +366,7 @@ export function parseCurrentUniverseDiscovery(value: unknown): CurrentUniverseDi
     archive: {
       ...archive,
       expectedShardCount,
+      adjustmentMode,
       excludedShardCount,
       excluded,
       resolved: resolvedValues.sort((left, right) => compareCodeUnits(left.sourceSymbol, right.sourceSymbol) || left.year - right.year),
