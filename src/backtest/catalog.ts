@@ -69,6 +69,17 @@ function sourceForShard(shard: CatalogShard): SourceObject {
   };
 }
 
+function validateShardBounds(parsed: ParsedBars, shard: CatalogShard): void {
+  const symbols = new Set(shard.symbols);
+  for (const bar of parsed.bars) {
+    const date = bar.timestamp.slice(0, 10);
+    if (!symbols.has(bar.symbol)) throw new Error("BACKTEST_CATALOG_BAR_SYMBOL_OUTSIDE_SHARD");
+    if (date < shard.startDate || date > shard.endDate) {
+      throw new Error("BACKTEST_CATALOG_BAR_OUTSIDE_SHARD_RANGE");
+    }
+  }
+}
+
 function assertCatalogMatchesManifest(catalog: MinuteBarsCatalog, manifest: BacktestManifest): void {
   if (catalog.datasetId !== manifest.datasetId || catalog.feed !== manifest.feed || catalog.timeframe !== manifest.timeframe) {
     throw new Error("BACKTEST_CATALOG_MANIFEST_MISMATCH");
@@ -118,8 +129,11 @@ export async function readDatasetBars(
   });
   if (selectedShards.length === 0) throw new Error("BACKTEST_CATALOG_NO_MATCHING_SHARDS");
   for (const shard of selectedShards) {
-    const shardObject = await readExactObject(manifestPath, sourceForShard(shard), options);
-    parts.push(parseBars(shardObject.bytes, { ...manifest, sourceObject: sourceForShard(shard) }));
+    const shardSource = sourceForShard(shard);
+    const shardObject = await readExactObject(manifestPath, shardSource, options);
+    const parsed = parseBars(shardObject.bytes, { ...manifest, sourceObject: shardSource });
+    validateShardBounds(parsed, shard);
+    parts.push(parsed);
     sourceObjects.push(shard.uri);
   }
   const merged = mergeParsedBars(parts, manifest);
