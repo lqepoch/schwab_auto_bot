@@ -36,6 +36,11 @@ export interface AlpacaCliRunner {
   (args: readonly string[], env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }>;
 }
 
+interface CliCorporateActionRow {
+  readonly value: unknown;
+  readonly responseType?: "forward_split" | "reverse_split" | "cash_dividend";
+}
+
 export class AlpacaProviderError extends Error {
   readonly status?: number;
   readonly evidenceClass = "UNVERIFIED_PROVIDER_ERROR" as const;
@@ -96,7 +101,27 @@ function defaultRunner(args: readonly string[], env: NodeJS.ProcessEnv): Promise
   }).then((result) => ({ stdout: String(result.stdout), stderr: String(result.stderr) }));
 }
 
-function parseCliPage(stdout: string): { rows: readonly unknown[]; nextPageToken?: string } {
+const RESPONSE_GROUP_TYPES: Readonly<Record<string, CliCorporateActionRow["responseType"]>> = {
+  forward_split: "forward_split",
+  forward_splits: "forward_split",
+  reverse_split: "reverse_split",
+  reverse_splits: "reverse_split",
+  cash_dividend: "cash_dividend",
+  cash_dividends: "cash_dividend",
+};
+
+function parseGroupedRows(rawActions: Record<string, unknown>): readonly CliCorporateActionRow[] {
+  const rows: CliCorporateActionRow[] = [];
+  for (const [group, values] of Object.entries(rawActions)) {
+    const responseType = RESPONSE_GROUP_TYPES[group.toLowerCase()];
+    if (!responseType) throw new AlpacaProviderError("ALPACA_CLI_ACTION_GROUP_UNSUPPORTED");
+    if (!Array.isArray(values)) throw new AlpacaProviderError("ALPACA_CLI_ACTION_GROUP_NOT_ARRAY");
+    for (const value of values) rows.push({ value, responseType });
+  }
+  return rows;
+}
+
+function parseCliPage(stdout: string): { rows: readonly CliCorporateActionRow[]; nextPageToken?: string } {
   let value: unknown;
   try {
     value = JSON.parse(stdout);
@@ -108,11 +133,12 @@ function parseCliPage(stdout: string): { rows: readonly unknown[]; nextPageToken
   }
   const record = value as Record<string, unknown>;
   const rawActions = record.corporate_actions;
-  const rows = Array.isArray(rawActions)
-    ? rawActions
-    : rawActions && typeof rawActions === "object"
-      ? Object.values(rawActions as Record<string, unknown>).flatMap((item) => Array.isArray(item) ? item : [item])
-      : undefined;
+  let rows: readonly CliCorporateActionRow[] | undefined;
+  if (Array.isArray(rawActions)) {
+    rows = rawActions.map((value) => ({ value }));
+  } else if (rawActions && typeof rawActions === "object") {
+    rows = parseGroupedRows(rawActions as Record<string, unknown>);
+  }
   if (!rows) throw new AlpacaProviderError("ALPACA_CLI_CORPORATE_ACTIONS_MISSING");
   const next = record.next_page_token;
   return {
@@ -121,13 +147,17 @@ function parseCliPage(stdout: string): { rows: readonly unknown[]; nextPageToken
   };
 }
 
-function normalizeProviderRows(rows: readonly unknown[]): readonly CorporateAction[] {
+function normalizeProviderRows(rows: readonly CliCorporateActionRow[]): readonly CorporateAction[] {
   const normalized = rows.map((row) => {
-    if (!row || typeof row !== "object" || Array.isArray(row)) {
+    if (!row.value || typeof row.value !== "object" || Array.isArray(row.value)) {
       throw new AlpacaProviderError("ALPACA_CLI_ACTION_ROW_INVALID");
     }
-    const value = row as Record<string, unknown>;
-    const type = String(value.type ?? value.ca_type ?? "").toLowerCase();
+    const value = row.value as Record<string, unknown>;
+    const inlineType = value.type ?? value.ca_type;
+    const type = String(inlineType ?? row.responseType ?? "").toLowerCase();
+    if (row.responseType && inlineType !== undefined && String(inlineType).toLowerCase() !== row.responseType) {
+      throw new AlpacaProviderError("ALPACA_CLI_ACTION_TYPE_GROUP_MISMATCH");
+    }
     if (!["forward_split", "reverse_split", "cash_dividend"].includes(type)) {
       throw new AlpacaProviderError("ALPACA_CLI_ACTION_TYPE_UNSUPPORTED");
     }
@@ -135,7 +165,9 @@ function normalizeProviderRows(rows: readonly unknown[]): readonly CorporateActi
       ...value,
       type: type === "cash_dividend" ? "dividend" : "split",
       splitFactor: type === "cash_dividend" ? undefined : value.splitFactor,
-      dividendPerShare: type === "cash_dividend" ? (value.cash ?? value.amount ?? value.cash_amount) : undefined,
+      dividendPerShare: type === "cash_dividend"
+        ? (value.cash ?? value.rate ?? value.amount ?? value.cash_amount)
+        : undefined,
       source: "alpaca",
     };
   });
@@ -147,8 +179,20 @@ export async function fetchAlpacaCorporateActions(
   options: { env?: NodeJS.ProcessEnv; runner?: AlpacaCliRunner; maxPages?: number } = {},
 ): Promise<AlpacaFetchResult> {
   const env = options.env ?? process.env;
-  const key = envValue(env, "ALPACA_API_KEY", "APCA_API_KEY_ID", "ALPACA_MARKET_DATA_API_KEY");
-  const secret = envValue(env, "ALPACA_SECRET_KEY", "APCA_API_SECRET_KEY", "ALPACA_MARKET_DATA_SECRET_KEY");
+  const key = envValue(
+    env,
+    "ALPACA_API_KEY",
+    "APCA_API_KEY_ID",
+    "ALPACA_PAPER_API_KEY_ID",
+    "ALPACA_MARKET_DATA_API_KEY",
+  );
+  const secret = envValue(
+    env,
+    "ALPACA_SECRET_KEY",
+    "APCA_API_SECRET_KEY",
+    "ALPACA_PAPER_API_SECRET_KEY",
+    "ALPACA_MARKET_DATA_SECRET_KEY",
+  );
   if (!key || !secret) throw new AlpacaProviderError("ALPACA_CREDENTIALS_MISSING");
   const normalizedQuery = normalizeQuery(query);
   const maxPages = Math.min(10, Math.max(1, options.maxPages ?? 10));
@@ -161,7 +205,7 @@ export async function fetchAlpacaCorporateActions(
     APCA_API_SECRET_KEY: secret,
     ALPACA_QUIET: "1",
   };
-  const rows: unknown[] = [];
+  const rows: CliCorporateActionRow[] = [];
   let pageToken: string | undefined;
   let pages = 0;
   for (;;) {

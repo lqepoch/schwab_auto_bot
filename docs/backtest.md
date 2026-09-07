@@ -15,7 +15,9 @@ artifact；不会导入 `src/automation/`，不会调用 Schwab，也没有 brok
 - Alpaca 企业行动通过已安装的 Alpaca CLI 的
   `alpaca data corporate-actions` 读取，而不是绕过 CLI 的 HTTP 请求。CLI
   参数和响应以本机 `--help`/`--schema` 为准，结果必须保存为带查询指纹的
-  receipt。
+  receipt。当前 CLI 的 grouped 响应（例如 `forward_splits`、
+  `reverse_splits`、`cash_dividends`）和现金分红的 `rate` 字段会被明确归一化；
+  未知 group/type 或 group 与行内 type 不一致会 fail-closed。
 - LEAN 没有接入：本仓库没有 LEAN 数据格式/运行时，LEAN 本地 CLI 需要
   Docker、额外数据转换和 QuantConnect 组织权限；引入它不会缩小本任务的
   可审计边界。
@@ -90,11 +92,20 @@ price-plus-cash-dividend 参考模拟；它不是投资建议、完整市场回�
 等拆股不会截断 fractional shares；artifact 中保留 manifest/data/action fingerprints、source objects、
 warnings、assumptions、trades 和 metrics。
 
-对真实 OSS 数据，先准备调用方自己的受保护环境文件，变量名为
+对真实 OSS 数据，先准备调用方自己的受保护环境文件。优先使用
 `OSS_ENDPOINT`、`OSS_REGION`、`OSS_BUCKET`、`OSS_ACCESS_KEY_ID`、
-`OSS_ACCESS_KEY_SECRET`，可选 `OSS_SECURITY_TOKEN`。不要把文件提交仓库，
-也不要使用 LIST 找“最新”对象；把具体 `oss://bucket/exact-key` 和哈希写入
+`OSS_ACCESS_KEY_SECRET`，可选 `OSS_SECURITY_TOKEN`。为兼容仓库已有 market-data
+部署环境，reader 也接受 `MARKET_DATA_S3_ENDPOINT`、`MARKET_DATA_S3_REGION`、
+`MARKET_DATA_S3_BUCKET`、`ALIBABACLOUD_ACCESS_KEY_ID` 和
+`ALIBABACLOUD_SECRET_ACCESS_KEY`；前一组 `OSS_*` 有更高优先级。不要把文件提交
+仓库，也不要使用 LIST 找“最新”对象；把具体 `oss://bucket/exact-key` 和哈希写入
 manifest 后再执行：
+
+如果 endpoint 已经是 `bucket.oss-...` 形式的精确 bucket 域名，设置
+`OSS_ENDPOINT_STYLE=bucket` 或现有的 `MARKET_DATA_S3_ENDPOINT_STYLE=bucket`。
+reader 会使用 OSS CNAME 模式，避免 SDK 再次拼接 bucket；未设置时也会按 hostname
+自动识别。服务 endpoint 则使用 `service`。这只影响传输地址，不能改变 manifest
+中的 bucket/key 身份，也不会给运行时增加 LIST/PUT/DELETE 权限。
 
 ```bash
 npm run backtest:preflight -- \
@@ -115,8 +126,11 @@ npm run backtest:run -- \
 明确返回 `BLOCKED`，audit 不会伪造 2016 数据已验证。
 
 用已有 Alpaca market-data 凭证获取企业行动时，必须显式允许网络；CLI 会
-使用 `ALPACA_API_KEY`/`ALPACA_SECRET_KEY`（也兼容 `APCA_*` 和本项目已有的
-`ALPACA_MARKET_DATA_*` 环境变量），只执行只读 corporate-actions 查询：
+使用 `ALPACA_API_KEY`/`ALPACA_SECRET_KEY`（也兼容 `APCA_*`、
+`ALPACA_MARKET_DATA_*` 和现有 `ALPACA_PAPER_*` 环境变量），只执行只读
+corporate-actions 查询。当多组变量同时存在时，显式 `ALPACA_*`/`APCA_*` 优先，
+其次为 `ALPACA_PAPER_*`，最后才是 `ALPACA_MARKET_DATA_*`，避免失效的旧数据键
+覆盖有效的 Paper 数据访问键。
 
 ```bash
 npm run backtest:fetch-actions -- \

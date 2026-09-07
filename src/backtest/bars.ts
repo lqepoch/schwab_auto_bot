@@ -1,4 +1,6 @@
 import { gunzipSync } from "node:zlib";
+import { parquetMetadataAsync, parquetReadObjects, parquetSchema } from "hyparquet";
+import { compressors } from "hyparquet-compressors";
 import type { BacktestManifest } from "./manifest.ts";
 import { compareCodeUnits, digestJson } from "./fingerprints.ts";
 
@@ -28,7 +30,12 @@ function parseFinite(value: unknown, field: string, line: number): number {
 }
 
 function normalizeTimestamp(value: unknown, line: number): { timestamp: string; epochMs: number } {
-  const text = String(value ?? "").trim();
+  let text: string;
+  try {
+    text = value instanceof Date ? value.toISOString() : String(value ?? "").trim();
+  } catch {
+    throw new Error("BACKTEST_BAR_TIMESTAMP_INVALID_LINE_" + line);
+  }
   if (!text || !text.endsWith("Z")) throw new Error("BACKTEST_BAR_TIMESTAMP_MUST_BE_UTC_LINE_" + line);
   const epochMs = Date.parse(text);
   if (!Number.isFinite(epochMs)) throw new Error("BACKTEST_BAR_TIMESTAMP_INVALID_LINE_" + line);
@@ -62,6 +69,15 @@ function normalizeBar(value: Record<string, unknown>, line: number): MinuteBar {
     throw new Error("BACKTEST_BAR_OHLC_INCONSISTENT_LINE_" + line);
   }
   return { ...timestamp, symbol, open, high, low, close, volume };
+}
+
+export function normalizeMinuteBarRows(rows: readonly unknown[]): MinuteBar[] {
+  return rows.map((value, index) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("BACKTEST_BAR_ROW_NOT_OBJECT_LINE_" + (index + 1));
+    }
+    return normalizeBar(value as Record<string, unknown>, index + 1);
+  });
 }
 
 function splitCsvLine(line: string): string[] {
@@ -105,7 +121,7 @@ function parseCsv(text: string): MinuteBar[] {
 }
 
 function parseJsonl(text: string): MinuteBar[] {
-  const rows: MinuteBar[] = [];
+  const values: unknown[] = [];
   for (const [index, line] of text.split(/\r?\n/).entries()) {
     if (!line.trim()) continue;
     let value: unknown;
@@ -117,10 +133,10 @@ function parseJsonl(text: string): MinuteBar[] {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new Error("BACKTEST_JSONL_ROW_NOT_OBJECT_LINE_" + (index + 1));
     }
-    rows.push(normalizeBar(value as Record<string, unknown>, index + 1));
+    values.push(value);
   }
-  if (rows.length === 0) throw new Error("BACKTEST_JSONL_EMPTY");
-  return rows;
+  if (values.length === 0) throw new Error("BACKTEST_JSONL_EMPTY");
+  return normalizeMinuteBarRows(values);
 }
 
 function compareBars(left: MinuteBar, right: MinuteBar): number {
@@ -160,6 +176,9 @@ export function mergeParsedBars(
 }
 
 export function parseBars(bytes: Buffer, manifest: BacktestManifest): ParsedBars {
+  if (manifest.sourceObject.format === "parquet") {
+    throw new Error("BACKTEST_PARQUET_REQUIRES_ASYNC_PARSE");
+  }
   const decoded = manifest.sourceObject.compression === "gzip" ? gunzipSync(bytes) : bytes;
   const text = decoded.toString("utf8");
   const bars = manifest.sourceObject.format === "csv" ? parseCsv(text) : parseJsonl(text);
@@ -171,6 +190,65 @@ export function parseBars(bytes: Buffer, manifest: BacktestManifest): ParsedBars
       timestamp, symbol, open, high, low, close, volume,
     }))),
   };
+}
+
+function toArrayBuffer(bytes: Buffer): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+function selectParquetRows(rows: readonly unknown[], manifest: BacktestManifest): readonly unknown[] {
+  const requestedFeed = manifest.sourceObject.feed;
+  if (!requestedFeed) throw new Error("BACKTEST_PARQUET_SOURCE_FEED_REQUIRED");
+  return rows.filter((row) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+    const record = row as Record<string, unknown>;
+    const feed = String(record.feed ?? "").toLowerCase();
+    const session = String(record.session ?? "").toLowerCase();
+    if (feed !== requestedFeed) return false;
+    if (manifest.session === "regular") return session === "regular";
+    if (manifest.session === "extended") return session !== "regular";
+    return true;
+  });
+}
+
+async function parseParquetBars(bytes: Buffer, manifest: BacktestManifest): Promise<ParsedBars> {
+  if (manifest.sourceObject.compression !== "none") {
+    throw new Error("BACKTEST_PARQUET_OUTER_COMPRESSION_UNSUPPORTED");
+  }
+  const file = toArrayBuffer(bytes);
+  let rows: readonly unknown[];
+  try {
+    const metadata = await parquetMetadataAsync(file);
+    const columns = parquetSchema(metadata).children.map((child) => child.element.name);
+    const requiredColumns = ["symbol", "t", "session", "feed", "o", "h", "l", "c", "v"];
+    if (requiredColumns.some((column) => !columns.includes(column))) {
+      throw new Error("BACKTEST_PARQUET_REQUIRED_COLUMN_MISSING");
+    }
+    rows = await parquetReadObjects({
+      file,
+      compressors,
+      columns: requiredColumns,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "BACKTEST_PARQUET_REQUIRED_COLUMN_MISSING") throw error;
+    throw new Error("BACKTEST_PARQUET_READ_FAILED");
+  }
+  const selected = selectParquetRows(rows, manifest);
+  if (selected.length === 0) throw new Error("BACKTEST_PARQUET_NO_ROWS_FOR_SESSION_OR_FEED");
+  const sorted = validateAndSortBars(normalizeMinuteBarRows(selected), manifest);
+  return {
+    bars: sorted,
+    rawBytes: bytes.byteLength,
+    dataFingerprint: digestJson(sorted.map(({ timestamp, symbol, open, high, low, close, volume }) => ({
+      timestamp, symbol, open, high, low, close, volume,
+    }))),
+  };
+}
+
+export async function parseBarsAsync(bytes: Buffer, manifest: BacktestManifest): Promise<ParsedBars> {
+  return manifest.sourceObject.format === "parquet"
+    ? parseParquetBars(bytes, manifest)
+    : parseBars(bytes, manifest);
 }
 
 export function filterBars(

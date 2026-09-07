@@ -10,9 +10,16 @@ const sourceObjectSchema = z.object({
   kind: z.enum(["object", "catalog"]).default("object"),
   uri: z.string().min(1),
   sha256: hash,
-  schema: z.enum(["canonical-minute-bars-v1", "alpaca-minute-bars-v1", "minute-bars-catalog-v1"]),
-  format: z.enum(["csv", "jsonl", "json"]),
+  schema: z.enum([
+    "canonical-minute-bars-v1",
+    "alpaca-minute-bars-v1",
+    "market-data-bars-1m-v1",
+    "market-data-bars-1m-v2",
+    "minute-bars-catalog-v1",
+  ]),
+  format: z.enum(["csv", "jsonl", "json", "parquet"]),
   compression: z.enum(["none", "gzip"]).default("none"),
+  feed: z.enum(["sip", "boats"]).optional(),
 });
 
 const universeSchema = z.object({
@@ -31,6 +38,18 @@ const corporateActionsSchema = z.object({
   provider: z.enum(["alpaca", "yfinance", "fixture", "unknown"]).optional(),
 });
 
+const archiveProvenanceSchema = z.object({
+  archiveManifestUri: z.string().min(1),
+  archiveManifestSha256: hash,
+  logicalManifestKey: z.string().min(1),
+  storagePrefix: z.string(),
+  sourceAsOf: dateOnly.optional(),
+  qualityStatus: z.string().min(1),
+  universeSnapshotId: hash,
+  universeSemantics: z.string().min(1),
+  survivorshipBias: z.boolean(),
+});
+
 export const BacktestManifestSchema = z.object({
   schemaVersion: z.literal(1),
   datasetId: z.string().regex(/^[a-z0-9][a-z0-9._-]{1,95}$/, "DATASET_ID_INVALID"),
@@ -43,6 +62,7 @@ export const BacktestManifestSchema = z.object({
   sourceObject: sourceObjectSchema,
   universe: universeSchema,
   corporateActions: corporateActionsSchema,
+  archiveProvenance: archiveProvenanceSchema.optional(),
 }).superRefine((manifest, context) => {
   if (manifest.endDate < manifest.startDate) {
     context.addIssue({ code: "custom", path: ["endDate"], message: "END_DATE_BEFORE_START_DATE" });
@@ -66,7 +86,18 @@ export const BacktestManifestSchema = z.object({
     context.addIssue({ code: "custom", path: ["sourceObject"], message: "OBJECT_SOURCE_CANNOT_BE_CATALOG" });
   }
   if (manifest.sourceObject.kind === "object" && manifest.sourceObject.format === "json") {
-    context.addIssue({ code: "custom", path: ["sourceObject", "format"], message: "BAR_OBJECT_FORMAT_MUST_BE_CSV_OR_JSONL" });
+    context.addIssue({ code: "custom", path: ["sourceObject", "format"], message: "BAR_OBJECT_FORMAT_MUST_BE_CSV_JSONL_OR_PARQUET" });
+  }
+  if (manifest.sourceObject.kind === "object" && manifest.sourceObject.format === "parquet") {
+    if (!manifest.sourceObject.schema.startsWith("market-data-bars-1m-")) {
+      context.addIssue({ code: "custom", path: ["sourceObject", "schema"], message: "PARQUET_SOURCE_SCHEMA_INVALID" });
+    }
+    if (manifest.sourceObject.compression !== "none") {
+      context.addIssue({ code: "custom", path: ["sourceObject", "compression"], message: "PARQUET_SOURCE_CANNOT_USE_OUTER_COMPRESSION" });
+    }
+    if (!manifest.sourceObject.feed) {
+      context.addIssue({ code: "custom", path: ["sourceObject", "feed"], message: "PARQUET_SOURCE_FEED_REQUIRED" });
+    }
   }
   if (manifest.corporateActions.uri &&
       (/[?*]/.test(manifest.corporateActions.uri)

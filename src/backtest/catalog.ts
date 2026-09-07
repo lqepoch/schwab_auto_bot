@@ -1,5 +1,5 @@
 import { readExactObject } from "./objectStore.ts";
-import { parseBars, mergeParsedBars, type ParsedBars } from "./bars.ts";
+import { parseBarsAsync, mergeParsedBars, type ParsedBars } from "./bars.ts";
 import { compareCodeUnits } from "./fingerprints.ts";
 import type { BacktestManifest, SourceObject } from "./manifest.ts";
 import { z } from "zod";
@@ -11,9 +11,15 @@ const symbol = z.string().regex(/^[A-Z][A-Z0-9._-]{0,15}$/);
 const catalogShardSchema = z.object({
   uri: z.string().min(1),
   sha256: hash,
-  schema: z.enum(["canonical-minute-bars-v1", "alpaca-minute-bars-v1"]),
-  format: z.enum(["csv", "jsonl"]),
+  schema: z.enum([
+    "canonical-minute-bars-v1",
+    "alpaca-minute-bars-v1",
+    "market-data-bars-1m-v1",
+    "market-data-bars-1m-v2",
+  ]),
+  format: z.enum(["csv", "jsonl", "parquet"]),
   compression: z.enum(["none", "gzip"]).default("none"),
+  feed: z.enum(["sip", "boats"]).optional(),
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   symbols: z.array(symbol).min(1),
@@ -54,6 +60,13 @@ function parseCatalog(bytes: Buffer, compression: "none" | "gzip"): MinuteBarsCa
   for (const shard of result.data.shards) {
     assertExactUri(shard.uri);
     if (shard.endDate < shard.startDate) throw new Error("BACKTEST_CATALOG_SHARD_DATE_RANGE_INVALID");
+    if (shard.format === "parquet" && (
+      !shard.schema.startsWith("market-data-bars-1m-")
+      || shard.compression !== "none"
+      || !shard.feed
+    )) {
+      throw new Error("BACKTEST_CATALOG_PARQUET_SHARD_INVALID");
+    }
   }
   return result.data;
 }
@@ -66,6 +79,7 @@ function sourceForShard(shard: CatalogShard): SourceObject {
     schema: shard.schema,
     format: shard.format,
     compression: shard.compression,
+    feed: shard.feed,
   };
 }
 
@@ -109,7 +123,7 @@ export async function readDatasetBars(
   const source = manifest.sourceObject;
   const topLevel = await readExactObject(manifestPath, source, options);
   if (source.kind !== "catalog") {
-    const parsed = parseBars(topLevel.bytes, manifest);
+    const parsed = await parseBarsAsync(topLevel.bytes, manifest);
     return { ...parsed, sourceObjects: [source.uri] };
   }
   const catalog = parseCatalog(topLevel.bytes, source.compression);
@@ -131,7 +145,7 @@ export async function readDatasetBars(
   for (const shard of selectedShards) {
     const shardSource = sourceForShard(shard);
     const shardObject = await readExactObject(manifestPath, shardSource, options);
-    const parsed = parseBars(shardObject.bytes, { ...manifest, sourceObject: shardSource });
+    const parsed = await parseBarsAsync(shardObject.bytes, { ...manifest, sourceObject: shardSource });
     validateShardBounds(parsed, shard);
     parts.push(parsed);
     sourceObjects.push(shard.uri);

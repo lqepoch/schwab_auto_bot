@@ -6,6 +6,7 @@ import type { BacktestManifest, SourceObject } from "./manifest.ts";
 
 export interface OssConfiguration {
   readonly endpoint: string;
+  readonly endpointStyle: "service" | "bucket";
   readonly region: string;
   readonly bucket: string;
   readonly accessKeyId: string;
@@ -17,6 +18,7 @@ export interface OssConfigurationStatus {
   readonly configured: boolean;
   readonly missing: readonly string[];
   readonly endpoint?: string;
+  readonly endpointStyle?: "service" | "bucket";
   readonly region?: string;
   readonly bucket?: string;
 }
@@ -46,22 +48,27 @@ interface AliOssGetResult {
   readonly content?: Buffer;
 }
 
-interface AliOssClient {
+export interface AliOssClient {
   head(name: string, options?: Record<string, unknown>): Promise<AliOssHeadResult>;
   get(name: string, options?: Record<string, unknown>): Promise<AliOssGetResult>;
 }
 
-type AliOssConstructor = new (options: {
+export interface AliOssClientOptions {
   accessKeyId: string;
   accessKeySecret: string;
   stsToken?: string;
   bucket: string;
   endpoint?: string;
+  cname: boolean;
   region?: string;
   authorizationV4: boolean;
   retryMax: number;
   timeout: number;
-}) => AliOssClient;
+}
+
+type AliOssConstructor = new (options: AliOssClientOptions) => AliOssClient;
+
+export type AliOssClientFactory = (options: AliOssClientOptions) => Promise<AliOssClient>;
 
 export interface ExactObject {
   readonly bytes: Buffer;
@@ -69,39 +76,66 @@ export interface ExactObject {
   readonly head: ObjectHead;
 }
 
-const OSS_ENV_KEYS = {
-  endpoint: "OSS_ENDPOINT",
-  region: "OSS_REGION",
-  bucket: "OSS_BUCKET",
-  accessKeyId: "OSS_ACCESS_KEY_ID",
-  accessKeySecret: "OSS_ACCESS_KEY_SECRET",
-  securityToken: "OSS_SECURITY_TOKEN",
+const OSS_ENV_ALIASES = {
+  endpoint: ["OSS_ENDPOINT", "MARKET_DATA_S3_ENDPOINT"],
+  endpointStyle: ["OSS_ENDPOINT_STYLE", "MARKET_DATA_S3_ENDPOINT_STYLE"],
+  region: ["OSS_REGION", "MARKET_DATA_S3_REGION"],
+  bucket: ["OSS_BUCKET", "MARKET_DATA_S3_BUCKET"],
+  accessKeyId: ["OSS_ACCESS_KEY_ID", "ALIBABACLOUD_ACCESS_KEY_ID"],
+  accessKeySecret: ["OSS_ACCESS_KEY_SECRET", "ALIBABACLOUD_SECRET_ACCESS_KEY"],
+  securityToken: ["OSS_SECURITY_TOKEN", "ALIBABACLOUD_SECURITY_TOKEN"],
 } as const;
 
-function environmentValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
-  const value = env[key]?.trim();
-  return value ? value : undefined;
+function environmentValue(env: NodeJS.ProcessEnv, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = env[key]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function inferEndpointStyle(endpoint: string | undefined, bucket: string | undefined): "service" | "bucket" {
+  if (!endpoint || !bucket) return "service";
+  try {
+    const hostname = new URL(endpoint).hostname.toLowerCase();
+    return hostname.startsWith(bucket.toLowerCase() + ".") ? "bucket" : "service";
+  } catch {
+    return "service";
+  }
+}
+
+function endpointStyle(
+  value: string | undefined,
+  endpoint: string | undefined,
+  bucket: string | undefined,
+): "service" | "bucket" {
+  if (!value) return inferEndpointStyle(endpoint, bucket);
+  const normalized = value.toLowerCase();
+  if (normalized === "service" || normalized === "bucket") return normalized;
+  throw new Error("BACKTEST_OSS_ENDPOINT_STYLE_INVALID");
 }
 
 export function readOssConfiguration(env: NodeJS.ProcessEnv = process.env): OssConfigurationStatus & {
   readonly config?: OssConfiguration;
 } {
   const values = {
-    endpoint: environmentValue(env, OSS_ENV_KEYS.endpoint),
-    region: environmentValue(env, OSS_ENV_KEYS.region),
-    bucket: environmentValue(env, OSS_ENV_KEYS.bucket),
-    accessKeyId: environmentValue(env, OSS_ENV_KEYS.accessKeyId),
-    accessKeySecret: environmentValue(env, OSS_ENV_KEYS.accessKeySecret),
-    securityToken: environmentValue(env, OSS_ENV_KEYS.securityToken),
+    endpoint: environmentValue(env, OSS_ENV_ALIASES.endpoint),
+    endpointStyle: environmentValue(env, OSS_ENV_ALIASES.endpointStyle),
+    region: environmentValue(env, OSS_ENV_ALIASES.region),
+    bucket: environmentValue(env, OSS_ENV_ALIASES.bucket),
+    accessKeyId: environmentValue(env, OSS_ENV_ALIASES.accessKeyId),
+    accessKeySecret: environmentValue(env, OSS_ENV_ALIASES.accessKeySecret),
+    securityToken: environmentValue(env, OSS_ENV_ALIASES.securityToken),
   };
   const missing = (Object.keys(values) as Array<keyof typeof values>)
-    .filter((key) => key !== "securityToken" && !values[key])
-    .map((key) => OSS_ENV_KEYS[key]);
+    .filter((key) => key !== "securityToken" && key !== "endpointStyle" && !values[key])
+    .map((key) => OSS_ENV_ALIASES[key][0]);
   if (missing.length > 0) {
     return {
       configured: false,
       missing,
       endpoint: values.endpoint,
+      endpointStyle: inferEndpointStyle(values.endpoint, values.bucket),
       region: values.region,
       bucket: values.bucket,
     };
@@ -110,10 +144,12 @@ export function readOssConfiguration(env: NodeJS.ProcessEnv = process.env): OssC
     configured: true,
     missing: [],
     endpoint: values.endpoint,
+    endpointStyle: endpointStyle(values.endpointStyle, values.endpoint, values.bucket),
     region: values.region,
     bucket: values.bucket,
     config: {
       endpoint: values.endpoint as string,
+      endpointStyle: endpointStyle(values.endpointStyle, values.endpoint, values.bucket),
       region: values.region as string,
       bucket: values.bucket as string,
       accessKeyId: values.accessKeyId as string,
@@ -123,7 +159,30 @@ export function readOssConfiguration(env: NodeJS.ProcessEnv = process.env): OssC
   };
 }
 
-function parseOssUri(uri: string): { bucket: string; key: string } {
+function ossClientOptions(config: OssConfiguration): AliOssClientOptions {
+  return {
+    accessKeyId: config.accessKeyId,
+    accessKeySecret: config.accessKeySecret,
+    stsToken: config.securityToken,
+    bucket: config.bucket,
+    endpoint: config.endpoint,
+    // A bucket-style endpoint already includes the bucket hostname. ali-oss
+    // calls this CNAME mode and otherwise prepends the bucket a second time.
+    cname: config.endpointStyle === "bucket",
+    region: config.region,
+    authorizationV4: true,
+    retryMax: 0,
+    timeout: 60_000,
+  };
+}
+
+const defaultAliOssClientFactory: AliOssClientFactory = async (options) => {
+  const module = await import("ali-oss");
+  const constructor = (module.default ?? module) as unknown as AliOssConstructor;
+  return new constructor(options);
+};
+
+export function parseExactOssUri(uri: string): { bucket: string; key: string } {
   let parsed: URL;
   try {
     parsed = new URL(uri);
@@ -181,28 +240,18 @@ function assertExpectedHash(bytes: Buffer, expected: string): string {
   return actual;
 }
 
-export function createReadOnlyOssStore(config: OssConfiguration): ReadOnlyObjectStore {
+export function createReadOnlyOssStore(
+  config: OssConfiguration,
+  createClient: AliOssClientFactory = defaultAliOssClientFactory,
+): ReadOnlyObjectStore {
   let clientPromise: Promise<AliOssClient> | undefined;
   const getClient = async (): Promise<AliOssClient> => {
-    clientPromise ??= import("ali-oss").then((module) => {
-      const constructor = (module.default ?? module) as unknown as AliOssConstructor;
-      return new constructor({
-        accessKeyId: config.accessKeyId,
-        accessKeySecret: config.accessKeySecret,
-        stsToken: config.securityToken,
-        bucket: config.bucket,
-        endpoint: config.endpoint,
-        region: config.region,
-        authorizationV4: true,
-        retryMax: 0,
-        timeout: 60_000,
-      });
-    });
+    clientPromise ??= createClient(ossClientOptions(config));
     return clientPromise;
   };
   return {
     async head(uri: string): Promise<ObjectHead> {
-      const { bucket, key } = parseOssUri(uri);
+      const { bucket, key } = parseExactOssUri(uri);
       if (bucket !== config.bucket) throw new Error("BACKTEST_OSS_BUCKET_MISMATCH");
       try {
         const response = await (await getClient()).head(key);
@@ -215,7 +264,7 @@ export function createReadOnlyOssStore(config: OssConfiguration): ReadOnlyObject
       }
     },
     async get(uri: string): Promise<Buffer> {
-      const { bucket, key } = parseOssUri(uri);
+      const { bucket, key } = parseExactOssUri(uri);
       if (bucket !== config.bucket) throw new Error("BACKTEST_OSS_BUCKET_MISMATCH");
       try {
         const response = await (await getClient()).get(key);

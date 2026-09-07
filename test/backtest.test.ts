@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { digestJson, sha256Hex, stableJson } from "../src/backtest/fingerprints.ts";
-import { parseBars } from "../src/backtest/bars.ts";
+import { parseBars, parseBarsAsync } from "../src/backtest/bars.ts";
+import { buildArchiveBacktestManifest } from "../src/backtest/archive.ts";
 import { readDatasetBars } from "../src/backtest/catalog.ts";
 import {
   loadCorporateActions,
@@ -14,7 +15,11 @@ import {
 import { fetchAlpacaCorporateActions } from "../src/backtest/alpaca.ts";
 import { simulateLongOnlyCashEquity } from "../src/backtest/engine.ts";
 import { parseManifest } from "../src/backtest/manifest.ts";
-import { readExactObject } from "../src/backtest/objectStore.ts";
+import {
+  createReadOnlyOssStore,
+  readExactObject,
+  readOssConfiguration,
+} from "../src/backtest/objectStore.ts";
 import { runAudit, runBacktest, runPreflight } from "../src/backtest/workflow.ts";
 
 function baseManifest(overrides: Record<string, unknown> = {}) {
@@ -57,6 +62,11 @@ const csv = [
   "2016-01-05T14:30:00Z,AAPL,10,10,10,10,100",
 ].join("\n") + "\n";
 
+const parquetFixture = Buffer.from(
+  "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AAA9QBgIAAAAAAAAIkAREQAZLBUEFQAVAgAVABUQFQIAPCkGGSYABgAAACYAHBUKGTUABhAZGAFjFQwWBhbeARaCAiaUDSa2DBwYCAAAAAAAgD5AGAgAAAAAAAAlQBYAKAgAAAAAAIA+QBgIAAAAAAAAJUAREQAZLBUEFQAVAgAVABUQFQIAPCkGGSYABgAAACYAHBUEGTUABhAZGAF2FQwWBhbeARb6ASaODya4DhwYCCwBAAAAAAAAGAhkAAAAAAAAABYAKAgsAQAAAAAAABgIZAAAAAAAAAAREQAZLBUEFQAVAgAVABUQFQIAPCkGGSYABgAAABbuDRYGJggWqhAAGRwYDEFSUk9XOnNjaGVtYRisBS8vLy8vL2dCQUFBUUFBQUFBQUFLQUF3QUJnQUZBQWdBQ2dBQUFBQUJCQUFNQUFBQUNBQUlBQUFBQkFBSUFBQUFCQUFBQUFrQUFBQ1lBUUFBU0FFQUFCd0JBQUR3QUFBQXdBQUFBSlFBQUFCb0FBQUFQQUFBQUFRQUFBQ2Mvdi8vQUFBQkFoQUFBQUFjQUFBQUJBQUFBQUFBQUFBQkFBQUFkZ0FBQUFnQURBQUlBQWNBQ0FBQUFBQUFBQUZBQUFBQTBQNy8vd0FBQVFNUUFBQUFGQUFBQUFRQUFBQUFBQUFBQVFBQUFHTUFBQUNLLy8vL0FBQUNBUGorLy84QUFBRURFQUFBQUJRQUFBQUVBQUFBQUFBQUFBRUFBQUJzQUFBQXN2Ly8vd0FBQWdBZy8vLy9BQUFCQXhBQUFBQVVBQUFBQkFBQUFBQUFBQUFCQUFBQWFBQUFBTnIvLy84QUFBSUFTUC8vL3dBQUFRTVFBQUFBR0FBQUFBUUFBQUFBQUFBQUFRQUFBRzhBQmdBSUFBWUFCZ0FBQUFBQUFnQjAvLy8vQUFBQkJSQUFBQUFZQUFBQUJBQUFBQUFBQUFBRUFBQUFabVZsWkFBQUFBQmsvLy8vblAvLy93QUFBUVVRQUFBQUdBQUFBQVFBQUFBQUFBQUFCd0FBQUhObGMzTnBiMjRBalAvLy84VC8vLzhBQUFFS0VBQUFBQndBQUFBRUFBQUFBQUFBQUFFQUFBQjBBQUFBQ0FBTUFBWUFDQUFJQUFBQUFBQUJBQVFBQUFBREFBQUFWVlJEQUJBQUZBQUlBQVlBQndBTUFBQUFFQUFRQUFBQUFBQUJCUkFBQUFBY0FBQUFCQUFBQUFBQUFBQUdBQUFBYzNsdFltOXNBQUFFQUFRQUJBQUFBQUFBQUFBPQAYIHBhcnF1ZXQtY3BwLWFycm93IHZlcnNpb24gMjMuMC4xGZwcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAA8QYAAFBBUjE=",
+  "base64",
+);
+
 test("stable JSON uses deterministic code-unit key ordering", () => {
   assert.equal(stableJson({ z: 1, A: 2, a: 3 }), '{"A":2,"a":3,"z":1}');
   assert.equal(stableJson({ nested: { b: 1, a: 2 } }), '{"nested":{"a":2,"b":1}}');
@@ -82,6 +92,68 @@ test("CSV bars are normalized, sorted, range checked, and fingerprinted", () => 
   assert.equal(result.bars[0].timestamp, "2016-01-04T14:30:00.000Z");
   assert.equal(result.bars[2].close, 10);
   assert.match(result.dataFingerprint, /^[a-f0-9]{64}$/);
+});
+
+test("Parquet archive rows respect declared SIP and regular-session filters", async () => {
+  const manifest = parseManifest(baseManifest({
+    session: "regular",
+    sourceObject: {
+      ...baseManifest().sourceObject,
+      sha256: sha256Hex(parquetFixture),
+      schema: "market-data-bars-1m-v2",
+      format: "parquet",
+      compression: "none",
+      feed: "sip",
+    },
+  }));
+  const result = await parseBarsAsync(parquetFixture, manifest);
+  assert.equal(result.bars.length, 1);
+  assert.deepEqual(result.bars[0], {
+    timestamp: "2016-01-04T14:30:00.000Z",
+    epochMs: Date.parse("2016-01-04T14:30:00Z"),
+    symbol: "AAPL",
+    open: 10,
+    high: 11,
+    low: 9,
+    close: 10.5,
+    volume: 100,
+  });
+});
+
+test("archive importer derives a legacy storage prefix without making it a runtime selector", () => {
+  const archive = Buffer.from(JSON.stringify({
+    schema_version: "market-data-bars-1m-manifest-v1",
+    provider: "alpaca",
+    timeframe: "1m",
+    adjustment: "raw",
+    quality_status: "PASS",
+    data_schema_version: "market-data-bars-1m-v2",
+    symbol: "AAPL",
+    year: 2016,
+    asof: "2026-08-12",
+    manifest_key: "market-data-v2/historical-bars/provider=alpaca/timeframe=1m/symbol=AAPL/year=2016/revision=2/manifest.json",
+    universe_snapshot_id: "a".repeat(64),
+    universe_semantics: "latest_snapshot",
+    survivorship_bias: true,
+    bars: {
+      key: "market-data-v2/historical-bars/provider=alpaca/timeframe=1m/symbol=AAPL/year=2016/revision=2/bars.parquet",
+      sha256: "b".repeat(64),
+      byte_count: 123,
+    },
+  }));
+  const result = buildArchiveBacktestManifest({
+    archiveManifestUri: "oss://market-data/legacy/market-data-v2/historical-bars/provider=alpaca/timeframe=1m/symbol=AAPL/year=2016/revision=2/manifest.json",
+    archiveManifestBytes: archive,
+    archiveManifestSha256: sha256Hex(archive),
+  });
+  assert.equal(result.storagePrefix, "legacy/");
+  assert.equal(
+    result.manifest.sourceObject.uri,
+    "oss://market-data/legacy/market-data-v2/historical-bars/provider=alpaca/timeframe=1m/symbol=AAPL/year=2016/revision=2/bars.parquet",
+  );
+  assert.equal(result.manifest.adjustmentMode, "raw");
+  assert.equal(result.manifest.universe.completeness, "proxy");
+  assert.equal(result.manifest.archiveProvenance?.survivorshipBias, true);
 });
 
 test("exact local object hashing fails closed and network is opt-in", async () => {
@@ -111,6 +183,54 @@ test("exact local object hashing fails closed and network is opt-in", async () =
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("OSS configuration accepts existing market-data environment aliases", () => {
+  const status = readOssConfiguration({
+    MARKET_DATA_S3_ENDPOINT: "https://oss.example.test",
+    MARKET_DATA_S3_ENDPOINT_STYLE: "bucket",
+    MARKET_DATA_S3_REGION: "ap-southeast-1",
+    MARKET_DATA_S3_BUCKET: "market-data",
+    ALIBABACLOUD_ACCESS_KEY_ID: "test-key",
+    ALIBABACLOUD_SECRET_ACCESS_KEY: "test-secret",
+  });
+  assert.equal(status.configured, true);
+  assert.equal(status.config?.endpoint, "https://oss.example.test");
+  assert.equal(status.config?.endpointStyle, "bucket");
+  assert.equal(status.config?.bucket, "market-data");
+});
+
+test("OSS reader uses CNAME mode for an exact bucket endpoint", async () => {
+  let clientOptions: { cname: boolean; bucket: string; endpoint?: string } | undefined;
+  const store = createReadOnlyOssStore({
+    endpoint: "https://market-data.oss.example.test",
+    endpointStyle: "bucket",
+    region: "ap-southeast-1",
+    bucket: "market-data",
+    accessKeyId: "test-key",
+    accessKeySecret: "test-secret",
+  }, async (options) => {
+    clientOptions = options;
+    return {
+      head: async () => ({ res: { headers: { "x-oss-request-id": "request-1" } } }),
+      get: async () => ({ content: Buffer.from("fixture") }),
+    };
+  });
+
+  const result = await store.head("oss://market-data/exact/bars.csv");
+  assert.equal(result.requestId, "request-1");
+  assert.deepEqual(clientOptions, {
+    cname: true,
+    bucket: "market-data",
+    endpoint: "https://market-data.oss.example.test",
+    accessKeyId: "test-key",
+    accessKeySecret: "test-secret",
+    stsToken: undefined,
+    region: "ap-southeast-1",
+    authorizationV4: true,
+    retryMax: 0,
+    timeout: 60_000,
+  });
 });
 
 test("catalog manifests enumerate exact immutable shards without LIST", async () => {
@@ -174,13 +294,13 @@ test("catalog manifests enumerate exact immutable shards without LIST", async ()
   }
 });
 
-test("Alpaca CLI adapter normalizes official action types and paginates", async () => {
+test("Alpaca CLI adapter normalizes grouped current action responses and paginates", async () => {
   const calls: string[][] = [];
   let page = 0;
   const result = await fetchAlpacaCorporateActions(
     { symbols: ["aapl"], since: "2016-01-01", until: "2016-12-31" },
     {
-      env: { ALPACA_MARKET_DATA_API_KEY: "key-fixture", ALPACA_MARKET_DATA_SECRET_KEY: "secret-fixture" },
+      env: { ALPACA_PAPER_API_KEY_ID: "key-fixture", ALPACA_PAPER_API_SECRET_KEY: "secret-fixture" },
       runner: async (args, env) => {
         calls.push([...args]);
         assert.equal(env.APCA_API_KEY_ID, "key-fixture");
@@ -191,8 +311,8 @@ test("Alpaca CLI adapter normalizes official action types and paginates", async 
           stdout: JSON.stringify(page === 1
             ? {
               corporate_actions: {
-                forward_split: [{
-                  id: "split1", symbol: "AAPL", ca_type: "forward_split", ex_date: "2016-06-01",
+                forward_splits: [{
+                  id: "split1", symbol: "AAPL", ex_date: "2016-06-01",
                   old_rate: 1, new_rate: 2,
                 }],
               },
@@ -200,8 +320,8 @@ test("Alpaca CLI adapter normalizes official action types and paginates", async 
             }
             : {
               corporate_actions: {
-                cash_dividend: [{
-                  id: "dividend1", symbol: "AAPL", ca_type: "cash_dividend", ex_date: "2016-09-01", cash: 1,
+                cash_dividends: [{
+                  id: "dividend1", symbol: "AAPL", ex_date: "2016-09-01", rate: 1,
                 }],
               },
             }),
@@ -213,6 +333,7 @@ test("Alpaca CLI adapter normalizes official action types and paginates", async 
   assert.equal(result.receipt.pages, 2);
   assert.deepEqual(result.actions.map((action) => action.type), ["split", "dividend"]);
   assert.equal(result.actions[0].splitFactor, 2);
+  assert.equal(result.actions[1].dividendPerShare, 1);
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].slice(-2), ["--page-token", "page-2"]);
 });
