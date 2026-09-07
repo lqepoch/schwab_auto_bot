@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { promisify } from "node:util";
 import { digestJson, sha256Hex, stableJson } from "../src/backtest/fingerprints.ts";
@@ -22,9 +23,19 @@ import {
   readExactObject,
   readOssConfiguration,
 } from "../src/backtest/objectStore.ts";
-import { runArchiveProviderParity, runAudit, runBacktest, runPreflight } from "../src/backtest/workflow.ts";
+import {
+  networkAccessAttempted,
+  runArchiveProviderParity,
+  runAudit,
+  runBacktest,
+  runPreflight,
+  sourceEvidence,
+} from "../src/backtest/workflow.ts";
+import { fetchYfinanceCorporateActions, writeFetchedYfinanceActions } from "../src/backtest/yfinance.ts";
 
 const execFileAsync = promisify(execFile);
+const HASH_A = "a".repeat(64);
+const HASH_B = "b".repeat(64);
 
 function baseManifest(overrides: Record<string, unknown> = {}) {
   return {
@@ -165,6 +176,143 @@ test("archive importer derives a legacy storage prefix without making it a runti
   assert.equal(result.manifest.adjustmentMode, "raw");
   assert.equal(result.manifest.universe.completeness, "proxy");
   assert.equal(result.manifest.archiveProvenance?.survivorshipBias, true);
+});
+
+test("archive adjustment declaration propagates and unknown adjustment fails closed", () => {
+  const makeArchive = (adjustment: string) => Buffer.from(JSON.stringify({
+    schema_version: "market-data-bars-1m-manifest-v1",
+    provider: "alpaca",
+    timeframe: "1m",
+    adjustment,
+    quality_status: "PASS",
+    data_schema_version: "market-data-bars-1m-v2",
+    symbol: "AAPL",
+    year: 2016,
+    asof: "2026-08-12",
+    manifest_key: "archive/symbol=AAPL/year=2016/revision=1/manifest.json",
+    universe_snapshot_id: "a".repeat(64),
+    universe_semantics: "current_snapshot",
+    survivorship_bias: true,
+    bars: { key: "archive/symbol=AAPL/year=2016/revision=1/bars.parquet", sha256: "b".repeat(64), byte_count: 123 },
+  }));
+  for (const adjustment of ["split-adjusted", "total-return-adjusted"] as const) {
+    const bytes = makeArchive(adjustment);
+    const result = buildArchiveBacktestManifest({
+      archiveManifestUri: "oss://market-data/archive/symbol=AAPL/year=2016/revision=1/manifest.json",
+      archiveManifestBytes: bytes,
+      archiveManifestSha256: sha256Hex(bytes),
+    });
+    assert.equal(result.manifest.adjustmentMode, adjustment);
+  }
+  const unknown = makeArchive("unknown");
+  assert.throws(() => buildArchiveBacktestManifest({
+    archiveManifestUri: "oss://market-data/archive/symbol=AAPL/year=2016/revision=1/manifest.json",
+    archiveManifestBytes: unknown,
+    archiveManifestSha256: sha256Hex(unknown),
+  }), /BACKTEST_ARCHIVE_ADJUSTMENT_UNKNOWN/);
+});
+
+test("yfinance action fetch is explicit, batched, and preserves archive/provider symbol dialects", async () => {
+  const calls: Array<{ interpreter: string; requests: readonly { archiveSymbol: string; querySymbol: string }[] }> = [];
+  const result = await fetchYfinanceCorporateActions({
+    symbols: ["BF.B", "AAPL"],
+    querySymbols: { "BF.B": "BF-B" },
+    since: "2016-01-01",
+    until: "2016-12-31",
+  }, {
+    interpreter: "/opt/python-yfinance",
+    batchSize: 1,
+    concurrency: 1,
+    runner: async (interpreter, args) => {
+      const payload = JSON.parse(String(args[2])) as {
+        requests: readonly { archiveSymbol: string; querySymbol: string }[];
+      };
+      calls.push({ interpreter, requests: payload.requests });
+      const request = payload.requests[0];
+      const actions = request.archiveSymbol === "BF.B"
+        ? [{ symbol: "BF.B", exDate: "2016-06-01", type: "dividend", dividendPerShare: 1, source: "yfinance" }]
+        : [];
+      return {
+        stdout: JSON.stringify({
+          actions,
+          results: [{
+            archiveSymbol: request.archiveSymbol,
+            querySymbol: request.querySymbol,
+            status: "success",
+            rowCount: actions.length,
+          }],
+        }),
+        stderr: "",
+      };
+    },
+  });
+  assert.deepEqual(calls, [
+    { interpreter: "/opt/python-yfinance", requests: [{ archiveSymbol: "AAPL", querySymbol: "AAPL" }] },
+    { interpreter: "/opt/python-yfinance", requests: [{ archiveSymbol: "BF.B", querySymbol: "BF-B" }] },
+  ]);
+  assert.deepEqual(result.receipt.symbols, ["AAPL", "BF.B"]);
+  assert.equal(result.receipt.querySymbols["BF.B"], "BF-B");
+  assert.equal(result.actions[0]?.symbol, "BF.B");
+  assert.equal(result.receipt.rawProviderRowCount, 1);
+  assert.equal(result.receipt.symbolResults.length, 2);
+  const root = await mkdtemp(join(tmpdir(), "backtest-yfinance-actions-"));
+  try {
+    const stored = await writeFetchedYfinanceActions(join(root, "actions.json"), result);
+    assert.match(stored.sha256, /^[a-f0-9]{64}$/);
+    const actionFileText = await readFile(stored.path, "utf8");
+    assert.match(actionFileText, /"provider": "yfinance"/);
+    assert.match(actionFileText, /"BF.B": "BF-B"/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("yfinance action fetch fails closed on missing dependency or per-symbol failure", async () => {
+  await assert.rejects(
+    fetchYfinanceCorporateActions({
+      symbols: ["AAPL", "MSFT"],
+      querySymbols: { AAPL: "AAPL", MSFT: "AAPL" },
+      since: "2016-01-01",
+      until: "2016-12-31",
+    }),
+    /YFINANCE_QUERY_SYMBOL_MAP_DUPLICATE_QUERY_SYMBOL/,
+  );
+  await assert.rejects(
+    fetchYfinanceCorporateActions({ symbols: ["AAPL"], since: "2016-01-01", until: "2016-12-31" }, {
+      runner: async () => ({ stdout: "", stderr: "YFINANCE_DEPENDENCY_MISSING" }),
+    }),
+    /YFINANCE_DEPENDENCY_MISSING/,
+  );
+  await assert.rejects(
+    fetchYfinanceCorporateActions({ symbols: ["AAPL"], since: "2016-01-01", until: "2016-12-31" }, {
+      runner: async (_interpreter, args) => {
+        const payload = JSON.parse(String(args[2])) as { requests: readonly [{ archiveSymbol: string; querySymbol: string }] };
+        return {
+          stdout: JSON.stringify({
+            actions: [],
+            results: [{ archiveSymbol: payload.requests[0].archiveSymbol, querySymbol: payload.requests[0].querySymbol, status: "failed", errorCode: "TICKER_ACTIONS_FAILED", rowCount: 0 }],
+          }),
+          stderr: "",
+        };
+      },
+    }),
+    /YFINANCE_SYMBOL_FETCH_FAILED/,
+  );
+  await assert.rejects(
+    fetchYfinanceCorporateActions({ symbols: ["AAPL"], since: "2016-01-01", until: "2016-12-31" }, {
+      runner: async (_interpreter, args) => {
+        const payload = JSON.parse(String(args[2])) as { requests: readonly [{ archiveSymbol: string; querySymbol: string }] };
+        return {
+          stdout: JSON.stringify({
+            actions: [],
+            results: [{ archiveSymbol: payload.requests[0].archiveSymbol, querySymbol: payload.requests[0].querySymbol, status: "success", rowCount: 1 }],
+          }),
+          stderr: "",
+        };
+      },
+    }),
+    /YFINANCE_RAW_ROW_COUNT_MISMATCH/,
+  );
 });
 
 test("exact local object hashing fails closed and network is opt-in", async () => {
@@ -380,6 +528,8 @@ test("Alpaca CLI adapter normalizes grouped current action responses and paginat
               corporate_actions: {
                 cash_dividends: [{
                   id: "dividend1", symbol: "AAPL", ex_date: "2016-09-01", rate: 1,
+                }, {
+                  id: "dividend2", symbol: "AAPL", ex_date: "2016-09-01", rate: 1,
                 }],
               },
             }),
@@ -392,6 +542,10 @@ test("Alpaca CLI adapter normalizes grouped current action responses and paginat
   assert.deepEqual(result.actions.map((action) => action.type), ["split", "dividend"]);
   assert.equal(result.actions[0].splitFactor, 2);
   assert.equal(result.actions[1].dividendPerShare, 1);
+  assert.equal(result.actions[1].duplicateCount, 1);
+  assert.deepEqual(result.actions[1].providerIds, ["dividend1", "dividend2"]);
+  assert.equal(result.receipt.duplicateCount, 1);
+  assert.deepEqual(result.receipt.providerDuplicateIds, ["dividend2"]);
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].slice(-2), ["--page-token", "page-2"]);
 });
@@ -496,6 +650,65 @@ test("corporate action policy prevents double adjustment", () => {
   assert.throws(() => validateCorporateActionPolicy(adjusted, actions.actions), /CANNOT_APPLY_ACTIONS_AGAIN/);
 });
 
+test("corporate actions fold provider duplicates but retain distinct same-day dividends", () => {
+  const first = parseCorporateActions({
+    schemaVersion: 1,
+    provider: "alpaca",
+    actions: [
+      { id: "apa-2", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.025 },
+      { id: "apa-1", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.025 },
+      { id: "apa-3", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.03 },
+    ],
+  });
+  const second = parseCorporateActions({
+    schemaVersion: 1,
+    provider: "alpaca",
+    actions: [
+      { id: "apa-3", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.03 },
+      { id: "apa-1", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.025 },
+      { id: "apa-2", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.025 },
+    ],
+  });
+  assert.deepEqual(first.actions, second.actions);
+  assert.equal(first.actions.length, 2);
+  assert.deepEqual(first.actions[0]?.providerIds, ["apa-1", "apa-2"]);
+  assert.equal(first.actions[0]?.duplicateCount, 1);
+  assert.equal(first.actions[1]?.dividendPerShare, 0.03);
+  assert.equal(first.actions[1]?.duplicateCount, undefined);
+});
+
+test("corporate action parser rejects repeated provider IDs and folds exact no-ID duplicates", () => {
+  assert.throws(() => parseCorporateActions({
+    schemaVersion: 1,
+    provider: "alpaca",
+    actions: [
+      { id: "same-id", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.025 },
+      { id: "same-id", symbol: "APA", ex_date: "2021-01-21", type: "dividend", cash: 0.03 },
+    ],
+  }), /BACKTEST_ACTION_PROVIDER_ID_CONFLICT/);
+  assert.throws(() => parseCorporateActions({
+    schemaVersion: 1,
+    provider: "alpaca",
+    actions: [{
+      symbol: "APA",
+      ex_date: "2021-01-21",
+      type: "dividend",
+      cash: 0.025,
+      providerIds: ["apa-1", "apa-2"],
+    }],
+  }), /BACKTEST_ACTION_DUPLICATE_COUNT_INCONSISTENT/);
+  const parsed = parseCorporateActions({
+    schemaVersion: 1,
+    provider: "fixture",
+    actions: [
+      { symbol: "APA", exDate: "2021-01-21", type: "dividend", cash: 0.025, source: "fixture" },
+      { symbol: "APA", exDate: "2021-01-21", type: "dividend", cash: 0.025, source: "fixture" },
+    ],
+  });
+  assert.equal(parsed.actions.length, 1);
+  assert.equal(parsed.actions[0]?.duplicateCount, 1);
+});
+
 test("corporate action OSS URI uses the exact-object network gate", async () => {
   const manifest = parseManifest(baseManifest({
     corporateActions: {
@@ -533,6 +746,25 @@ test("reference simulation applies raw dividend once and adjusted bars never twi
   assert.equal(adjustedResult.finalCash, 100);
 });
 
+test("reference simulation applies distinct same-day dividends in deterministic order", () => {
+  const manifest = parseManifest(baseManifest({
+    corporateActions: { mode: "local-file", uri: "file:./actions.json", sha256: "1".repeat(64), appliesToBars: false },
+  }));
+  const actions = parseCorporateActions({
+    schemaVersion: 1,
+    provider: "fixture",
+    actions: [
+      { symbol: "AAPL", exDate: "2016-01-05", type: "dividend", cash: 2, source: "fixture" },
+      { symbol: "AAPL", exDate: "2016-01-05", type: "dividend", cash: 1, source: "fixture" },
+    ],
+  }).actions;
+  const result = simulateLongOnlyCashEquity(parseBars(Buffer.from(csv), manifest).bars, manifest, actions, {
+    symbol: "AAPL",
+    initialCash: 100,
+  });
+  assert.equal(result.finalCash, 130);
+});
+
 test("reference simulation preserves value through a 3:2 split with micro-shares", () => {
   const manifest = parseManifest(baseManifest({
     corporateActions: { mode: "local-file", uri: "file:./actions.json", sha256: "1".repeat(64), appliesToBars: false },
@@ -556,6 +788,148 @@ test("reference simulation preserves value through a 3:2 split with micro-shares
   assert.equal(result.sharesBought, 10);
   assert.equal(result.trades[1]?.quantity, 15);
   assert.ok(Math.abs(result.finalCash - 100) <= 0.00001);
+});
+
+test("run routes a source symbol through an explicit provider alias and keeps both identities", async () => {
+  const root = await mkdtemp(join(tmpdir(), "backtest-provider-symbol-routing-"));
+  try {
+    const bars = Buffer.from([
+      "timestamp,symbol,open,high,low,close,volume",
+      "2016-01-04T14:30:00Z,BF.B,10,10,10,10,100",
+      "2016-01-05T14:30:00Z,BF.B,10,10,10,10,100",
+    ].join("\n") + "\n");
+    const actions = Buffer.from(JSON.stringify({
+      schemaVersion: 1,
+      provider: "fixture",
+      actions: [{ symbol: "BF.B", exDate: "2016-01-05", type: "dividend", cash: 1, source: "fixture" }],
+    }));
+    const barsPath = join(root, "bf-b.csv");
+    const actionsPath = join(root, "actions.json");
+    const catalogPath = join(root, "frozen-catalog.json");
+    const manifestPath = join(root, "frozen-manifest.json");
+    await writeFile(barsPath, bars);
+    await writeFile(actionsPath, actions);
+    const catalog = {
+      schemaVersion: 1,
+      datasetId: "fixture-provider-alias",
+      feed: "alpaca",
+      timeframe: "1m",
+      shards: [{
+        uri: pathToFileURL(barsPath).href,
+        sha256: sha256Hex(bars),
+        schema: "canonical-minute-bars-v1",
+        format: "csv",
+        compression: "none",
+        startDate: "2016-01-01",
+        endDate: "2016-12-31",
+        symbols: ["BF.B"],
+        sourceSymbol: "BFB",
+        providerSymbol: "BF.B",
+      }],
+    };
+    const catalogBytes = Buffer.from(JSON.stringify(catalog));
+    await writeFile(catalogPath, catalogBytes);
+    const manifest = parseManifest({
+      schemaVersion: 1,
+      datasetId: "fixture-provider-alias",
+      feed: "alpaca",
+      timeframe: "1m",
+      session: "regular",
+      adjustmentMode: "raw",
+      startDate: "2016-01-01",
+      endDate: "2016-12-31",
+      sourceObject: {
+        kind: "catalog",
+        uri: pathToFileURL(catalogPath).href,
+        sha256: sha256Hex(catalogBytes),
+        schema: "minute-bars-catalog-v1",
+        format: "json",
+        compression: "none",
+      },
+      universe: {
+        id: "frozen-provider-alias",
+        source: "fixture source snapshot",
+        fingerprint: digestJson(["BFB"]),
+        completeness: "current-constituents",
+        symbols: ["BFB"],
+        symbolResolution: {
+          receiptUri: pathToFileURL(join(root, "frozen-symbol-resolution.json")).href,
+          receiptSha256: HASH_B,
+          snapshotId: HASH_A,
+          snapshotSha256: HASH_B,
+          mappings: [{ sourceSymbol: "BFB", providerSymbol: "BF.B" }],
+          exclusions: [],
+        },
+      },
+      corporateActions: {
+        mode: "local-file",
+        uri: pathToFileURL(actionsPath).href,
+        sha256: sha256Hex(actions),
+        appliesToBars: false,
+        provider: "fixture",
+      },
+    });
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const result = await runBacktest(manifestPath, { symbol: "BFB", initialCash: 100 });
+    assert.equal(result.status, "PASS");
+    assert.equal(result.requestedSymbol, "BFB");
+    assert.equal(result.sourceSymbol, "BFB");
+    assert.equal(result.providerSymbol, "BF.B");
+    assert.equal((result.simulation as { sourceSymbol: string }).sourceSymbol, "BFB");
+    assert.equal((result.simulation as { providerSymbol: string }).providerSymbol, "BF.B");
+    assert.equal((result.simulation as { finalCash: number }).finalCash, 110);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("run skips explicit exclusions for other symbols but rejects the excluded request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "backtest-explicit-exclusion-run-"));
+  try {
+    const bars = Buffer.from(csv);
+    const barsPath = join(root, "bars.csv");
+    const manifestPath = join(root, "frozen-manifest.json");
+    await writeFile(barsPath, bars);
+    const manifest = parseManifest(baseManifest({
+      adjustmentMode: "split-adjusted",
+      sourceObject: {
+        ...baseManifest().sourceObject,
+        sha256: sha256Hex(bars),
+      },
+      universe: {
+        id: "russell-current",
+        source: "fixture explicit exclusion",
+        fingerprint: digestJson(["AAPL", "P5N994"]),
+        completeness: "current-constituents",
+        symbols: ["AAPL", "P5N994"],
+        symbolResolution: {
+          receiptUri: pathToFileURL(join(root, "frozen-symbol-resolution.json")).href,
+          receiptSha256: HASH_A,
+          snapshotId: HASH_A,
+          snapshotSha256: HASH_B,
+          mappings: [],
+          exclusions: [{
+            sourceSymbol: "P5N994",
+            reason: "provider archive has no verified symbol",
+            evidence: { uri: "file:./p5n994-evidence.json", sha256: HASH_A },
+          }],
+        },
+      },
+    }));
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    const result = await runBacktest(manifestPath, { symbol: "AAPL", initialCash: 100 });
+    assert.equal(result.status, "PASS");
+    assert.equal(result.requestedSymbol, "AAPL");
+    assert.equal(result.sourceSymbol, "AAPL");
+    assert.equal(result.providerSymbol, "AAPL");
+    await assert.rejects(
+      runBacktest(manifestPath, { symbol: "P5N994", initialCash: 100 }),
+      /BACKTEST_SYMBOL_RESOLUTION_SOURCE_SYMBOL_EXCLUDED_P5N994/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("workflow artifacts distinguish local, blocked, and reproducible runs", async () => {
@@ -634,6 +1008,94 @@ test("workflow artifacts distinguish local, blocked, and reproducible runs", asy
     const actionPreflight = await runPreflight(actionBlockedPath, {});
     assert.equal(actionPreflight.status, "BLOCKED");
     assert.equal((actionPreflight.oss as { required: boolean }).required, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("catalog workflow evidence includes actual OSS shard sources", () => {
+  const manifest = parseManifest(baseManifest({
+    sourceObject: {
+      kind: "catalog",
+      uri: "file:./frozen-universe-catalog.json",
+      sha256: HASH_A,
+      schema: "minute-bars-catalog-v1",
+      format: "json",
+      compression: "none",
+    },
+  }));
+  const sourceObjects = [
+    "file:./frozen-universe-catalog.json",
+    "oss://market-data/archive/symbol=AAPL/year=2016/revision=1/bars.parquet",
+  ];
+  assert.equal(sourceEvidence(manifest), "LOCAL_FILE_OR_FIXTURE");
+  assert.equal(sourceEvidence(manifest, sourceObjects), "OSS_READ_ONLY_PROVIDER_EVIDENCE");
+  assert.equal(networkAccessAttempted(manifest, true, sourceObjects), true);
+  assert.equal(networkAccessAttempted(manifest, false, sourceObjects), false);
+});
+
+test("preflight inspects a local catalog and blocks when an OSS shard lacks configuration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "backtest-preflight-catalog-"));
+  try {
+    const catalog = Buffer.from(JSON.stringify({
+      schemaVersion: 1,
+      datasetId: "fixture-2016",
+      feed: "alpaca",
+      timeframe: "1m",
+      adjustmentMode: "raw",
+      shards: [{
+        uri: "oss://market-data/archive/symbol=AAPL/year=2016/revision=1/bars.csv",
+        sha256: HASH_B,
+        schema: "canonical-minute-bars-v1",
+        format: "csv",
+        compression: "none",
+        startDate: "2016-01-04",
+        endDate: "2016-01-05",
+        symbols: ["AAPL"],
+      }],
+    }));
+    const catalogPath = join(root, "catalog.json");
+    const manifestPath = join(root, "manifest.json");
+    await writeFile(catalogPath, catalog);
+    const manifest = parseManifest(baseManifest({
+      sourceObject: {
+        kind: "catalog",
+        uri: pathToFileURL(catalogPath).href,
+        sha256: sha256Hex(catalog),
+        schema: "minute-bars-catalog-v1",
+        format: "json",
+        compression: "none",
+      },
+    }));
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const report = await runPreflight(manifestPath, {});
+    assert.equal(report.status, "BLOCKED");
+    assert.equal((report.oss as { required: boolean }).required, true);
+    assert.equal((report.oss as { networkAccessAttempted: boolean }).networkAccessAttempted, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("preflight fails closed when a local catalog cannot be parsed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "backtest-preflight-invalid-catalog-"));
+  try {
+    const catalogPath = join(root, "catalog.json");
+    const manifestPath = join(root, "manifest.json");
+    const catalog = Buffer.from("not-json");
+    await writeFile(catalogPath, catalog);
+    const manifest = parseManifest(baseManifest({
+      sourceObject: {
+        kind: "catalog",
+        uri: pathToFileURL(catalogPath).href,
+        sha256: sha256Hex(catalog),
+        schema: "minute-bars-catalog-v1",
+        format: "json",
+        compression: "none",
+      },
+    }));
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await assert.rejects(runPreflight(manifestPath, {}), /BACKTEST_CATALOG_JSON_INVALID/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

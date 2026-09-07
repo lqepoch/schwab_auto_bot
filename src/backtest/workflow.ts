@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { digestJson, sha256Hex, compareCodeUnits } from "./fingerprints.ts";
 import { barSummary, filterBars, type MinuteBar } from "./bars.ts";
-import { readDatasetBars } from "./catalog.ts";
+import { inspectCatalogSourceObjects, readDatasetBars } from "./catalog.ts";
 import {
   assertRunnableManifest,
   loadManifest,
@@ -16,6 +16,7 @@ import {
   type CorporateAction,
 } from "./corporateActions.ts";
 import { simulateLongOnlyCashEquity } from "./engine.ts";
+import { providerSymbolForSource } from "./symbolResolution.ts";
 import {
   fetchAlpacaCorporateActions,
   fetchAlpacaBars,
@@ -66,16 +67,29 @@ function isOssUri(uri: string | undefined): boolean {
   return typeof uri === "string" && uri.toLowerCase().startsWith("oss:");
 }
 
-function manifestUsesOss(manifest: BacktestManifest): boolean {
-  return sourceProtocol(manifest.sourceObject) === "oss" || isOssUri(manifest.corporateActions.uri);
+function sourceObjectsUseOss(sourceObjects: readonly string[] = []): boolean {
+  return sourceObjects.some(isOssUri);
 }
 
-function networkAccessAttempted(manifest: BacktestManifest, allowNetwork: boolean | undefined): boolean {
-  return allowNetwork === true && manifestUsesOss(manifest);
+function manifestUsesOss(manifest: BacktestManifest, sourceObjects: readonly string[] = []): boolean {
+  return sourceProtocol(manifest.sourceObject) === "oss"
+    || isOssUri(manifest.corporateActions.uri)
+    || sourceObjectsUseOss(sourceObjects);
 }
 
-function sourceEvidence(manifest: BacktestManifest): string {
-  return manifestUsesOss(manifest)
+export function networkAccessAttempted(
+  manifest: BacktestManifest,
+  allowNetwork: boolean | undefined,
+  sourceObjects: readonly string[] = [],
+): boolean {
+  return allowNetwork === true && manifestUsesOss(manifest, sourceObjects);
+}
+
+export function sourceEvidence(
+  manifest: BacktestManifest,
+  sourceObjects: readonly string[] = [],
+): "OSS_READ_ONLY_PROVIDER_EVIDENCE" | "LOCAL_FILE_OR_FIXTURE" {
+  return manifestUsesOss(manifest, sourceObjects)
     ? "OSS_READ_ONLY_PROVIDER_EVIDENCE"
     : "LOCAL_FILE_OR_FIXTURE";
 }
@@ -86,6 +100,7 @@ export async function runPreflight(
 ): Promise<BacktestArtifact> {
   const manifest = await loadManifest(manifestPath);
   const protocol = sourceProtocol(manifest.sourceObject);
+  const catalogSourceObjects = await inspectCatalogSourceObjects(manifestPath, manifest);
   const oss = readOssConfiguration(env);
   const warnings: string[] = [];
   if (manifest.adjustmentMode === "unknown") warnings.push("ADJUSTMENT_MODE_UNKNOWN_WILL_FAIL_BACKTEST");
@@ -93,7 +108,7 @@ export async function runPreflight(
   warnings.push("SESSION_DECLARATION_NOT_CALENDAR_VERIFIED");
   warnings.push("ADJUSTMENT_MODE_IS_DECLARATIVE_UNTIL_PROVIDER_EVIDENCE_IS_CAPTURED");
   const actionUsesOss = isOssUri(manifest.corporateActions.uri);
-  const ossRequired = protocol === "oss" || actionUsesOss;
+  const ossRequired = protocol === "oss" || actionUsesOss || sourceObjectsUseOss(catalogSourceObjects);
   const blocked = ossRequired && !oss.configured;
   if (blocked) warnings.push("OSS_CONFIG_MISSING_NO_NETWORK_PROBE_PERFORMED");
   return {
@@ -176,7 +191,7 @@ export async function runAudit(
       || (manifest.adjustmentMode === "raw" && manifest.corporateActions.mode === "none")
     ) ? "UNVERIFIED" : "PASS";
     return {
-      ...baseArtifact("backtest-audit", status, sourceEvidence(manifest), warnings),
+      ...baseArtifact("backtest-audit", status, sourceEvidence(manifest, data.sourceObjects), warnings),
       manifestPath,
       manifestFingerprint: manifestFingerprint(manifest),
       datasetId: manifest.datasetId,
@@ -196,7 +211,7 @@ export async function runAudit(
         declared: manifest.session,
         verification: "DECLARED_UNVERIFIED",
       },
-      networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork),
+      networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork, data.sourceObjects),
     };
   } catch (error) {
     const status = classifyReadError(error);
@@ -295,7 +310,7 @@ export async function runParity(
       mismatchCount,
       mismatches,
       networkAccessAttempted: options.allowNetwork === true
-        && (manifestUsesOss(leftManifest) || manifestUsesOss(rightManifest)),
+        && (manifestUsesOss(leftManifest, left.sourceObjects) || manifestUsesOss(rightManifest, right.sourceObjects)),
     };
   } catch (error) {
     const status = classifyReadError(error);
@@ -330,13 +345,15 @@ export async function runArchiveProviderParity(
   try {
     if (manifest.adjustmentMode !== "raw") throw new Error("BACKTEST_PROVIDER_PARITY_REQUIRES_RAW_ARCHIVE");
     if (manifest.sourceObject.feed !== "sip") throw new Error("BACKTEST_PROVIDER_PARITY_REQUIRES_SIP_ARCHIVE");
+    const sourceSymbol = query.symbol.trim().toUpperCase();
+    const providerSymbol = providerSymbolForSource(manifest.universe.symbolResolution, sourceSymbol);
     const [archive, provider] = await Promise.all([
       readDatasetBars(manifestPath, manifest, {
         allowNetwork: true,
         env: options.env,
-        requiredSymbols: [query.symbol],
+        requiredSymbols: [sourceSymbol],
       }),
-      fetchAlpacaBars(query, {
+      fetchAlpacaBars({ ...query, symbol: providerSymbol }, {
         env: options.env,
         runner: options.runner,
         maxPages: options.maxPages,
@@ -401,7 +418,9 @@ export async function runArchiveProviderParity(
       manifestFingerprint: manifestFingerprint(manifest),
       sourceObjects: archive.sourceObjects,
       archiveRange: {
-        symbol: provider.receipt.symbol,
+        requestedSymbol: sourceSymbol,
+        sourceSymbol,
+        providerSymbol: provider.receipt.symbol,
         start,
         end,
         rowCount: archiveRows.length,
@@ -442,6 +461,7 @@ export async function runBacktest(
   assertRunnableManifest(manifest);
   const symbol = (options.symbol ?? manifest.universe.symbols[0]).trim().toUpperCase();
   if (!manifest.universe.symbols.includes(symbol)) throw new Error("BACKTEST_SYMBOL_NOT_IN_UNIVERSE_" + symbol);
+  const providerSymbol = providerSymbolForSource(manifest.universe.symbolResolution, symbol);
   const initialPolicyWarnings = validateCorporateActionPolicy(manifest, [], { requireEvidence: true });
   const data = await readDatasetBars(manifestPath, manifest, {
     allowNetwork: options.allowNetwork,
@@ -455,7 +475,11 @@ export async function runBacktest(
     ...validateCorporateActionPolicy(manifest, actionData.actions, { requireEvidence: true }),
   ];
   const initialCash = options.initialCash ?? 100_000;
-  const simulation = simulateLongOnlyCashEquity(data.bars, manifest, actionData.actions, { symbol, initialCash });
+  const simulation = simulateLongOnlyCashEquity(data.bars, manifest, actionData.actions, {
+    symbol,
+    providerSymbol,
+    initialCash,
+  });
   const runFingerprint = digestJson({
     manifestFingerprint: manifestFingerprint(manifest),
     dataFingerprint: data.dataFingerprint,
@@ -465,9 +489,12 @@ export async function runBacktest(
     initialCash,
   });
   return {
-    ...baseArtifact("backtest-run", "PASS", sourceEvidence(manifest), warnings),
+    ...baseArtifact("backtest-run", "PASS", sourceEvidence(manifest, data.sourceObjects), warnings),
     runId: runFingerprint.slice(0, 24),
     manifestPath,
+    requestedSymbol: symbol,
+    sourceSymbol: symbol,
+    providerSymbol,
     manifestFingerprint: manifestFingerprint(manifest),
     datasetId: manifest.datasetId,
     sourceObjects: data.sourceObjects,
@@ -475,13 +502,13 @@ export async function runBacktest(
     dataFingerprint: data.dataFingerprint,
     actionFingerprint: actionData.dataFingerprint,
     actionSourceUri: actionData.sourceUri,
-    bars: barSummary(filterBars(data.bars, { symbol })),
+    bars: barSummary(filterBars(data.bars, { symbol: providerSymbol })),
     simulation,
     session: {
       declared: manifest.session,
       verification: "DECLARED_UNVERIFIED",
     },
-    networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork),
+    networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork, data.sourceObjects),
   };
 }
 
@@ -496,7 +523,18 @@ export async function writeFetchedActions(
   outputPath: string,
   result: AlpacaFetchResult,
 ): Promise<{ path: string; sha256: string; receipt: string }> {
-  const payload = { schemaVersion: 1, provider: "alpaca", actions: result.actions };
+  const payload = {
+    schemaVersion: 1,
+    provider: "alpaca",
+    coverage: {
+      symbols: result.receipt.symbols,
+      since: result.receipt.since,
+      until: result.receipt.until,
+      pages: result.receipt.pages,
+      queryFingerprint: result.receipt.commandFingerprint,
+    },
+    actions: result.actions,
+  };
   await atomicWriteJson(outputPath, payload, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
   const bytes = await readFile(outputPath);
   return {

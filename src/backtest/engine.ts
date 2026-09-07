@@ -8,6 +8,7 @@ const SHARE_SCALE = 1_000_000n;
 export interface ReferenceSimulationOptions {
   readonly initialCash: number;
   readonly symbol: string;
+  readonly providerSymbol?: string;
 }
 
 export interface SimulationTrade {
@@ -21,6 +22,8 @@ export interface SimulationTrade {
 export interface SimulationResult {
   readonly strategy: "long-only-cash-equity-v1";
   readonly symbol: string;
+  readonly sourceSymbol: string;
+  readonly providerSymbol: string;
   readonly initialCash: number;
   readonly finalCash: number;
   readonly totalReturnPct: number;
@@ -85,8 +88,9 @@ export function simulateLongOnlyCashEquity(
   options: ReferenceSimulationOptions,
 ): SimulationResult {
   const symbol = options.symbol.trim().toUpperCase();
-  const selected = bars.filter((bar) => bar.symbol === symbol);
-  if (selected.length === 0) throw new Error("BACKTEST_SYMBOL_HAS_NO_BARS_" + symbol);
+  const providerSymbol = (options.providerSymbol ?? symbol).trim().toUpperCase();
+  const selected = bars.filter((bar) => bar.symbol === providerSymbol);
+  if (selected.length === 0) throw new Error("BACKTEST_SYMBOL_HAS_NO_BARS_" + providerSymbol);
   if (!manifest.universe.symbols.includes(symbol)) throw new Error("BACKTEST_SYMBOL_NOT_IN_UNIVERSE_" + symbol);
   const initialCashUnits = toUnits(options.initialCash, "INITIAL_CASH");
   if (initialCashUnits <= 0n) throw new Error("BACKTEST_INITIAL_CASH_MUST_BE_POSITIVE");
@@ -111,7 +115,7 @@ export function simulateLongOnlyCashEquity(
     const bar = selected[index];
     const actionDate = bar.timestamp.slice(0, 10);
     if (applyActions && !appliedActionDates.has(actionDate)) {
-      const adjusted = processActions(actions, bar.timestamp.slice(0, 10), symbol, sharesMicro, cash);
+      const adjusted = processActions(actions, bar.timestamp.slice(0, 10), providerSymbol, sharesMicro, cash);
       sharesMicro = adjusted.sharesMicro;
       cash = adjusted.cash;
       appliedActionDates.add(actionDate);
@@ -154,6 +158,8 @@ export function simulateLongOnlyCashEquity(
   return {
     strategy: "long-only-cash-equity-v1",
     symbol,
+    sourceSymbol: symbol,
+    providerSymbol,
     initialCash,
     finalCash,
     totalReturnPct: Number(totalReturnPct.toFixed(6)),

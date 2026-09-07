@@ -1,7 +1,8 @@
-import { readExactObject } from "./objectStore.ts";
+import { parseExactOssUri, readExactObject } from "./objectStore.ts";
 import { parseBarsAsync, mergeParsedBars, type ParsedBars } from "./bars.ts";
 import { compareCodeUnits } from "./fingerprints.ts";
 import type { BacktestManifest, SourceObject } from "./manifest.ts";
+import { excludedSourceSymbols, providerSymbolForSource } from "./symbolResolution.ts";
 import { z } from "zod";
 import { gunzipSync } from "node:zlib";
 
@@ -23,6 +24,8 @@ const catalogShardSchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   symbols: z.array(symbol).min(1),
+  sourceSymbol: symbol.optional(),
+  providerSymbol: symbol.optional(),
 });
 
 const catalogSchema = z.object({
@@ -30,6 +33,7 @@ const catalogSchema = z.object({
   datasetId: z.string().min(1),
   feed: z.literal("alpaca"),
   timeframe: z.literal("1m"),
+  adjustmentMode: z.enum(["raw", "split-adjusted", "total-return-adjusted", "unknown"]).optional(),
   shards: z.array(catalogShardSchema).min(1),
 });
 
@@ -47,6 +51,21 @@ function assertExactUri(uri: string): void {
   }
 }
 
+function assertSupportedShardUri(uri: string): void {
+  const protocol = uri.slice(0, uri.indexOf(":")).toLowerCase();
+  if (protocol === "oss") {
+    try {
+      parseExactOssUri(uri);
+    } catch {
+      throw new Error("BACKTEST_CATALOG_SHARD_URI_INVALID");
+    }
+    return;
+  }
+  if (protocol !== "file" || uri.length <= "file:".length) {
+    throw new Error("BACKTEST_CATALOG_SHARD_URI_PROTOCOL_UNSUPPORTED");
+  }
+}
+
 function parseCatalog(bytes: Buffer, compression: "none" | "gzip"): MinuteBarsCatalog {
   let value: unknown;
   try {
@@ -59,6 +78,7 @@ function parseCatalog(bytes: Buffer, compression: "none" | "gzip"): MinuteBarsCa
   if (!result.success) throw new Error("BACKTEST_CATALOG_SCHEMA_INVALID");
   for (const shard of result.data.shards) {
     assertExactUri(shard.uri);
+    assertSupportedShardUri(shard.uri);
     if (shard.endDate < shard.startDate) throw new Error("BACKTEST_CATALOG_SHARD_DATE_RANGE_INVALID");
     if (shard.format === "parquet" && (
       !shard.schema.startsWith("market-data-bars-1m-")
@@ -69,6 +89,32 @@ function parseCatalog(bytes: Buffer, compression: "none" | "gzip"): MinuteBarsCa
     }
   }
   return result.data;
+}
+
+/**
+ * Inspect a catalog's declared objects without reading any bar shard. A
+ * local catalog is verified by exact bytes/hash and the same catalog/manifest
+ * checks used by the reader; an OSS catalog itself is already sufficient to
+ * establish that the dataset needs OSS, so it is not fetched during preflight.
+ */
+export async function inspectCatalogSourceObjects(
+  manifestPath: string,
+  manifest: BacktestManifest,
+): Promise<readonly string[]> {
+  const source = manifest.sourceObject;
+  if (source.kind !== "catalog" || !source.uri.toLowerCase().startsWith("file:")) {
+    return [source.uri];
+  }
+  let topLevel: Awaited<ReturnType<typeof readExactObject>>;
+  try {
+    topLevel = await readExactObject(manifestPath, source, { allowNetwork: false });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("BACKTEST_")) throw error;
+    throw new Error("BACKTEST_CATALOG_READ_FAILED");
+  }
+  const catalog = parseCatalog(topLevel.bytes, source.compression);
+  assertCatalogMatchesManifest(catalog, manifest);
+  return [source.uri, ...catalog.shards.map((shard) => shard.uri)];
 }
 
 function sourceForShard(shard: CatalogShard): SourceObject {
@@ -99,11 +145,32 @@ function assertCatalogMatchesManifest(catalog: MinuteBarsCatalog, manifest: Back
     throw new Error("BACKTEST_CATALOG_MANIFEST_MISMATCH");
   }
   const universe = new Set(manifest.universe.symbols);
+  const resolution = manifest.universe.symbolResolution;
+  const excluded = new Set(excludedSourceSymbols(resolution));
   for (const shard of catalog.shards) {
     if (shard.startDate < manifest.startDate || shard.endDate > manifest.endDate) {
       throw new Error("BACKTEST_CATALOG_SHARD_OUTSIDE_MANIFEST_RANGE");
     }
-    if (shard.symbols.some((symbol) => !universe.has(symbol))) {
+    const hasSourceRelation = shard.sourceSymbol !== undefined || shard.providerSymbol !== undefined;
+    if (hasSourceRelation) {
+      if (!shard.sourceSymbol || !shard.providerSymbol || shard.symbols.length !== 1 || shard.symbols[0] !== shard.providerSymbol) {
+        throw new Error("BACKTEST_CATALOG_SHARD_SYMBOL_RESOLUTION_INVALID");
+      }
+      if (!universe.has(shard.sourceSymbol) || excluded.has(shard.sourceSymbol)) {
+        throw new Error("BACKTEST_CATALOG_SHARD_SOURCE_SYMBOL_INVALID");
+      }
+      let expectedProvider: string;
+      try {
+        expectedProvider = providerSymbolForSource(resolution, shard.sourceSymbol);
+      } catch {
+        throw new Error("BACKTEST_CATALOG_SHARD_SOURCE_SYMBOL_INVALID");
+      }
+      if (expectedProvider !== shard.providerSymbol) {
+        throw new Error("BACKTEST_CATALOG_SHARD_PROVIDER_SYMBOL_MISMATCH");
+      }
+    } else if (resolution) {
+      throw new Error("BACKTEST_CATALOG_SHARD_SYMBOL_RESOLUTION_MISSING");
+    } else if (shard.symbols.some((symbol) => !universe.has(symbol))) {
       throw new Error("BACKTEST_CATALOG_SHARD_SYMBOL_OUTSIDE_UNIVERSE");
     }
   }
@@ -135,10 +202,17 @@ export async function readDatasetBars(
   const startDate = options.startDate ?? manifest.startDate;
   const endDate = options.endDate ?? manifest.endDate;
   if (startDate > endDate) throw new Error("BACKTEST_CATALOG_DATE_RANGE_INVALID");
+  const requiredProviderSymbols = requiredSymbols?.map((sourceSymbol) => {
+    try {
+      return providerSymbolForSource(manifest.universe.symbolResolution, sourceSymbol);
+    } catch (error) {
+      throw error;
+    }
+  });
   const orderedShards = catalog.shards.slice().sort((left, right) => compareCodeUnits(left.uri, right.uri));
   const selectedShards = orderedShards.filter((shard) => {
     const dateOverlaps = shard.endDate >= startDate && shard.startDate <= endDate;
-    const symbolOverlaps = !requiredSymbols || requiredSymbols.some((symbol) => shard.symbols.includes(symbol));
+    const symbolOverlaps = !requiredProviderSymbols || requiredProviderSymbols.some((symbol) => shard.symbols.includes(symbol));
     return dateOverlaps && symbolOverlaps;
   });
   if (selectedShards.length === 0) throw new Error("BACKTEST_CATALOG_NO_MATCHING_SHARDS");

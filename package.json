@@ -96,7 +96,10 @@
     "backtest:audit": "npm run backtest -- audit",
     "backtest:parity": "npm run backtest -- parity",
     "backtest:run": "npm run backtest -- run",
-    "backtest:fetch-actions": "npm run backtest -- fetch-actions"
+    "backtest:fetch-actions": "npm run backtest -- fetch-actions",
+    "backtest:fetch-yfinance-actions": "npm run backtest -- fetch-yfinance-actions",
+    "backtest:discover-universe": "npm run backtest -- discover-universe",
+    "backtest:materialize-universe-catalog": "npm run backtest -- materialize-universe-catalog"
   },
   "dependencies": {
     "ali-oss": "6.23.0",

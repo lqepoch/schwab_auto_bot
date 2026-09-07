@@ -13,8 +13,9 @@ artifact；不会导入 `src/automation/`，不会调用 Schwab，也没有 brok
   `hyparquet-compressors@1.1.1`；它们在 Node 中解析 archive 内的压缩列，运行时
   不需要另起 Python/Arrow 服务。
 - OSS 适配器采用官方文档示例路线的 `ali-oss@6.23.0`，以
-  `authorizationV4: true` 创建客户端。适配器只暴露精确对象 `HEAD`/`GET`；
-  不提供 `LIST`、`PUT`、`DELETE`。
+  `authorizationV4: true` 创建客户端。正常 manifest/catalog reader 只暴露精确
+  对象 `HEAD`/`GET`；独立的 current-universe discovery adapter 才能在双确认后对
+  每个显式 `symbol/year/` 前缀发起 `listV2(delimiter="/")`，不提供 `PUT`/`DELETE`。
 - Alpaca 企业行动通过已安装的 Alpaca CLI 的
   `alpaca data corporate-actions` 读取，而不是绕过 CLI 的 HTTP 请求。CLI
   参数和响应以本机 `--help`/`--schema` 为准，结果必须保存为带查询指纹的
@@ -45,11 +46,15 @@ fixture/demo 代理，不能表示完整指数成分；本模块不会自行抓�
 调用方提供并哈希固定快照后才可使用。
 
 成分股代码与 provider 的交易代码是两个不同的身份层，不能因字符串看起来相似就
-自动替换或去掉 `.`、`-`。catalog 的 `universe.symbols` 必须是实际 bars 中的
-provider symbol；若上游快照使用了其他代码，调用方必须先生成一个独立、哈希固定的
-symbol-resolution receipt（原代码、provider 代码、理由、查询证据）。无法交易的
-escrow/CVR/现金/期货等持仓也必须有单独 exclusion receipt，不能悄悄从
-`current-constituents` 删除。
+自动替换或去掉 `.`、`-`。catalog shard 的 `symbols` 使用实际 bars 中的 provider
+symbol，但 `universe.symbols` 始终保留冻结快照的 source symbol；shard 额外保存
+`sourceSymbol`/`providerSymbol`。若上游快照使用了其他代码，调用方必须先生成一个
+独立、哈希固定的 symbol-resolution receipt。receipt 只需要列出显式 override 或
+exclusion，未列出的 source symbol 安全地按同名 provider symbol 处理；未知 source、
+重复 target、映射与 exclusion 冲突都会 fail-closed。无法交易的 escrow/CVR/现金/期货
+等持仓也必须有同一绑定 receipt 的 exclusion（source、reason、evidence URI/hash），
+不能悄悄从 `current-constituents` 删除。运行 `--symbol BFB` 时，输出同时报告
+requested/source=`BFB` 与 provider=`BF.B`，企业行动 coverage 也按 provider symbol 验证。
 
 S&P 500、Nasdaq-100 和 Russell 3000 若要分别回测，快照还必须保留每个 symbol 的
 index-membership 标签；只保存三个来源的去重并集不能在事后可靠地恢复各指数成员。若
@@ -69,6 +74,13 @@ index-membership 标签；只保存三个来源的去重并集不能在事后可
   fail-closed；不会把没有行动证据的 raw 数据当成 total-return 结果。
 - `adjustmentMode: "unknown"`、未知行动类型、重复行动和不匹配哈希都会
   fail-closed。
+
+archive manifest 的 `adjustment` 声明会原样传播到 discovery、catalog 和最终
+backtest manifest：`split-adjusted`/`total-return-adjusted` 的分钟 bars 在本模块中被
+信任为已调整，企业行动 receipt（如果提供）只保留为 evidence，`appliesToBars=true`
+且不会再次调整；`raw` bars 则必须在 materialize 前提供至少一个覆盖完整
+symbol/year 范围的行动 receipt。不同 shard 的声明混合或声明为 `unknown` 都不能
+生成可运行 manifest。
 
 Alpaca 的 `forward_split`/`reverse_split`/`cash_dividend` 会明确归一化为
  内部 `split`/`dividend`；其他类型拒绝，不会猜测。当前实现不把 yfinance
@@ -131,7 +143,7 @@ key 留在专用 market-data `.env`；两者都不会被提交，也不会写入
 `OSS_ENDPOINT_STYLE=bucket` 或现有的 `MARKET_DATA_S3_ENDPOINT_STYLE=bucket`。
 reader 会使用 OSS CNAME 模式，避免 SDK 再次拼接 bucket；未设置时也会按 hostname
 自动识别。服务 endpoint 则使用 `service`。这只影响传输地址，不能改变 manifest
-中的 bucket/key 身份，也不会给运行时增加 LIST/PUT/DELETE 权限。
+中的 bucket/key 身份，也不会给正常回测运行时增加 LIST/PUT/DELETE 权限。
 
 ```bash
 npm run backtest:preflight -- \
@@ -147,6 +159,12 @@ npm run backtest:run -- \
   --backtest-env-file /path/to/root.env,/path/to/oss-credentials.env --allow-network \
   --output-dir .artifacts/backtest/2016
 ```
+
+对本地 `catalog` manifest，`preflight` 只读取并校验 catalog 自身的精确文件和哈希，
+不会读取任何 bars 或发出网络请求；它会扫描声明的 shard URI。只要其中存在
+`oss://` shard，就把 `oss.required` 标记为 `true`，缺少 OSS 配置时返回 `BLOCKED`，
+但 `networkAccessAttempted` 仍为 `false`。catalog 无法安全读取时直接 fail-closed，
+不会把它误报成 local-only。
 
 使用 archive 原始 manifest 时，先执行一次精确 import。该操作只会对所给
 `manifest.json` 发起 HEAD/GET，计算其 hash，并由 manifest 的逻辑 key 推导一次
@@ -173,6 +191,81 @@ catalog reader 对 `run --symbol` 只读取该 symbol/date 相交的 shard，适
 成本和 corporate-actions receipt。`audit`/未指定 symbol 的 `parity` 会读取所有声明
 shard，artifact 会明确给出相应 warning。
 
+### 冻结当前成分与生成 catalog
+
+当前成分不是 S&P/Nasdaq/Russell 的自动全集。调用方必须先提供 OSS 中已经存在的、
+带 SHA-256 的 current snapshot manifest；discovery 只读取该 snapshot 和精确 archive
+manifest，并把每一个 `symbol/year` 的 prefix、delimiter、分页和 revision 结果写入
+冻结 JSON。`--allow-network` 与 `--allow-list-discovery` 缺一不可；缺失 revision、多个
+revision、alias 或意外对象都会得到 `UNVERIFIED`，不会选择 latest/current 或任一 revision。
+
+```bash
+npm run backtest:discover-universe -- \
+  --universe-manifest-uri oss://BUCKET/EXACT/SNAPSHOT-MANIFEST.json \
+  --archive-root-uri oss://BUCKET/EXACT/ARCHIVE-ROOT \
+  --start-year 2016 --end-year 2025 \
+  --allow-network --allow-list-discovery \
+  --backtest-env-file /path/to/oss.env \
+  --discovery-out /path/to/frozen-universe-discovery.json \
+  --output-dir .artifacts/backtest/frozen-universe-discovery
+```
+
+若 snapshot 的 source symbol 与 archive/provider symbol 不同，另提供 operator 生成的
+receipt 及其文件 SHA-256；不会自动尝试 `BFB`/`BRK.B`/`BRK-B` 等别名。receipt 可以
+只列显式差异，其他 source symbol 保持同名 identity：
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "backtest-symbol-resolution-receipt",
+  "status": "PASS",
+  "evidenceClass": "LOCAL_HASH_FIXED_SYMBOL_RESOLUTION",
+  "readOnly": true,
+  "brokerWriteAttempted": false,
+  "snapshot": { "id": "SNAPSHOT_ID_SHA256", "sha256": "SNAPSHOT_BYTES_SHA256" },
+  "mappings": [{ "sourceSymbol": "BFB", "providerSymbol": "BF.B" }],
+  "exclusions": [],
+  "warnings": []
+}
+```
+
+发现命令的可选参数是 `--symbol-resolution-receipt FILE
+--symbol-resolution-receipt-sha256 SHA256`。receipt 必须绑定本次 snapshot 的精确
+`id` 与 bytes hash；exclusion 还必须给出 evidence URI/hash。缺失映射不会提升归档
+证据：若同名 provider shard 不存在，该 source/year 仍为 `UNVERIFIED`。
+
+正常 `audit`/`run` 不会 LIST。只有人工审查 discovery JSON 为 `PASS` 后，才可离线
+materialize；它要求每个 action receipt 的文件 SHA-256 由命令行显式提供，并验证
+receipt 的 symbols、since/until、`commandFingerprint`、`dataFingerprint` 和 action 文件
+hash，并验证这些 receipt 覆盖 discovery 的每个
+symbol 与每个年份。可以把多个不重叠批次用逗号传入；缺 coverage、command/data fingerprint
+或重复/越界行动会
+fail-closed，不会生成 catalog 或 manifest：
+
+```bash
+npm run backtest:materialize-universe-catalog -- \
+  --discovery /path/to/frozen-universe-discovery.json \
+  --actions-receipt /path/to/batch-001/alpaca-actions-receipt.json,/path/to/batch-002/alpaca-actions-receipt.json \
+  --actions-receipt-sha256 RECEIPT_SHA256_1,RECEIPT_SHA256_2 \
+  --catalog-out /path/to/frozen-universe-catalog.json \
+  --actions-out /path/to/frozen-universe-actions.json \
+  --manifest-out /path/to/frozen-universe-manifest.json \
+  --output-dir .artifacts/backtest/frozen-universe-materialize
+```
+
+不指定三个 `*-out` 参数时，CLI 默认写入 output directory 下的
+`frozen-universe-catalog.json`、`frozen-universe-actions.json` 和
+`frozen-universe-manifest.json`；包含 `current` 或 `latest` 路径段的目标会在任何
+写入前拒绝。action receipt 的 query symbols 是 provider symbol，但生成的 bundle
+同时保留 source `symbols`、`providerSymbols` 和显式 `excludedSymbols`。
+
+2599 个 symbol 不应塞进一个未经审查的超长 provider 命令。用 `--symbols-file` 每行
+一个、不改写代码的文件，按人工分批分别运行 `fetch-actions`，保留每批 receipt；再把
+所有 receipt/hash 传给上面的 materialize。`--symbols-file` 会拒绝小写、重复和别名
+代码；不要用脚本自动把 `BRK.B` 替换为 `BRK-B`。
+
+### 企业行动 receipt
+
 用已有 Alpaca market-data 凭证获取企业行动时，必须显式允许网络；CLI 会
 使用 `ALPACA_API_KEY`/`ALPACA_SECRET_KEY`（也兼容 `APCA_*`、
 `ALPACA_MARKET_DATA_*` 和现有 `ALPACA_PAPER_*` 环境变量），只执行只读
@@ -184,15 +277,52 @@ corporate-actions 查询。当多组变量同时存在时，显式 `ALPACA_*`/`A
 npm run backtest:fetch-actions -- \
   --symbols AAPL,MSFT --since 2016-01-01 --until 2016-12-31 \
   --backtest-env-file /home/ecs-user/github/stock_trading_bot/.env \
-  --allow-network --max-pages 10 \
+  --allow-network --max-pages 10000 \
   --actions-out /path/to/2016-alpaca-actions.json \
   --output-dir .artifacts/backtest/2016-actions
 ```
 
-该命令保存 action 文件 SHA-256 和 CLI 查询 receipt；不能把 fixture 或本地静态
+该命令保存 action 文件 SHA-256、coverage 和 CLI 查询 receipt；不能把 fixture 或本地静态
 检查升级为真实 provider 证据。实时获取到的 provider corporate-actions 只证明
 当前响应，不是 2016 当时的 point-in-time corporate-action 证据；必须把 receipt
 固定到 manifest 后再用于可复现 run。
+
+同一 symbol、ex-date、类型和经济值的多条 provider 行只计为一个经济事件；action
+中保留 `providerIds` 与 `duplicateCount`；receipt 还记录原始分页行数
+`rawProviderRowCount`、去重后的 `actionCount`、折叠行数 `duplicateCount` 和
+`providerDuplicateIds`，这些计数必须满足 `rawProviderRowCount = actionCount + duplicateCount`。
+同日同类型但金额或拆股因子不同的事件不会被这个规则合并，reference engine 会按
+确定性排序逐一应用。相同 provider ID 的重复或冲突会 fail-closed。
+
+### yfinance 行动补齐（仅行动，不是价格回退）
+
+当可信 OSS archive 声明为 `raw` 且没有可用的 OSS/Alpaca 行动 evidence 时，才可显式
+运行 `fetch-yfinance-actions`。它只读取 yfinance 的 `Ticker(...).actions`，输出
+split/dividend action 文件和带 hash 的只读 receipt；OSS 仍是唯一的 1 分钟 bars 来源，
+不会调用 yfinance 的价格下载接口，也不会在 `run`/`audit` 时隐式联网。yfinance 官方
+对 intraday 历史有约 60 天限制，因此它不能作为 2016 分钟价格 fallback。
+
+```bash
+npm run backtest:fetch-yfinance-actions -- \
+  --symbols-file /path/to/provider-symbols.txt \
+  --since 2016-01-01 --until 2025-12-31 \
+  --python /path/to/venv/bin/python \
+  --batch-size 50 --concurrency 2 --allow-network \
+  --actions-out /path/to/frozen-yfinance-actions.json \
+  --output-dir .artifacts/backtest/frozen-yfinance-actions
+```
+
+命令要求 Python 解释器中已安装 `yfinance`；缺依赖、子进程失败、任一 symbol
+请求失败或响应缺失都会 fail-closed。空 action 表只有在该 symbol 明确返回成功时才
+表示“已查询且无行动”。每批 receipt 记录成功 symbol、原始行数、query fingerprint
+和 archive/provider symbol 关系；默认不猜测 ticker dialect。若 archive 使用 `BF.B`
+而 yfinance 需要 `BF-B`，必须显式提供 JSON，例如
+`{"BF.B":"BF-B"}`：action 的 `symbol` 仍保存为 `BF.B`，receipt 同时保存
+`querySymbols` 映射，不得静默把 Yahoo 查询代码当成 archive symbol。
+
+把 yfinance receipt 的路径和 SHA 传给 materialize，即可作为 raw archive 的显式补充；
+adjusted archive 不需要 receipt，若传入则只作 evidence。materialize 仍会校验 receipt
+覆盖 discovery 的 provider symbols 和每个年份，且不会产生运行时网络 fallback。
 
 archive 已声明 `raw`、`feed=sip` 时，还可用同一 Alpaca CLI 做原始分钟线抽样或全年
 比较。比较只要求 archive 已声明的 SIP 行逐行出现在 provider 响应中；provider 返回
