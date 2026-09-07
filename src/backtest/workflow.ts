@@ -300,6 +300,7 @@ export async function runBacktest(
   assertRunnableManifest(manifest);
   const symbol = (options.symbol ?? manifest.universe.symbols[0]).trim().toUpperCase();
   if (!manifest.universe.symbols.includes(symbol)) throw new Error("BACKTEST_SYMBOL_NOT_IN_UNIVERSE_" + symbol);
+  const initialPolicyWarnings = validateCorporateActionPolicy(manifest, [], { requireEvidence: true });
   const data = await readDatasetBars(manifestPath, manifest, {
     allowNetwork: options.allowNetwork,
     env: options.env,
@@ -308,6 +309,7 @@ export async function runBacktest(
   const actionData = await loadCorporateActions(manifestPath, manifest, options);
   const warnings = [
     "SESSION_DECLARATION_NOT_CALENDAR_VERIFIED",
+    ...initialPolicyWarnings,
     ...validateCorporateActionPolicy(manifest, actionData.actions, { requireEvidence: true }),
   ];
   const initialCash = options.initialCash ?? 100_000;

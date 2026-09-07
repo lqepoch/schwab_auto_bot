@@ -191,18 +191,18 @@ test("Alpaca CLI adapter normalizes official action types and paginates", async 
           stdout: JSON.stringify(page === 1
             ? {
               corporate_actions: {
-                split1: {
+                forward_split: [{
                   id: "split1", symbol: "AAPL", ca_type: "forward_split", ex_date: "2016-06-01",
                   old_rate: 1, new_rate: 2,
-                },
+                }],
               },
               next_page_token: "page-2",
             }
             : {
               corporate_actions: {
-                dividend1: {
+                cash_dividend: [{
                   id: "dividend1", symbol: "AAPL", ca_type: "cash_dividend", ex_date: "2016-09-01", cash: 1,
-                },
+                }],
               },
             }),
         };

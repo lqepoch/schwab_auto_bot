@@ -111,7 +111,7 @@ function parseCliPage(stdout: string): { rows: readonly unknown[]; nextPageToken
   const rows = Array.isArray(rawActions)
     ? rawActions
     : rawActions && typeof rawActions === "object"
-      ? Object.values(rawActions as Record<string, unknown>)
+      ? Object.values(rawActions as Record<string, unknown>).flatMap((item) => Array.isArray(item) ? item : [item])
       : undefined;
   if (!rows) throw new AlpacaProviderError("ALPACA_CLI_CORPORATE_ACTIONS_MISSING");
   const next = record.next_page_token;
