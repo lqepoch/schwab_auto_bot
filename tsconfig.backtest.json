@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true
+  },
+  "include": [
+    "src/backtest/**/*.ts",
+    "src/utils/atomicJson.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
+}
