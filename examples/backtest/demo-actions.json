@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "provider": "fixture",
+  "actions": [
+    {
+      "symbol": "AAPL",
+      "exDate": "2016-01-05",
+      "type": "dividend",
+      "cash": 1,
+      "source": "fixture"
+    }
+  ]
+}

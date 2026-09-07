@@ -225,3 +225,21 @@ npm test
 ```
 
 根项目的 `npm test` 由 Node test runner 自动发现 `test/*.test.ts` 与 `test/*.test.mjs`，覆盖 SDK 传输整合、WAL 未知结果账本、`BrokerWriteCoordinator` 最终写入闸门、`OrderSnapshotCoordinator` 快照新鲜度屏障、OAuth、运行锁、活动流和执行审计日志。测试 transport、WebSocket 与时钟均为本地 fake；默认测试不连接 Schwab，也不会发出真实 broker 写入。
+
+## 只读 1 分钟历史回测
+
+`src/backtest/` 是与自动交易路径隔离的只读研究模块。它要求 manifest 锁定
+精确对象 URI、SHA-256、schema、feed、timeframe、session、adjustment mode 和
+universe fingerprint；OSS 适配器只执行 `HEAD`/`GET`，不会 LIST、PUT、DELETE，
+也不会隐式联网。大数据集使用带逐 shard 哈希和日期/symbol bounds 的 catalog，
+`backtest:run --symbol` 会先筛 shard，避免下载整个 universe。
+
+```bash
+npm run backtest:preflight -- --manifest examples/backtest/demo-manifest.json
+npm run backtest:audit -- --manifest examples/backtest/demo-manifest.json
+npm run backtest:run -- --manifest examples/backtest/demo-manifest.json --symbol AAPL --initial-cash 100
+```
+
+复权、企业行动、OSS 配置、2016 parity、Alpaca CLI receipt 及真实数据未验证
+边界见 [`docs/backtest.md`](docs/backtest.md)。该模块不改变 Schwab 实时交易
+路径，也不产生任何 broker 写入。

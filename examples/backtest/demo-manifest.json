@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "demo-2016",
+  "feed": "alpaca",
+  "timeframe": "1m",
+  "session": "regular",
+  "adjustmentMode": "raw",
+  "startDate": "2016-01-04",
+  "endDate": "2016-01-05",
+  "sourceObject": {
+    "kind": "object",
+    "uri": "file:./demo-bars.csv",
+    "sha256": "ae0058b4886dd0783953dae5fa0cc0fa9088ce859ccad7931204eb1caf63bdbf",
+    "schema": "canonical-minute-bars-v1",
+    "format": "csv",
+    "compression": "none"
+  },
+  "universe": {
+    "id": "demo-proxy-aapl",
+    "source": "repository fixture; not an index constituent snapshot",
+    "fingerprint": "fcbb30b4ee6baa4d3f82a772009dc5186286d0a0b9be62a6c897abb4e08623e6",
+    "completeness": "proxy",
+    "symbols": ["AAPL"]
+  },
+  "corporateActions": {
+    "mode": "local-file",
+    "uri": "file:./demo-actions.json",
+    "sha256": "71f5471b80c62a7b92fe4e7c61d2189512135d9c57f78facd77b7cd120d67f2d",
+    "appliesToBars": false,
+    "provider": "fixture"
+  }
+}
