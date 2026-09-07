@@ -23,7 +23,14 @@ import {
   readExactObject,
   readOssConfiguration,
 } from "../src/backtest/objectStore.ts";
-import { runArchiveProviderParity, runAudit, runBacktest, runPreflight } from "../src/backtest/workflow.ts";
+import {
+  networkAccessAttempted,
+  runArchiveProviderParity,
+  runAudit,
+  runBacktest,
+  runPreflight,
+  sourceEvidence,
+} from "../src/backtest/workflow.ts";
 import { fetchYfinanceCorporateActions, writeFetchedYfinanceActions } from "../src/backtest/yfinance.ts";
 
 const execFileAsync = promisify(execFile);
@@ -955,6 +962,27 @@ test("workflow artifacts distinguish local, blocked, and reproducible runs", asy
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("catalog workflow evidence includes actual OSS shard sources", () => {
+  const manifest = parseManifest(baseManifest({
+    sourceObject: {
+      kind: "catalog",
+      uri: "file:./frozen-universe-catalog.json",
+      sha256: HASH_A,
+      schema: "minute-bars-catalog-v1",
+      format: "json",
+      compression: "none",
+    },
+  }));
+  const sourceObjects = [
+    "file:./frozen-universe-catalog.json",
+    "oss://market-data/archive/symbol=AAPL/year=2016/revision=1/bars.parquet",
+  ];
+  assert.equal(sourceEvidence(manifest), "LOCAL_FILE_OR_FIXTURE");
+  assert.equal(sourceEvidence(manifest, sourceObjects), "OSS_READ_ONLY_PROVIDER_EVIDENCE");
+  assert.equal(networkAccessAttempted(manifest, true, sourceObjects), true);
+  assert.equal(networkAccessAttempted(manifest, false, sourceObjects), false);
 });
 
 test("source adapter exposes only read operations", async () => {

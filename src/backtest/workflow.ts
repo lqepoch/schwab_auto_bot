@@ -67,16 +67,29 @@ function isOssUri(uri: string | undefined): boolean {
   return typeof uri === "string" && uri.toLowerCase().startsWith("oss:");
 }
 
-function manifestUsesOss(manifest: BacktestManifest): boolean {
-  return sourceProtocol(manifest.sourceObject) === "oss" || isOssUri(manifest.corporateActions.uri);
+function sourceObjectsUseOss(sourceObjects: readonly string[] = []): boolean {
+  return sourceObjects.some(isOssUri);
 }
 
-function networkAccessAttempted(manifest: BacktestManifest, allowNetwork: boolean | undefined): boolean {
-  return allowNetwork === true && manifestUsesOss(manifest);
+function manifestUsesOss(manifest: BacktestManifest, sourceObjects: readonly string[] = []): boolean {
+  return sourceProtocol(manifest.sourceObject) === "oss"
+    || isOssUri(manifest.corporateActions.uri)
+    || sourceObjectsUseOss(sourceObjects);
 }
 
-function sourceEvidence(manifest: BacktestManifest): string {
-  return manifestUsesOss(manifest)
+export function networkAccessAttempted(
+  manifest: BacktestManifest,
+  allowNetwork: boolean | undefined,
+  sourceObjects: readonly string[] = [],
+): boolean {
+  return allowNetwork === true && manifestUsesOss(manifest, sourceObjects);
+}
+
+export function sourceEvidence(
+  manifest: BacktestManifest,
+  sourceObjects: readonly string[] = [],
+): "OSS_READ_ONLY_PROVIDER_EVIDENCE" | "LOCAL_FILE_OR_FIXTURE" {
+  return manifestUsesOss(manifest, sourceObjects)
     ? "OSS_READ_ONLY_PROVIDER_EVIDENCE"
     : "LOCAL_FILE_OR_FIXTURE";
 }
@@ -177,7 +190,7 @@ export async function runAudit(
       || (manifest.adjustmentMode === "raw" && manifest.corporateActions.mode === "none")
     ) ? "UNVERIFIED" : "PASS";
     return {
-      ...baseArtifact("backtest-audit", status, sourceEvidence(manifest), warnings),
+      ...baseArtifact("backtest-audit", status, sourceEvidence(manifest, data.sourceObjects), warnings),
       manifestPath,
       manifestFingerprint: manifestFingerprint(manifest),
       datasetId: manifest.datasetId,
@@ -197,7 +210,7 @@ export async function runAudit(
         declared: manifest.session,
         verification: "DECLARED_UNVERIFIED",
       },
-      networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork),
+      networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork, data.sourceObjects),
     };
   } catch (error) {
     const status = classifyReadError(error);
@@ -296,7 +309,7 @@ export async function runParity(
       mismatchCount,
       mismatches,
       networkAccessAttempted: options.allowNetwork === true
-        && (manifestUsesOss(leftManifest) || manifestUsesOss(rightManifest)),
+        && (manifestUsesOss(leftManifest, left.sourceObjects) || manifestUsesOss(rightManifest, right.sourceObjects)),
     };
   } catch (error) {
     const status = classifyReadError(error);
@@ -475,7 +488,7 @@ export async function runBacktest(
     initialCash,
   });
   return {
-    ...baseArtifact("backtest-run", "PASS", sourceEvidence(manifest), warnings),
+    ...baseArtifact("backtest-run", "PASS", sourceEvidence(manifest, data.sourceObjects), warnings),
     runId: runFingerprint.slice(0, 24),
     manifestPath,
     requestedSymbol: symbol,
@@ -494,7 +507,7 @@ export async function runBacktest(
       declared: manifest.session,
       verification: "DECLARED_UNVERIFIED",
     },
-    networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork),
+    networkAccessAttempted: networkAccessAttempted(manifest, options.allowNetwork, data.sourceObjects),
   };
 }
 
