@@ -1,12 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { normalizeMinuteBarRows, type MinuteBar } from "./bars.ts";
-import { compareCodeUnits, digestJson, sha256Hex } from "./fingerprints.ts";
-import {
-  parseCorporateActions,
-  summarizeCorporateActionDuplicates,
-  type CorporateAction,
-} from "./corporateActions.ts";
+import { digestJson, sha256Hex } from "./fingerprints.ts";
+import { parseCorporateActions, type CorporateAction } from "./corporateActions.ts";
 
 const execFileAsync = promisify(execFile);
 const ALPACA_CLI = "alpaca";
@@ -28,14 +24,7 @@ export interface AlpacaFetchReceipt {
   readonly until: string;
   readonly pages: number;
   readonly status: number;
-  /** Number of provider rows returned across all pages before economic de-duplication. */
-  readonly rawProviderRowCount: number;
-  /** Number of canonical economic events after de-duplication. */
   readonly actionCount: number;
-  /** Number of raw rows folded into an already represented economic event. */
-  readonly duplicateCount: number;
-  /** Non-canonical provider IDs retained on folded economic events. */
-  readonly providerDuplicateIds: readonly string[];
   readonly dataFingerprint: string;
   readonly retrievedAt: string;
 }
@@ -112,7 +101,7 @@ function normalizeQuery(query: AlpacaActionQuery): AlpacaActionQuery {
   validateDate(query.since, "since");
   validateDate(query.until, "until");
   if (query.until < query.since) throw new AlpacaProviderError("ALPACA_DATE_RANGE_INVALID");
-  const symbols = query.symbols.map((symbol) => symbol.trim().toUpperCase()).filter(Boolean).sort(compareCodeUnits);
+  const symbols = query.symbols.map((symbol) => symbol.trim().toUpperCase()).filter(Boolean).sort();
   if (symbols.length === 0 || symbols.some((symbol) => !/^[A-Z][A-Z0-9._-]{0,15}$/.test(symbol))) {
     throw new AlpacaProviderError("ALPACA_SYMBOLS_INVALID");
   }
@@ -321,7 +310,7 @@ export async function fetchAlpacaCorporateActions(
 ): Promise<AlpacaFetchResult> {
   const env = options.env ?? process.env;
   const normalizedQuery = normalizeQuery(query);
-  const maxPages = Math.min(100_000, Math.max(1, options.maxPages ?? 10_000));
+  const maxPages = Math.min(10, Math.max(1, options.maxPages ?? 10));
   const runner = options.runner ?? defaultRunner;
   const childEnv = cliEnvironment(env);
   const rows: CliCorporateActionRow[] = [];
@@ -343,7 +332,6 @@ export async function fetchAlpacaCorporateActions(
     if (!pageToken) break;
   }
   const actions = normalizeProviderRows(rows);
-  const duplicateSummary = summarizeCorporateActionDuplicates(actions);
   const fingerprintArgs = cliArgs(normalizedQuery).filter((value) => value !== "--quiet");
   const receipt: AlpacaFetchReceipt = {
     provider: "alpaca",
@@ -356,10 +344,7 @@ export async function fetchAlpacaCorporateActions(
     until: normalizedQuery.until,
     pages,
     status: 0,
-    rawProviderRowCount: rows.length,
     actionCount: actions.length,
-    duplicateCount: duplicateSummary.duplicateCount,
-    providerDuplicateIds: duplicateSummary.providerDuplicateIds,
     dataFingerprint: digestJson(actions),
     retrievedAt: new Date().toISOString(),
   };

@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { atomicWriteJson } from "../utils/atomicJson.ts";
 import { importArchiveBacktestManifest } from "./archive.ts";
-import { compareCodeUnits, isSha256, sha256Hex } from "./fingerprints.ts";
+import { sha256Hex } from "./fingerprints.ts";
 import { manifestFingerprint } from "./manifest.ts";
 import {
   fetchActions,
@@ -16,16 +16,6 @@ import {
   writeArtifact,
   writeFetchedActions,
 } from "./workflow.ts";
-import {
-  discoverCurrentUniverse,
-  parseCurrentUniverseDiscovery,
-} from "./universe.ts";
-import {
-  materializeCurrentUniverseCatalog,
-  type UniverseActionsReceiptInput,
-} from "./universeActions.ts";
-import { parseSymbolResolutionReceipt, type SymbolResolutionReceiptInput } from "./symbolResolution.ts";
-import { fetchYfinanceCorporateActions, writeFetchedYfinanceActions } from "./yfinance.ts";
 
 type FlagValue = string | boolean;
 type Flags = ReadonlyMap<string, FlagValue>;
@@ -109,71 +99,12 @@ function oneOf<T extends string>(flags: Flags, name: string, allowed: readonly T
   throw new Error("BACKTEST_CLI_FLAG_VALUE_INVALID_" + name.toUpperCase().replaceAll("-", "_"));
 }
 
-async function archiveActionsInput(flags: Flags): Promise<{ uri: string; sha256: string; provider: "alpaca" | "yfinance" } | undefined> {
+async function archiveActionsInput(flags: Flags): Promise<{ uri: string; sha256: string } | undefined> {
   const file = stringFlag(flags, "actions-file");
   if (!file) return undefined;
   const absolute = resolve(file);
   const bytes = await readFile(absolute);
-  return {
-    uri: pathToFileURL(absolute).href,
-    sha256: sha256Hex(bytes),
-    provider: oneOf(flags, "actions-provider", ["alpaca", "yfinance"] as const, "alpaca"),
-  };
-}
-
-async function symbolsFileInput(flags: Flags): Promise<readonly string[] | undefined> {
-  const path = stringFlag(flags, "symbols-file");
-  if (!path) return undefined;
-  const lines = (await readFile(resolve(path), "utf8"))
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"));
-  if (lines.length === 0 || lines.some((value) => !/^[A-Z][A-Z0-9._-]{0,15}$/.test(value))) {
-    throw new Error("BACKTEST_CLI_SYMBOLS_FILE_INVALID");
-  }
-  if (new Set(lines).size !== lines.length) throw new Error("BACKTEST_CLI_SYMBOLS_FILE_DUPLICATE");
-  return lines.sort(compareCodeUnits);
-}
-
-async function symbolResolutionInput(flags: Flags): Promise<SymbolResolutionReceiptInput | undefined> {
-  const path = stringFlag(flags, "symbol-resolution-receipt");
-  const suppliedHash = stringFlag(flags, "symbol-resolution-receipt-sha256");
-  if (!path && !suppliedHash) return undefined;
-  if (!path) throw new Error("BACKTEST_CLI_FLAG_REQUIRED_SYMBOL_RESOLUTION_RECEIPT");
-  if (!suppliedHash) throw new Error("BACKTEST_CLI_FLAG_REQUIRED_SYMBOL_RESOLUTION_RECEIPT_SHA256");
-  if (!isSha256(suppliedHash)) throw new Error("BACKTEST_CLI_SYMBOL_RESOLUTION_RECEIPT_SHA256_INVALID");
-  const absolute = resolve(path);
-  const bytes = await readFile(absolute).catch(() => {
-    throw new Error("BACKTEST_CLI_SYMBOL_RESOLUTION_RECEIPT_READ_FAILED");
-  });
-  if (sha256Hex(bytes) !== suppliedHash) throw new Error("BACKTEST_CLI_SYMBOL_RESOLUTION_RECEIPT_SHA256_MISMATCH");
-  let value: unknown;
-  try {
-    value = JSON.parse(bytes.toString("utf8"));
-  } catch {
-    throw new Error("BACKTEST_CLI_SYMBOL_RESOLUTION_RECEIPT_JSON_INVALID");
-  }
-  return {
-    uri: pathToFileURL(absolute).href,
-    sha256: suppliedHash,
-    receipt: parseSymbolResolutionReceipt(value),
-  };
-}
-
-function csvFlags(flags: Flags, name: string): readonly string[] {
-  const value = stringFlag(flags, name, true) as string;
-  const values = value.split(",").map((item) => item.trim()).filter(Boolean);
-  if (values.length === 0) throw new Error("BACKTEST_CLI_FLAG_REQUIRED_" + name.toUpperCase().replaceAll("-", "_"));
-  return values;
-}
-
-function actionReceiptInputs(flags: Flags): readonly UniverseActionsReceiptInput[] {
-  const paths = csvFlags(flags, "actions-receipt");
-  const hashValue = stringFlag(flags, "actions-receipt-sha256") ?? stringFlag(flags, "actions-sha256");
-  if (!hashValue) throw new Error("BACKTEST_CLI_FLAG_REQUIRED_ACTIONS_RECEIPT_SHA256");
-  const hashes = hashValue.split(",").map((item) => item.trim()).filter(Boolean);
-  if (paths.length !== hashes.length) throw new Error("BACKTEST_CLI_ACTION_RECEIPT_HASH_COUNT_MISMATCH");
-  return paths.map((path, index) => ({ path, sha256: hashes[index] }));
+  return { uri: pathToFileURL(absolute).href, sha256: sha256Hex(bytes) };
 }
 
 function loadEnvironment(flags: Flags): void {
@@ -200,27 +131,14 @@ function printHelp(): void {
     "  parity --left FILE --right FILE [--allow-network] [--output-dir DIR]",
     "  run --manifest FILE [--symbol AAPL] [--initial-cash 100000] [--allow-network] [--backtest-env-file FILE[,FILE...]]",
     "  import-archive --archive-manifest-uri oss://BUCKET/EXACT-MANIFEST --manifest-out FILE",
-    "                 --session regular --feed sip [--actions-file FILE --actions-provider alpaca|yfinance] --allow-network [--backtest-env-file FILE[,FILE...]]",
+    "                 --session regular --feed sip [--actions-file FILE] --allow-network [--backtest-env-file FILE[,FILE...]]",
     "  provider-parity --manifest FILE --symbol AAPL --start 2016-01-04T14:30:00Z",
     "                  --end 2016-01-04T14:35:00Z --allow-network [--max-pages 10] [--backtest-env-file FILE[,FILE...]]",
     "  fetch-actions --symbols AAPL,MSFT --since 2016-01-01 --until 2016-12-31",
-    "               [--symbols-file FILE] --allow-network [--max-pages 10000]",
-    "               [--backtest-env-file FILE[,FILE...]] [--output-dir DIR]",
-    "  fetch-yfinance-actions --symbols AAPL,MSFT --since 2016-01-01 --until 2016-12-31",
-    "               [--symbols-file FILE] [--query-symbol-map FILE] [--python FILE]",
-    "               [--batch-size 50] [--concurrency 2] --allow-network",
-    "               [--backtest-env-file FILE[,FILE...]] [--output-dir DIR]",
-    "  discover-universe --universe-manifest-uri oss://BUCKET/EXACT-MANIFEST",
-    "                  --archive-root-uri oss://BUCKET/EXACT-ARCHIVE-ROOT",
-    "                  --start-year 2016 --end-year 2025 --allow-network --allow-list-discovery",
-    "                  [--symbol-resolution-receipt FILE --symbol-resolution-receipt-sha256 SHA]",
-    "                  [--backtest-env-file FILE[,FILE...]] [--output-dir DIR]",
-    "  materialize-universe-catalog --discovery FILE --actions-receipt FILE[,FILE...]",
-    "                  --actions-receipt-sha256 SHA[,SHA...] [--catalog-out FILE]",
-    "                  [--actions-out FILE] [--manifest-out FILE] [--output-dir DIR]",
+    "               --allow-network [--backtest-env-file FILE[,FILE...]] [--output-dir DIR]",
     "",
     "Network is disabled unless --allow-network is explicitly present.",
-    "Normal backtest reads are exact-object HEAD/GET only; LIST requires both discovery confirmations.",
+    "OSS access is exact-object HEAD/GET only; no LIST, PUT, DELETE, latest, or glob.",
   ].join("\n") + "\n");
 }
 
@@ -312,18 +230,14 @@ async function runCommand(command: string, flags: Flags): Promise<unknown> {
   }
   if (command === "fetch-actions") {
     if (!allowNetwork) throw new Error("ALPACA_NETWORK_REQUIRES_ALLOW_NETWORK");
-    const fileSymbols = await symbolsFileInput(flags);
-    const inlineSymbols = stringFlag(flags, "symbols")?.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean);
-    if (fileSymbols && inlineSymbols) throw new Error("BACKTEST_CLI_SYMBOLS_AND_SYMBOLS_FILE_MUTUALLY_EXCLUSIVE");
-    const symbols = fileSymbols ?? inlineSymbols ?? [];
-    if (symbols.length === 0) throw new Error("BACKTEST_CLI_FLAG_REQUIRED_SYMBOLS_OR_SYMBOLS_FILE");
+    const symbols = (stringFlag(flags, "symbols", true) as string).split(",").map((value) => value.trim().toUpperCase()).filter(Boolean);
     const since = stringFlag(flags, "since", true) as string;
     const until = stringFlag(flags, "until", true) as string;
     const result = await fetchActions({
       symbols,
       since,
       until,
-    }, { maxPages: numberFlag(flags, "max-pages", 10_000) });
+    }, { maxPages: numberFlag(flags, "max-pages", 10) });
     const actionsPath = resolve(stringFlag(flags, "actions-out") ?? (outputDir + "/alpaca-actions.json"));
     await mkdir(dirname(actionsPath), { recursive: true, mode: 0o750 });
     const stored = await writeFetchedActions(actionsPath, result);
@@ -337,129 +251,10 @@ async function runCommand(command: string, flags: Flags): Promise<unknown> {
       actionsPath: stored.path,
       actionsSha256: stored.sha256,
       receipt: result.receipt,
-      coverage: {
-        symbols: result.receipt.symbols,
-        since: result.receipt.since,
-        until: result.receipt.until,
-      },
       warnings: ["PROVIDER_ACTIONS_MUST_BE_REVIEWED_BEFORE_MANIFEST_USE"],
     };
     const receiptPath = await writeArtifact(outputDir, "alpaca-actions-receipt.json", receipt);
     return { ...receipt, receiptPath };
-  }
-  if (command === "fetch-yfinance-actions") {
-    if (!allowNetwork) throw new Error("YFINANCE_NETWORK_REQUIRES_ALLOW_NETWORK");
-    const fileSymbols = await symbolsFileInput(flags);
-    const inlineSymbols = stringFlag(flags, "symbols")?.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean);
-    if (fileSymbols && inlineSymbols) throw new Error("BACKTEST_CLI_SYMBOLS_AND_SYMBOLS_FILE_MUTUALLY_EXCLUSIVE");
-    const symbols = fileSymbols ?? inlineSymbols ?? [];
-    if (symbols.length === 0) throw new Error("BACKTEST_CLI_FLAG_REQUIRED_SYMBOLS_OR_SYMBOLS_FILE");
-    const since = stringFlag(flags, "since", true) as string;
-    const until = stringFlag(flags, "until", true) as string;
-    let querySymbols: Readonly<Record<string, string>> | undefined;
-    let querySymbolMap: { readonly uri: string; readonly sha256: string } | undefined;
-    const mapPath = stringFlag(flags, "query-symbol-map");
-    if (mapPath) {
-      let mapValue: unknown;
-      const mapAbsolute = resolve(mapPath);
-      let mapBytes: Buffer;
-      try {
-        mapBytes = await readFile(mapAbsolute);
-        mapValue = JSON.parse(mapBytes.toString("utf8"));
-      } catch {
-        throw new Error("BACKTEST_CLI_YFINANCE_QUERY_SYMBOL_MAP_INVALID");
-      }
-      if (!mapValue || typeof mapValue !== "object" || Array.isArray(mapValue)
-        || Object.values(mapValue as Record<string, unknown>).some((item) => typeof item !== "string")) {
-        throw new Error("BACKTEST_CLI_YFINANCE_QUERY_SYMBOL_MAP_INVALID");
-      }
-      querySymbols = mapValue as Record<string, string>;
-      querySymbolMap = { uri: pathToFileURL(mapAbsolute).href, sha256: sha256Hex(mapBytes) };
-    }
-    const result = await fetchYfinanceCorporateActions({ symbols, since, until, querySymbols }, {
-      env: process.env,
-      interpreter: stringFlag(flags, "python"),
-      batchSize: numberFlag(flags, "batch-size", 50),
-      concurrency: numberFlag(flags, "concurrency", 2),
-    });
-    const actionsPath = resolve(stringFlag(flags, "actions-out") ?? (outputDir + "/yfinance-actions.json"));
-    await mkdir(dirname(actionsPath), { recursive: true, mode: 0o750 });
-    const stored = await writeFetchedYfinanceActions(actionsPath, result);
-    const receipt = {
-      artifactVersion: 1,
-      kind: "yfinance-corporate-actions-receipt",
-      status: "PASS",
-      evidenceClass: result.receipt.evidenceClass,
-      readOnly: true,
-      brokerWriteAttempted: false,
-      actionsPath: stored.path,
-      actionsSha256: stored.sha256,
-      receipt: result.receipt,
-      ...(querySymbolMap ? { querySymbolMap } : {}),
-      coverage: {
-        symbols: result.receipt.symbols,
-        querySymbols: result.receipt.querySymbols,
-        symbolResults: result.receipt.symbolResults,
-        since: result.receipt.since,
-        until: result.receipt.until,
-        batches: result.receipt.batches,
-      },
-      warnings: [
-        "YFINANCE_ACTIONS_ONLY_NO_INTRADAY_PRICE_FALLBACK",
-        "OSS_REMAINS_THE_MINUTE_BAR_SOURCE",
-        "YFINANCE_ACTION_DATES_ARE_PROVIDER_EVIDENCE_NOT_POINT_IN_TIME_CORPORATE_ACTION_PROOF",
-      ],
-    };
-    const receiptPath = await writeArtifact(outputDir, "yfinance-actions-receipt.json", receipt);
-    return { ...receipt, receiptPath };
-  }
-  if (command === "discover-universe") {
-    const result = await discoverCurrentUniverse({
-      universeManifestUri: stringFlag(flags, "universe-manifest-uri", true) as string,
-      archiveRootUri: stringFlag(flags, "archive-root-uri", true) as string,
-      startYear: numberFlag(flags, "start-year", 0),
-      endYear: numberFlag(flags, "end-year", 0),
-      feed: oneOf(flags, "feed", ["sip", "boats"] as const, "sip"),
-      session: oneOf(flags, "session", ["regular", "extended", "all"] as const, "regular"),
-      concurrency: numberFlag(flags, "concurrency", 8),
-      symbolResolution: await symbolResolutionInput(flags),
-    }, {
-      allowNetwork,
-      allowListDiscovery: boolFlag(flags, "allow-list-discovery"),
-    });
-    const discoveryPath = resolve(stringFlag(flags, "discovery-out") ?? (outputDir + "/frozen-universe-discovery.json"));
-    await atomicWriteJson(discoveryPath, result, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
-    const discoverySha256 = sha256Hex(await readFile(discoveryPath));
-    const artifactPath = await writeArtifact(outputDir, "frozen-universe-discovery-receipt.json", {
-      ...result,
-      discoveryPath,
-      discoverySha256,
-    });
-    return { ...result, discoveryPath, discoverySha256, artifactPath };
-  }
-  if (command === "materialize-universe-catalog") {
-    const discoveryPath = resolve(stringFlag(flags, "discovery", true) as string);
-    const discoveryBytes = await readFile(discoveryPath);
-    let value: unknown;
-    try {
-      value = JSON.parse(discoveryBytes.toString("utf8"));
-    } catch {
-      throw new Error("BACKTEST_UNIVERSE_DISCOVERY_JSON_INVALID");
-    }
-    const discovery = parseCurrentUniverseDiscovery(value);
-    const catalogPath = resolve(stringFlag(flags, "catalog-out") ?? (outputDir + "/frozen-universe-catalog.json"));
-    const actionsPath = resolve(stringFlag(flags, "actions-out") ?? (outputDir + "/frozen-universe-actions.json"));
-    const manifestPath = resolve(stringFlag(flags, "manifest-out") ?? (outputDir + "/frozen-universe-manifest.json"));
-    const result = await materializeCurrentUniverseCatalog({
-      discovery,
-      discoverySha256: sha256Hex(discoveryBytes),
-      actionReceipts: actionReceiptInputs(flags),
-      catalogPath,
-      actionsPath,
-      manifestPath,
-    });
-    const artifactPath = await writeArtifact(outputDir, "frozen-universe-materialization.json", result);
-    return { ...result, artifactPath };
   }
   throw new Error("BACKTEST_CLI_COMMAND_UNKNOWN_" + command);
 }

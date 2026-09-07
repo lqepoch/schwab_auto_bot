@@ -1,7 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { digestJson, isSha256 } from "./fingerprints.ts";
-import { symbolResolutionManifestSchema } from "./symbolResolution.ts";
 
 const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "DATE_MUST_BE_YYYY-MM-DD");
 const hash = z.string().regex(/^[a-f0-9]{64}$/, "SHA256_MUST_BE_LOWERCASE_HEX");
@@ -29,7 +28,6 @@ const universeSchema = z.object({
   fingerprint: hash,
   completeness: z.enum(["proxy", "current-constituents", "unknown"]),
   symbols: z.array(symbol).min(1),
-  symbolResolution: symbolResolutionManifestSchema.optional(),
 });
 
 const corporateActionsSchema = z.object({
