@@ -18,8 +18,10 @@ import {
 import { simulateLongOnlyCashEquity } from "./engine.ts";
 import {
   fetchAlpacaCorporateActions,
+  fetchAlpacaBars,
   type AlpacaCliRunner,
   type AlpacaActionQuery,
+  type AlpacaBarsQuery,
   type AlpacaFetchResult,
 } from "./alpaca.ts";
 import { readOssConfiguration, sourceProtocol } from "./objectStore.ts";
@@ -148,6 +150,7 @@ function classifyReadError(error: unknown): EvidenceStatus {
     || message === "BACKTEST_OSS_HEAD_FAILED"
     || message === "BACKTEST_OSS_GET_FAILED"
   ) return "BLOCKED";
+  if (message.startsWith("ALPACA_")) return "UNVERIFIED";
   return "FAIL";
 }
 
@@ -303,6 +306,125 @@ export async function runParity(
       errorCode: error instanceof Error ? error.message : "BACKTEST_PARITY_FAILED",
       networkAccessAttempted: options.allowNetwork === true
         && (manifestUsesOss(leftManifest) || manifestUsesOss(rightManifest)),
+    };
+  }
+}
+
+export async function runArchiveProviderParity(
+  manifestPath: string,
+  query: AlpacaBarsQuery,
+  options: {
+    allowNetwork?: boolean;
+    env?: NodeJS.ProcessEnv;
+    runner?: AlpacaCliRunner;
+    maxPages?: number;
+  } = {},
+): Promise<BacktestArtifact> {
+  if (!options.allowNetwork) throw new Error("ALPACA_NETWORK_REQUIRES_ALLOW_NETWORK");
+  const manifest = await loadManifest(manifestPath);
+  const warnings: string[] = [
+    "CURRENT_PROVIDER_RESPONSE_IS_NOT_POINT_IN_TIME_EVIDENCE",
+    "PARITY_SCOPE_IS_THE_DECLARED_RAW_SIP_ARCHIVE_ROW_SET",
+    "ARCHIVE_SESSION_LABELS_ARE_NOT_AN_INDEPENDENT_CALENDAR_PROOF",
+  ];
+  try {
+    if (manifest.adjustmentMode !== "raw") throw new Error("BACKTEST_PROVIDER_PARITY_REQUIRES_RAW_ARCHIVE");
+    if (manifest.sourceObject.feed !== "sip") throw new Error("BACKTEST_PROVIDER_PARITY_REQUIRES_SIP_ARCHIVE");
+    const [archive, provider] = await Promise.all([
+      readDatasetBars(manifestPath, manifest, {
+        allowNetwork: true,
+        env: options.env,
+        requiredSymbols: [query.symbol],
+      }),
+      fetchAlpacaBars(query, {
+        env: options.env,
+        runner: options.runner,
+        maxPages: options.maxPages,
+      }),
+    ]);
+    const start = provider.receipt.start;
+    const end = provider.receipt.end;
+    const archiveRows = archive.bars.filter((bar) => (
+      bar.symbol === provider.receipt.symbol
+      && bar.timestamp >= start
+      && bar.timestamp <= end
+    ));
+    if (archiveRows.length === 0) throw new Error("BACKTEST_PROVIDER_PARITY_ARCHIVE_RANGE_EMPTY");
+    const providerByKey = new Map(provider.bars.map((bar) => [barKey(bar), bar]));
+    const mismatches: Array<Record<string, unknown>> = [];
+    let mismatchCount = 0;
+    for (const archiveBar of archiveRows) {
+      const providerBar = providerByKey.get(barKey(archiveBar));
+      if (!providerBar) {
+        mismatchCount += 1;
+        if (mismatches.length < 100) mismatches.push({ key: barKey(archiveBar), reason: "missing-provider" });
+        continue;
+      }
+      if (
+        !compareNumber(archiveBar.open, providerBar.open)
+        || !compareNumber(archiveBar.high, providerBar.high)
+        || !compareNumber(archiveBar.low, providerBar.low)
+        || !compareNumber(archiveBar.close, providerBar.close)
+        || !compareNumber(archiveBar.volume, providerBar.volume)
+      ) {
+        mismatchCount += 1;
+        if (mismatches.length < 100) {
+          mismatches.push({
+            key: barKey(archiveBar),
+            reason: "value-different",
+            archive: {
+              open: archiveBar.open, high: archiveBar.high, low: archiveBar.low,
+              close: archiveBar.close, volume: archiveBar.volume,
+            },
+            provider: {
+              open: providerBar.open, high: providerBar.high, low: providerBar.low,
+              close: providerBar.close, volume: providerBar.volume,
+            },
+          });
+        }
+      }
+      providerByKey.delete(barKey(archiveBar));
+    }
+    // The provider's interval can include pre/post-market bars while an
+    // imported archive manifest deliberately selects only regular rows. They
+    // are reported, not treated as missing archive rows. A separate calendar
+    // receipt is needed before making a session-coverage claim.
+    const providerOutOfScopeRows = providerByKey.size;
+    return {
+      ...baseArtifact(
+        "backtest-provider-parity",
+        mismatchCount === 0 ? "PASS" : "UNVERIFIED",
+        "REAL_PROVIDER_READ_ONLY_PARITY",
+        warnings,
+      ),
+      manifestPath,
+      manifestFingerprint: manifestFingerprint(manifest),
+      sourceObjects: archive.sourceObjects,
+      archiveRange: {
+        symbol: provider.receipt.symbol,
+        start,
+        end,
+        rowCount: archiveRows.length,
+      },
+      providerReceipt: provider.receipt,
+      providerRowCount: provider.bars.length,
+      providerOutOfScopeRows,
+      mismatchCount,
+      mismatches,
+      networkAccessAttempted: true,
+    };
+  } catch (error) {
+    const status = classifyReadError(error);
+    return {
+      ...baseArtifact(
+        "backtest-provider-parity",
+        status,
+        status === "BLOCKED" ? "CONFIGURATION_OR_PROVIDER_BLOCKED" : "REAL_PROVIDER_READ_ONLY_PARITY",
+        warnings,
+      ),
+      manifestPath,
+      errorCode: error instanceof Error ? error.message : "BACKTEST_PROVIDER_PARITY_FAILED",
+      networkAccessAttempted: true,
     };
   }
 }

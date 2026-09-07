@@ -101,6 +101,8 @@
   "dependencies": {
     "ali-oss": "6.23.0",
     "dotenv": "^17.4.2",
+    "hyparquet": "1.30.0",
+    "hyparquet-compressors": "1.1.1",
     "open": "^11.0.1",
     "ws": "^8.21.0",
     "zod": "^4.1.9"
