@@ -310,7 +310,7 @@ export async function fetchAlpacaCorporateActions(
 ): Promise<AlpacaFetchResult> {
   const env = options.env ?? process.env;
   const normalizedQuery = normalizeQuery(query);
-  const maxPages = Math.min(10, Math.max(1, options.maxPages ?? 10));
+  const maxPages = Math.min(100_000, Math.max(1, options.maxPages ?? 10_000));
   const runner = options.runner ?? defaultRunner;
   const childEnv = cliEnvironment(env);
   const rows: CliCorporateActionRow[] = [];

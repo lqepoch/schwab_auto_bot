@@ -13,8 +13,9 @@ artifact；不会导入 `src/automation/`，不会调用 Schwab，也没有 brok
   `hyparquet-compressors@1.1.1`；它们在 Node 中解析 archive 内的压缩列，运行时
   不需要另起 Python/Arrow 服务。
 - OSS 适配器采用官方文档示例路线的 `ali-oss@6.23.0`，以
-  `authorizationV4: true` 创建客户端。适配器只暴露精确对象 `HEAD`/`GET`；
-  不提供 `LIST`、`PUT`、`DELETE`。
+  `authorizationV4: true` 创建客户端。正常 manifest/catalog reader 只暴露精确
+  对象 `HEAD`/`GET`；独立的 current-universe discovery adapter 才能在双确认后对
+  每个显式 `symbol/year/` 前缀发起 `listV2(delimiter="/")`，不提供 `PUT`/`DELETE`。
 - Alpaca 企业行动通过已安装的 Alpaca CLI 的
   `alpaca data corporate-actions` 读取，而不是绕过 CLI 的 HTTP 请求。CLI
   参数和响应以本机 `--help`/`--schema` 为准，结果必须保存为带查询指纹的
@@ -131,7 +132,7 @@ key 留在专用 market-data `.env`；两者都不会被提交，也不会写入
 `OSS_ENDPOINT_STYLE=bucket` 或现有的 `MARKET_DATA_S3_ENDPOINT_STYLE=bucket`。
 reader 会使用 OSS CNAME 模式，避免 SDK 再次拼接 bucket；未设置时也会按 hostname
 自动识别。服务 endpoint 则使用 `service`。这只影响传输地址，不能改变 manifest
-中的 bucket/key 身份，也不会给运行时增加 LIST/PUT/DELETE 权限。
+中的 bucket/key 身份，也不会给正常回测运行时增加 LIST/PUT/DELETE 权限。
 
 ```bash
 npm run backtest:preflight -- \
@@ -173,6 +174,49 @@ catalog reader 对 `run --symbol` 只读取该 symbol/date 相交的 shard，适
 成本和 corporate-actions receipt。`audit`/未指定 symbol 的 `parity` 会读取所有声明
 shard，artifact 会明确给出相应 warning。
 
+### 冻结当前成分与生成 catalog
+
+当前成分不是 S&P/Nasdaq/Russell 的自动全集。调用方必须先提供 OSS 中已经存在的、
+带 SHA-256 的 current snapshot manifest；discovery 只读取该 snapshot 和精确 archive
+manifest，并把每一个 `symbol/year` 的 prefix、delimiter、分页和 revision 结果写入
+冻结 JSON。`--allow-network` 与 `--allow-list-discovery` 缺一不可；缺失 revision、多个
+revision、alias 或意外对象都会得到 `UNVERIFIED`，不会选择 latest/current 或任一 revision。
+
+```bash
+npm run backtest:discover-universe -- \
+  --universe-manifest-uri oss://BUCKET/EXACT/SNAPSHOT-MANIFEST.json \
+  --archive-root-uri oss://BUCKET/EXACT/ARCHIVE-ROOT \
+  --start-year 2016 --end-year 2025 \
+  --allow-network --allow-list-discovery \
+  --backtest-env-file /path/to/oss.env \
+  --discovery-out /path/to/current-universe-discovery.json \
+  --output-dir .artifacts/backtest/current-universe-discovery
+```
+
+正常 `audit`/`run` 不会 LIST。只有人工审查 discovery JSON 为 `PASS` 后，才可离线
+materialize；它要求每个 action receipt 的文件 SHA-256 由命令行显式提供，并验证
+receipt 的 symbols、since/until、分页指纹和 action 文件 hash 覆盖 discovery 的每个
+symbol 与每个年份。可以把多个不重叠批次用逗号传入；缺 coverage、页数/查询指纹或重复/越界行动会
+fail-closed，不会生成 catalog 或 manifest：
+
+```bash
+npm run backtest:materialize-universe-catalog -- \
+  --discovery /path/to/current-universe-discovery.json \
+  --actions-receipt /path/to/batch-001/alpaca-actions-receipt.json,/path/to/batch-002/alpaca-actions-receipt.json \
+  --actions-receipt-sha256 RECEIPT_SHA256_1,RECEIPT_SHA256_2 \
+  --catalog-out /path/to/current-universe-catalog.json \
+  --actions-out /path/to/current-universe-actions.json \
+  --manifest-out /path/to/current-universe-manifest.json \
+  --output-dir .artifacts/backtest/current-universe-materialize
+```
+
+2599 个 symbol 不应塞进一个未经审查的超长 provider 命令。用 `--symbols-file` 每行
+一个、不改写代码的文件，按人工分批分别运行 `fetch-actions`，保留每批 receipt；再把
+所有 receipt/hash 传给上面的 materialize。`--symbols-file` 会拒绝小写、重复和别名
+代码；不要用脚本自动把 `BRK.B` 替换为 `BRK-B`。
+
+### 企业行动 receipt
+
 用已有 Alpaca market-data 凭证获取企业行动时，必须显式允许网络；CLI 会
 使用 `ALPACA_API_KEY`/`ALPACA_SECRET_KEY`（也兼容 `APCA_*`、
 `ALPACA_MARKET_DATA_*` 和现有 `ALPACA_PAPER_*` 环境变量），只执行只读
@@ -184,12 +228,12 @@ corporate-actions 查询。当多组变量同时存在时，显式 `ALPACA_*`/`A
 npm run backtest:fetch-actions -- \
   --symbols AAPL,MSFT --since 2016-01-01 --until 2016-12-31 \
   --backtest-env-file /home/ecs-user/github/stock_trading_bot/.env \
-  --allow-network --max-pages 10 \
+  --allow-network --max-pages 10000 \
   --actions-out /path/to/2016-alpaca-actions.json \
   --output-dir .artifacts/backtest/2016-actions
 ```
 
-该命令保存 action 文件 SHA-256 和 CLI 查询 receipt；不能把 fixture 或本地静态
+该命令保存 action 文件 SHA-256、coverage 和 CLI 查询 receipt；不能把 fixture 或本地静态
 检查升级为真实 provider 证据。实时获取到的 provider corporate-actions 只证明
 当前响应，不是 2016 当时的 point-in-time corporate-action 证据；必须把 receipt
 固定到 manifest 后再用于可复现 run。

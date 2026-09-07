@@ -496,7 +496,18 @@ export async function writeFetchedActions(
   outputPath: string,
   result: AlpacaFetchResult,
 ): Promise<{ path: string; sha256: string; receipt: string }> {
-  const payload = { schemaVersion: 1, provider: "alpaca", actions: result.actions };
+  const payload = {
+    schemaVersion: 1,
+    provider: "alpaca",
+    coverage: {
+      symbols: result.receipt.symbols,
+      since: result.receipt.since,
+      until: result.receipt.until,
+      pages: result.receipt.pages,
+      queryFingerprint: result.receipt.commandFingerprint,
+    },
+    actions: result.actions,
+  };
   await atomicWriteJson(outputPath, payload, { directoryMode: 0o750, fileMode: 0o640, pretty: true });
   const bytes = await readFile(outputPath);
   return {

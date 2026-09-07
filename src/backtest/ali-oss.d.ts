@@ -18,6 +18,13 @@ declare module "ali-oss" {
   interface AliOssClient {
     head(name: string, options?: Record<string, unknown>): Promise<AliOssHeadResult>;
     get(name: string, options?: Record<string, unknown>): Promise<AliOssGetResult>;
+    listV2(query?: Record<string, unknown>, options?: Record<string, unknown>): Promise<{
+      readonly res?: AliOssResponse;
+      readonly objects?: readonly Record<string, unknown>[];
+      readonly prefixes?: readonly string[];
+      readonly isTruncated?: boolean;
+      readonly nextContinuationToken?: string | null;
+    }>;
   }
 
   interface AliOssOptions {
