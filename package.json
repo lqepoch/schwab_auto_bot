@@ -110,7 +110,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.1",
-    "knip": "6.31.0",
+    "knip": "6.35.1",
     "typescript": "^7.0.2"
   }
 }
